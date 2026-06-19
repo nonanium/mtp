@@ -1,0 +1,19 @@
+[package]
+name = "mtp-codec"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+type-map = { path = "../type-map" }
+common = { path = "../common" }
+mtp-crypto = { path = "../crypto", optional = true }
+base64 = "*"
+byteorder = "*"
+rand = { version = "*", features = ["std", "std_rng"] }
+
+[features]
+default = []
+# Enables the Registry module and versioned codec wrapper
+registry = []
+# Enables EncryptedContainer support via mtp-crypto
+crypto = ["dep:mtp-crypto"]

@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "common",
+    "crypto",
+    "registry",
+    "type-map",
+    "codec",
+    "transport",
+    "host",
+    "client",
+]
+resolver = "3"
