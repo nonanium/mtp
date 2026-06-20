@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-type-map = { path = "../type-map" }
-common = { path = "../common" }
+mtp-type-map = { path = "../type-map" }
+mtp-common = { path = "../common" }
 mtp-crypto = { path = "../crypto", optional = true }
 base64 = "*"
 byteorder = "*"

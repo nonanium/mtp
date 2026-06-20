@@ -1,4 +1,4 @@
-use common::RegistryError;
+use mtp_common::RegistryError;
 use std::collections::HashMap;
 
 #[repr(transparent)]

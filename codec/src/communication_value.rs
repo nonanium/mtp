@@ -4,7 +4,7 @@ use std::io::{Cursor, Read};
 
 use crate::data_value::DataValue;
 use crate::rand_u32;
-use type_map::{CommTypeId, DataTypeId};
+use mtp_type_map::{CommTypeId, DataTypeId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunicationValue {
@@ -201,7 +201,7 @@ impl CommunicationValue {
 mod tests {
     use super::*;
     use crate::data_value::DataValue;
-    use type_map::{CommTypeId, DataTypeId};
+    use mtp_type_map::{CommTypeId, DataTypeId};
 
     fn roundtrip(cv: CommunicationValue) -> CommunicationValue {
         let bytes = cv.to_bytes();

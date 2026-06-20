@@ -8,9 +8,9 @@ pub use data_value::{DataKind, DataValue};
 
 pub use util::rand_u32;
 
-pub use type_map::{CommTypeId, DataTypeId, TypeMap, Version};
+pub use mtp_type_map::{CommTypeId, DataTypeId, TypeMap, Version};
 
-use common::CodecError;
+use mtp_common::CodecError;
 
 pub fn encode(_value: &DataValue, _typemap: &TypeMap) -> Result<Vec<u8>, CodecError> {
     // write header using typemap.data_id(), serialize value

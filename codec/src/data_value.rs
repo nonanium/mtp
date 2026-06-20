@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 
-use type_map::DataTypeId;
+use mtp_type_map::DataTypeId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataKind {
@@ -52,7 +52,7 @@ pub enum DataValue {
 impl DataValue {
     /*
      * Container format:
-     * [2 bytes u16 entry_count]       // number of key-value pairs
+     * [2 bytes u16 entry_count]       // length of the container
      * [1 byte kind]                   // DataValue kind marker
      * [if kind == BOOL_TRUE or BOOL_FALSE:]
      *     [1 byte key]                // DataTypes discriminant
@@ -64,11 +64,15 @@ impl DataValue {
      * Kind markers:
      * 0x01 => BoolTrue
      * 0x02 => BoolFalse
-     * 0x03 => Number (i64, 8 bytes big-endian)
-     * 0x04 => Str (UTF-8 bytes)
-     * 0x05 => Array (nested container format)
-     * 0x06 => Container (nested container format)
-     * 0x07 => Null
+     * 0x03 => Signed Number (i64, 8 bytes big-endian)
+     * 0x04 => Unsigned Number (u64, 8 bytes big-endian)
+     * 0x05 => Float (1 byte exponent, 3 bytes mantissa)
+     * 0x06 => Str (UTF-8 bytes)
+     * 0x07 => Bytes
+     * 0x08 => Array (nested container format)
+     * 0x09 => Container (nested container format)
+     * 0x0A => EncryptedContainer (nested container format)
+     * 0x0B => Null
      */
     const KIND_BOOL_TRUE: u8 = 0x01;
     const KIND_BOOL_FALSE: u8 = 0x02;

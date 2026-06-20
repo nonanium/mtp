@@ -1,6 +1,17 @@
 [package]
-name = "common"
+name = "mtp-common"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+thiserror = "2.0.18"
+wtransport = { version = "0.7.1", default-features = false, features = [
+    "aws-lc-rs",
+    "quinn",
+    "self-signed",
+] }
+rustls = { version = "0.23.40" }
+quinn = { version = "0.11.9", default-features = false, features = [
+    "rustls-aws-lc-rs",
+    "rustls",
+] }
