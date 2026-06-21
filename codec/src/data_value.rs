@@ -204,9 +204,11 @@ impl DataValue {
         }
     }
 
-    /// Decrypt an `EncryptedContainer` in-place, replacing it with the
-    /// deserialized `Container`. Returns `None` if decryption or
-    /// deserialization fails.
+    /*
+     * Decrypt an `EncryptedContainer` in-place, replacing it with the
+     * deserialized `Container`. Returns `None` if decryption or
+     * deserialization fails.
+     */
     #[cfg(feature = "crypto")]
     pub fn decrypt_into_container(
         &mut self,
@@ -225,8 +227,10 @@ impl DataValue {
         }
     }
 
-    /// Encrypt a `Container` into an `EncryptedContainer` in-place.
-    /// Returns `None` if the value is not a `Container` or encryption fails.
+    /*
+     * Encrypt a `Container` into an `EncryptedContainer` in-place.
+     * Returns `None` if the value is not a `Container` or encryption fails.
+     */
     #[cfg(feature = "crypto")]
     pub fn encrypt_container(
         &mut self,

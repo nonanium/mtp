@@ -1,0 +1,65 @@
+# The version a Client should use
+protocol_version: "2.0"
+
+# Note that markers 0 to 31 are reserved for default use, manually working with them is not recommended
+# Fixed CommunicationType markers are:
+#   Error: 0
+#   ErrorParsing: 1
+#   ErrorBadVersion: 2
+#   Disconnect: 3
+#   Redirect: 4
+#   Shutdown: 5
+#   BadRequest: 6
+#   Unauthorized: 7
+#   Forbidden: 8
+#   NotFound: 9
+#   TooManyRequests: 10
+#   InternalServerError: 11
+#   BadGateway: 12
+#   ServiceUnavailable: 13
+#   GatewayTimeout: 14
+#   Identification: 15
+#   IdentificationResponse: 16
+#   Register: 17
+#   RegisterResponse: 18
+#   Ping: 19
+#   Pong: 20
+#
+# Fixed Data Type markers are:
+#   Error: 0
+#   ErrorParsing: 1
+#   ErrorMessage: 2
+#   Version: 3
+#   Description: 4
+#   Timestamp: 5
+#   Id: 6
+#   Nonce: 7
+#   PublicKeys: 8
+#   Signature: 9
+#
+# If a Type can't be used it will be mapped to 0
+
+type_maps:
+  "0.0": # Protocol version 0.0
+    CommunicationTypes:
+    DataTypes:
+      ExampleType: 32
+  "1.0":
+    CommunicationTypes:
+    DataTypes:
+      # If a v0.0 client connects
+      # - the server can't use "AnotherType"
+      # - the server maps "ExampleType" to 32
+      AnotherType: 32
+      ExampleType: 33
+      SomeType: 34
+  "2.0":
+    CommunicationTypes:
+    DataTypes:
+      # If a v0.0 client connects
+      # - the server can't use "AnotherType"
+      # If a v1.0 client connects
+      # - the server can't use "ExampleType"
+      # - the server maps "SomeType" to 33, and "AnotherType" to 32
+      SomeType: 32
+      AnotherType: 33

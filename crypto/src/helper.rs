@@ -198,7 +198,6 @@ pub fn decrypt_multi(
     Err(CryptoError::DecryptionFailed)
 }
 
-/// Verify an Ed25519 signature against a public key.
 #[cfg(feature = "ed25519-dalek")]
 pub fn verify_ed25519_sig(
     public_key: &crate::keypair::SignaturePublicKey,
@@ -208,7 +207,6 @@ pub fn verify_ed25519_sig(
     crate::sign::verify_ed25519(public_key, msg, signature)
 }
 
-/// Verify an ML-DSA signature against a public key.
 #[cfg(feature = "ml-dsa")]
 pub fn verify_ml_dsa_sig(
     public_key: &crate::keypair::SignaturePqPublicKey,

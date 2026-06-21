@@ -4,12 +4,12 @@ use std::io::{Cursor, Read};
 
 use crate::data_value::DataValue;
 use crate::rand_u32;
-use mtp_type_map::{CommTypeId, DataTypeId};
+use mtp_type_map::{CommunicationTypeId, DataTypeId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunicationValue {
     id: u32,
-    comm_type: CommTypeId,
+    comm_type: CommunicationTypeId,
     sender: u64,
     receiver: u64,
     data: BTreeMap<DataTypeId, DataValue>,
@@ -17,7 +17,7 @@ pub struct CommunicationValue {
 
 #[allow(dead_code)]
 impl CommunicationValue {
-    pub fn new(comm_type: CommTypeId) -> Self {
+    pub fn new(comm_type: CommunicationTypeId) -> Self {
         Self {
             id: rand_u32(),
             comm_type,
@@ -54,11 +54,11 @@ impl CommunicationValue {
         self.receiver
     }
 
-    pub fn get_type(&self) -> CommTypeId {
+    pub fn get_type(&self) -> CommunicationTypeId {
         self.comm_type
     }
 
-    pub fn is_type(&self, p0: CommTypeId) -> bool {
+    pub fn is_type(&self, p0: CommunicationTypeId) -> bool {
         self.comm_type == p0
     }
 
@@ -149,7 +149,7 @@ impl CommunicationValue {
         let frame_end = 4 + total_len;
 
         let comm_type_num = cursor.read_u16::<BigEndian>().ok()?;
-        let comm_type = CommTypeId(comm_type_num);
+        let comm_type = CommunicationTypeId(comm_type_num);
 
         let flags = cursor.read_u8().ok()?;
         let has_sender = (flags & 0b0000_0001) != 0;
@@ -201,7 +201,7 @@ impl CommunicationValue {
 mod tests {
     use super::*;
     use crate::data_value::DataValue;
-    use mtp_type_map::{CommTypeId, DataTypeId};
+    use mtp_type_map::{CommunicationTypeId, DataTypeId};
 
     fn roundtrip(cv: CommunicationValue) -> CommunicationValue {
         let bytes = cv.to_bytes();
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn test_flags_and_order_without_optional() {
-        let cv = CommunicationValue::new(CommTypeId(1)).with_id(0);
+        let cv = CommunicationValue::new(CommunicationTypeId(1)).with_id(0);
         let bytes = cv.to_bytes();
 
         // [u32 len][u16 type][flags]...
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn test_flags_and_order_with_all_optional() {
-        let cv = CommunicationValue::new(CommTypeId(2))
+        let cv = CommunicationValue::new(CommunicationTypeId(2))
             .with_id(0xAABBCCDD)
             .with_sender(0x0000_1122_3344_5566)
             .with_receiver(0x0000_6677_8899_AABB);
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_complex() {
-        let cv = CommunicationValue::new(CommTypeId(3))
+        let cv = CommunicationValue::new(CommunicationTypeId(3))
             .with_id(1234)
             .with_sender(111)
             .with_receiver(222)
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(decoded.get_id(), 1234);
         assert_eq!(decoded.get_sender(), 111);
         assert_eq!(decoded.get_receiver(), 222);
-        assert_eq!(decoded.get_type(), CommTypeId(3));
+        assert_eq!(decoded.get_type(), CommunicationTypeId(3));
         assert_eq!(
             decoded.get_data(DataTypeId(1)),
             &DataValue::Str("alice".to_string())

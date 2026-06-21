@@ -351,10 +351,12 @@ impl Keyring {
         }
     }
 
-    /// Serialize the full keyring (all six keys) into a byte vector.
-    ///
-    /// Format: for each key, a 2-byte length prefix followed by the key bytes,
-    /// in the order: kem_pk, kem_sk, sig_pq_pk, sig_pq_sk, sig_cl_pk, sig_cl_sk.
+    /*
+     * Serialize the full keyring (all six keys) into a byte vector.
+     *
+     * Format: for each key, a 2-byte length prefix followed by the key bytes,
+     * in the order: kem_pk, kem_sk, sig_pq_pk, sig_pq_sk, sig_cl_pk, sig_cl_sk.
+     */
     pub fn to_bytes(&self) -> Vec<u8> {
         let fields: &[&[u8]] = &[
             self.kem_public_key.as_bytes(),

@@ -3,51 +3,46 @@
 **MTP** is a **m**odular **t**ransport **p**rotocol by Methanium.
 
 ## Crates
+- Codec
+- Transport
 - Common
 - Crypto
 - TypeMap
 - Registry
-- Codec
-- Transport
 - Host
 - Client
 
-## Registry & TypeMaps
-A TypeMap maps Communication-Types to a byte, and Data-Types to 2 bytes.
-A Communication- or Data-Type is a String to be used Plain in the code, while the Byte is transmitted.
-
-The Registries map a TypeMap to a specific version of MTP.
-
 ## Codec
+
 The Codec crate handles encoding and decoding of MTP packets using Communication Types and Data Types from the Registry.
-The Codec has these Data Values:
+
+**Data Values:**
 - Container
-- Encrypted Container
+- Encrypted Container (requires `crypto` feature)
 - Signed Integer
 - Unsigned Integer
-- Boolean 
+- Boolean
 - Signed Float
 - String
 - Array
 - Binary (List of Bytes)
 
+Encoding/decoding uses a `TypeMap` to resolve type names to wire IDs.
+
 The Codec uses the Crypto crate to encrypt and decrypt Encrypted Containers.
 
+---
+
 ## Transport
-The Transport crate wraps QUIC.
 
-## Host & Client
-The host creates a quic Server that listens for incoming connections.
-The host also manages the registry and versions to allow for backwards compatibility with clients.
-
-The client connects to a quic Server and uses a registry to communicate with the host.
-
-The Client may be Outdated while the Host is updated.
+The Transport crate wraps QUIC using `wtransport`. It provides `Sender`/`Receiver` for bidirectional message passing over QUIC streams.
 
 ## Common
-Common Handles Logging and Error Handling. Personal information reported to Common will be anonmized.
+
+Common handles logging and error handling. Personal information reported to Common will be anonymized.
 
 ## Crypto Stack
+
 | Crate            | Audited? | Notes                                            |
 | ---------------- | -------- | ------------------------------------------------ |
 | ml-dsa           | No       | NIST vectors pass; regression bug fixed Jan 2026 |

@@ -7,13 +7,12 @@ edition = "2024"
 mtp-type-map = { path = "../type-map" }
 mtp-common = { path = "../common" }
 mtp-crypto = { path = "../crypto", optional = true }
+registry = { path = "../registry", optional = true }
 base64 = "*"
 byteorder = "*"
 rand = { version = "*", features = ["std", "std_rng"] }
 
 [features]
 default = []
-# Enables the Registry module and versioned codec wrapper
-registry = []
-# Enables EncryptedContainer support via mtp-crypto
+registry = ["dep:registry"]
 crypto = ["dep:mtp-crypto"]
