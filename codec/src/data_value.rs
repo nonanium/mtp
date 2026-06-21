@@ -7,6 +7,9 @@ use std::io::Cursor;
 
 use mtp_type_map::DataTypeId;
 
+#[cfg(feature = "crypto")]
+use mtp_crypto::{AeadDecrypt, AeadEncrypt};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataKind {
     Bool,
@@ -44,7 +47,7 @@ pub enum DataValue {
     Container(Vec<(DataTypeId, DataValue)>),
 
     #[cfg(feature = "crypto")]
-    EncryptedContainer(Vec<(DataTypeId, DataValue)>),
+    EncryptedContainer(Vec<u8>),
 
     Null,
 }
@@ -52,26 +55,36 @@ pub enum DataValue {
 impl DataValue {
     /*
      * Container format:
-     * [2 bytes u16 entry_count]       // length of the container
+     * [2 bytes u16 entry_count]       // number of entries
      * [1 byte kind]                   // DataValue kind marker
      * [if kind == BOOL_TRUE or BOOL_FALSE:]
-     *     [1 byte key]                // DataTypes discriminant
+     *     [2 bytes u16 key]           // DataTypeId discriminant
      * [else:]
-     *     [2 bytes u16 payload_len]   // length of the value payload
-     *     [1 byte key]                // DataTypes discriminant
+     *     [4 bytes u32 payload_len]   // length of the value payload
+     *     [2 bytes u16 key]           // DataTypeId discriminant
      *     [payload_len bytes payload] // value data (interpreted based on kind)
+     *
+     * Array format (same as container but no keys):
+     * [2 bytes u16 entry_count]
+     * for each entry:
+     *   [1 byte kind]
+     *   [if kind == BOOL_TRUE or BOOL_FALSE:]
+     *       (no payload)
+     *   [else:]
+     *       [4 bytes u32 payload_len]
+     *       [payload_len bytes payload]
      *
      * Kind markers:
      * 0x01 => BoolTrue
      * 0x02 => BoolFalse
-     * 0x03 => Signed Number (i64, 8 bytes big-endian)
-     * 0x04 => Unsigned Number (u64, 8 bytes big-endian)
-     * 0x05 => Float (1 byte exponent, 3 bytes mantissa)
+     * 0x03 => Signed Number (i128, 16 bytes big-endian)
+     * 0x04 => Unsigned Number (u128, 16 bytes big-endian)
+     * 0x05 => Float (1 byte exponent, 4 bytes mantissa)
      * 0x06 => Str (UTF-8 bytes)
      * 0x07 => Bytes
-     * 0x08 => Array (nested container format)
-     * 0x09 => Container (nested container format)
-     * 0x0A => EncryptedContainer (nested container format)
+     * 0x08 => Array
+     * 0x09 => Container
+     * 0x0A => EncryptedContainer (4 bytes u32 len + encrypted bytes)
      * 0x0B => Null
      */
     const KIND_BOOL_TRUE: u8 = 0x01;
@@ -184,11 +197,47 @@ impl DataValue {
     }
 
     #[cfg(feature = "crypto")]
-    pub fn as_encrypted_container(&self) -> Option<Vec<(DataTypeId, DataValue)>> {
+    pub fn as_encrypted_container(&self) -> Option<Vec<u8>> {
         match self {
             DataValue::EncryptedContainer(c) => Some(c.clone()),
             _ => None,
         }
+    }
+
+    /// Decrypt an `EncryptedContainer` in-place, replacing it with the
+    /// deserialized `Container`. Returns `None` if decryption or
+    /// deserialization fails.
+    #[cfg(feature = "crypto")]
+    pub fn decrypt_into_container(
+        &mut self,
+        cipher: &impl AeadDecrypt,
+        aad: &[u8],
+    ) -> Option<()> {
+        let data = self.as_encrypted_container()?;
+        let plaintext = cipher.decrypt(&data, aad).ok()?;
+        let dv = DataValue::from_bytes(&plaintext)?;
+        match dv {
+            DataValue::Container(entries) => {
+                *self = DataValue::Container(entries);
+                Some(())
+            }
+            _ => None,
+        }
+    }
+
+    /// Encrypt a `Container` into an `EncryptedContainer` in-place.
+    /// Returns `None` if the value is not a `Container` or encryption fails.
+    #[cfg(feature = "crypto")]
+    pub fn encrypt_container(
+        &mut self,
+        cipher: &impl AeadEncrypt,
+        aad: &[u8],
+    ) -> Option<()> {
+        let entries = self.as_container()?;
+        let plaintext = DataValue::Container(entries).to_bytes();
+        let ct = cipher.encrypt(&plaintext, aad).ok()?;
+        *self = DataValue::EncryptedContainer(ct);
+        Some(())
     }
 
     pub fn as_map(&self) -> Option<BTreeMap<DataTypeId, DataValue>> {
@@ -258,8 +307,7 @@ impl DataValue {
         buf.push(kind);
 
         if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE {
-            let key = u8::try_from(key.0).unwrap_or(0);
-            buf.push(key);
+            let _ = buf.write_u16::<BigEndian>(key.0);
             return true;
         }
 
@@ -268,16 +316,10 @@ impl DataValue {
             return false;
         }
 
-        let len_u16 = match u16::try_from(payload.len()) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-
-        if buf.write_u16::<BigEndian>(len_u16).is_err() {
+        if buf.write_u32::<BigEndian>(payload.len() as u32).is_err() {
             return false;
         }
-        let key = u8::try_from(key.0).unwrap_or(0);
-        buf.push(key);
+        let _ = buf.write_u16::<BigEndian>(key.0);
         buf.extend_from_slice(&payload);
         true
     }
@@ -313,12 +355,7 @@ impl DataValue {
             return false;
         }
 
-        let len_u16 = match u16::try_from(payload.len()) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-
-        if buf.write_u16::<BigEndian>(len_u16).is_err() {
+        if buf.write_u32::<BigEndian>(payload.len() as u32).is_err() {
             return false;
         }
         buf.extend_from_slice(&payload);
@@ -368,9 +405,8 @@ impl DataValue {
                 Some(())
             }
             #[cfg(feature = "crypto")]
-            DataValue::EncryptedContainer(entries) => {
-                let bytes = Self::encode_container(entries);
-                buf.extend_from_slice(&bytes);
+            DataValue::EncryptedContainer(data) => {
+                buf.extend_from_slice(data);
                 Some(())
             }
 
@@ -418,7 +454,7 @@ impl DataValue {
                 continue;
             }
 
-            let len = cursor.read_u16::<BigEndian>().ok()? as usize;
+            let len = cursor.read_u32::<BigEndian>().ok()? as usize;
             let key = DataTypeId(cursor.read_u16::<BigEndian>().ok()?);
 
             let start = cursor.position() as usize;
@@ -457,7 +493,7 @@ impl DataValue {
                 continue;
             }
 
-            let len = cursor.read_u16::<BigEndian>().ok()? as usize;
+            let len = cursor.read_u32::<BigEndian>().ok()? as usize;
             let start = cursor.position() as usize;
             let end = start.checked_add(len)?;
             if end > cursor.get_ref().len() {
@@ -510,6 +546,17 @@ impl DataValue {
                 cursor.set_position(end as u64);
                 Some(DataValue::Str(s))
             }
+            Self::KIND_BYTES => {
+                let len = payload_len?;
+                let start = cursor.position() as usize;
+                let end = start.checked_add(len)?;
+                if end > cursor.get_ref().len() {
+                    return None;
+                }
+                let b = cursor.get_ref()[start..end].to_vec();
+                cursor.set_position(end as u64);
+                Some(DataValue::Bytes(b))
+            }
             Self::KIND_ARRAY => {
                 let start = cursor.position() as usize;
                 let len = payload_len?;
@@ -542,25 +589,19 @@ impl DataValue {
             }
             #[cfg(feature = "crypto")]
             Self::KIND_ENCRYPTED_CONTAINER => {
-                let start = cursor.position() as usize;
                 let len = payload_len?;
+                let start = cursor.position() as usize;
                 let end = start.checked_add(len)?;
                 if end > cursor.get_ref().len() {
                     return None;
                 }
-                let mut inner = Cursor::new(&cursor.get_ref()[start..end]);
-                let c = Self::try_read_container(&mut inner)?;
-                if inner.position() as usize != len {
-                    return None;
-                }
+                let data = cursor.get_ref()[start..end].to_vec();
                 cursor.set_position(end as u64);
-                if let DataValue::Container(entries) = c {
-                    Some(DataValue::EncryptedContainer(entries))
-                } else {
-                    None
-                }
+                Some(DataValue::EncryptedContainer(data))
             }
             Self::KIND_NULL => Some(DataValue::Null),
+            #[cfg(not(feature = "crypto"))]
+            0x0A => None,
             _ => None,
         }
     }
@@ -660,7 +701,7 @@ impl Hash for DataValue {
                 c.hash(state);
             }
             Null => {
-                6u8.hash(state);
+                7u8.hash(state);
             }
         }
     }

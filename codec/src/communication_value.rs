@@ -80,7 +80,7 @@ impl CommunicationValue {
     /*
      * Frame format (strict new format):
      * [4 bytes u32 total_length] // number of bytes after this field
-     * [1 byte communication_type]
+     * [2 bytes u16 communication_type]
      * [1 byte flags]
      * [optional 4 bytes id]      // if flags bit2 set
      * [optional 6 bytes sender]  // if flags bit0 set
@@ -110,7 +110,7 @@ impl CommunicationValue {
             flags |= 0b0000_0100;
         }
 
-        payload.push(self.comm_type.0);
+        let _ = payload.write_u16::<BigEndian>(self.comm_type.0);
         payload.push(flags);
 
         if has_id {
@@ -148,7 +148,7 @@ impl CommunicationValue {
 
         let frame_end = 4 + total_len;
 
-        let comm_type_num = cursor.read_u8().ok()?;
+        let comm_type_num = cursor.read_u16::<BigEndian>().ok()?;
         let comm_type = CommTypeId(comm_type_num);
 
         let flags = cursor.read_u8().ok()?;
@@ -216,13 +216,13 @@ mod tests {
         let cv = CommunicationValue::new(CommTypeId(1)).with_id(0);
         let bytes = cv.to_bytes();
 
-        // [u32 len][type][flags]...
-        assert!(bytes.len() >= 6);
+        // [u32 len][u16 type][flags]...
+        assert!(bytes.len() >= 7);
         let mut c = Cursor::new(bytes.as_slice());
         let total_len = c.read_u32::<BigEndian>().expect("read len");
         assert_eq!(total_len as usize + 4, bytes.len());
 
-        let typ = c.read_u8().expect("read type");
+        let typ = c.read_u16::<BigEndian>().expect("read type");
         assert_eq!(typ, 1);
 
         let flags = c.read_u8().expect("read flags");
@@ -242,7 +242,7 @@ mod tests {
         let total_len = c.read_u32::<BigEndian>().expect("len");
         assert_eq!(total_len as usize + 4, bytes.len());
 
-        let typ = c.read_u8().expect("type");
+        let typ = c.read_u16::<BigEndian>().expect("type");
         assert_eq!(typ, 2);
 
         let flags = c.read_u8().expect("flags");

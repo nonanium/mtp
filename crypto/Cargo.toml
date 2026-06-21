@@ -6,16 +6,21 @@ edition = "2024"
 [dependencies]
 chacha20poly1305 = { version = "0.10", optional = true }
 aes-gcm = { version = "0.10", optional = true }
-ed25519-dalek = { version = "2.1", optional = true, features = ["pkcs8", "pem"] }
-hkdf = { version = "0.12", optional = true }
-sha2 = { version = "0.10", optional = true }
-zeroize = { version = "1.7", features = ["derive"] }
+ed25519-dalek = { version = "2.2", optional = true, features = [
+    "pkcs8",
+    "pem",
+] }
+hkdf = { version = "0.13", optional = true }
+sha2 = { version = "0.11", optional = true }
+zeroize = { version = "1.9", features = ["derive"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-getrandom = "0.2"
+getrandom = "0.4.3"
 mlkem-tls = { version = "0.2", optional = true }
-ml-dsa = { version = "0.0.4", optional = true }
+ml-dsa = { version = "0.1.1", optional = true }
+serde = { version = "1", optional = true, features = ["derive"] }
 
 [features]
 default = ["chacha20poly1305", "ed25519-dalek", "hkdf", "sha2"]
 full = ["chacha20poly1305", "aes-gcm", "ed25519-dalek", "hkdf", "sha2"]
 pqc = ["mlkem-tls", "ml-dsa"]
+serde = ["dep:serde"]

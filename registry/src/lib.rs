@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CommTypeId(pub u8);
+pub struct CommTypeId(pub u16);
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -15,7 +15,7 @@ pub struct DataTypeId(pub u16);
  * across all versions for version negotiation & security.
  */
 
-pub const INTERNAL_COMM_RESERVED: std::ops::Range<u8> = 0..16;
+pub const INTERNAL_COMM_RESERVED: std::ops::Range<u16> = 0..16;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum InternalCommType {
@@ -27,7 +27,7 @@ pub enum InternalCommType {
 
 impl InternalCommType {
     pub fn as_id(self) -> CommTypeId {
-        CommTypeId(self as u8)
+        CommTypeId(self as u16)
     }
 }
 
@@ -37,15 +37,15 @@ pub struct Version(pub u16, pub u16, pub u16);
 
 pub struct Registry {
     pub version: Version,
-    comm_name_to_id: HashMap<String, u8>,
-    comm_id_to_name: HashMap<u8, String>,
+    comm_name_to_id: HashMap<String, u16>,
+    comm_id_to_name: HashMap<u16, String>,
     data_name_to_id: HashMap<String, u16>,
     data_id_to_name: HashMap<u16, String>,
 }
 
 pub struct RegistryConfig {
     pub version: Version,
-    pub communication_types: HashMap<String, u8>,
+    pub communication_types: HashMap<String, u16>,
     pub data_types: HashMap<String, u16>,
 }
 

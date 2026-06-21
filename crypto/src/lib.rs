@@ -14,11 +14,14 @@ pub mod sign;
 #[cfg(feature = "mlkem-tls")]
 pub mod kem;
 
+pub mod helper;
+
 pub use aead::{AeadCipher, AeadDecrypt, AeadEncrypt};
 pub use error::CryptoError;
 pub use keypair::{
     EncryptionPrivateKey, EncryptionPublicKey, KemPrivateKey, KemPublicKey, KeyGroup, Keyring,
-    SignaturePqPrivateKey, SignaturePqPublicKey, SignaturePrivateKey, SignaturePublicKey,
+    PublicKeyBundle, SignaturePqPrivateKey, SignaturePqPublicKey, SignaturePrivateKey,
+    SignaturePublicKey,
 };
 
 #[cfg(feature = "chacha20poly1305")]
@@ -44,3 +47,15 @@ pub use kdf::{derive_encryption_key, hkdf_expand, hkdf_extract};
 
 #[cfg(feature = "mlkem-tls")]
 pub use kem::HybridKem;
+
+#[cfg(all(feature = "mlkem-tls", feature = "chacha20poly1305", feature = "hkdf"))]
+pub use helper::{decrypt_multi, encrypt_multi, MultiEncryptedMessage, RecipientEntry};
+
+#[cfg(feature = "ed25519-dalek")]
+pub use helper::verify_ed25519_sig;
+
+#[cfg(feature = "ml-dsa")]
+pub use helper::verify_ml_dsa_sig;
+
+#[cfg(all(feature = "ed25519-dalek", feature = "ml-dsa"))]
+pub use helper::verify_dual_sig;
