@@ -109,7 +109,8 @@ mod tests {
 
     #[test]
     fn version_extraction() {
-        let msg = CommunicationValue::new(mtp_codec::CommunicationTypeId(15))
+        let tm = mtp_codec::TypeMap::latest();
+        let msg = CommunicationValue::from_comm(mtp_codec::CommunicationType::Identification, &tm)
             .add_data(DataTypeId(3), DataValue::Str("2.0".to_string()));
         let version = extract_version(&msg);
         assert_eq!(version, Some(Version(2, 0)));
@@ -117,13 +118,15 @@ mod tests {
 
     #[test]
     fn version_extraction_returns_none_for_missing() {
-        let msg = CommunicationValue::new(mtp_codec::CommunicationTypeId(15));
+        let tm = mtp_codec::TypeMap::latest();
+        let msg = CommunicationValue::from_comm(mtp_codec::CommunicationType::Identification, &tm);
         assert!(extract_version(&msg).is_none());
     }
 
     #[test]
     fn version_extraction_bad_format() {
-        let msg = CommunicationValue::new(mtp_codec::CommunicationTypeId(15))
+        let tm = mtp_codec::TypeMap::latest();
+        let msg = CommunicationValue::from_comm(mtp_codec::CommunicationType::Identification, &tm)
             .add_data(DataTypeId(3), DataValue::UnsignedNumber(42));
         assert!(extract_version(&msg).is_none());
     }

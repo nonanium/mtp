@@ -2,6 +2,7 @@ use base64::Engine;
 use base64::engine::general_purpose;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 
@@ -631,6 +632,44 @@ impl DataValue {
             #[cfg(feature = "crypto")]
             DataValue::EncryptedContainer(_) => Self::KIND_ENCRYPTED_CONTAINER,
             DataValue::Null => Self::KIND_NULL,
+        }
+    }
+}
+
+impl fmt::Display for DataValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataValue::BoolTrue => write!(f, "true"),
+            DataValue::BoolFalse => write!(f, "false"),
+            DataValue::Bool(v) => write!(f, "{}", v),
+            DataValue::SignedNumber(n) => write!(f, "{}", n),
+            DataValue::UnsignedNumber(n) => write!(f, "{}", n),
+            DataValue::Float(exp, mant) => write!(f, "{}e{}", mant, exp),
+            DataValue::Str(s) => write!(f, "\"{}\"", s),
+            DataValue::Container(entries) => {
+                write!(f, "{{")?;
+                for (i, (key, value)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", key.0, value)?;
+                }
+                write!(f, "}}")
+            }
+            DataValue::Array(arr) => {
+                write!(f, "[")?;
+                for (i, value) in arr.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", value)?;
+                }
+                write!(f, "]")
+            }
+            DataValue::Bytes(_) => write!(f, "(Binary)"),
+            #[cfg(feature = "crypto")]
+            DataValue::EncryptedContainer(_) => write!(f, "(Secure)"),
+            DataValue::Null => write!(f, "null"),
         }
     }
 }

@@ -14,5 +14,5 @@ rand = { version = "*", features = ["std", "std_rng"] }
 
 [features]
 default = []
-registry = ["dep:registry"]
+registry = ["dep:registry", "mtp-type-map/multi-version"]
 crypto = ["dep:mtp-crypto"]

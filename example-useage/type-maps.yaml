@@ -1,0 +1,14 @@
+protocol_version: "1.0"
+
+type_maps:
+  "0.0":
+    CommunicationTypes:
+    DataTypes:
+  "1.0":
+    CommunicationTypes:
+    DataTypes:
+      Data: 32
+  "2.0":
+    CommunicationTypes:
+    DataTypes:
+      Data: 34

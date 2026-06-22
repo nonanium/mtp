@@ -24,134 +24,45 @@ struct ReservedEntry {
 }
 
 const RESERVED_COMM_TYPES: &[ReservedEntry] = &[
-    ReservedEntry {
-        name: "Error",
-        id: 0,
-    },
-    ReservedEntry {
-        name: "ErrorParsing",
-        id: 1,
-    },
-    ReservedEntry {
-        name: "ErrorBadVersion",
-        id: 2,
-    },
-    ReservedEntry {
-        name: "Disconnect",
-        id: 3,
-    },
-    ReservedEntry {
-        name: "Redirect",
-        id: 4,
-    },
-    ReservedEntry {
-        name: "Shutdown",
-        id: 5,
-    },
-    ReservedEntry {
-        name: "BadRequest",
-        id: 6,
-    },
-    ReservedEntry {
-        name: "Unauthorized",
-        id: 7,
-    },
-    ReservedEntry {
-        name: "Forbidden",
-        id: 8,
-    },
-    ReservedEntry {
-        name: "NotFound",
-        id: 9,
-    },
-    ReservedEntry {
-        name: "TooManyRequests",
-        id: 10,
-    },
-    ReservedEntry {
-        name: "InternalServerError",
-        id: 11,
-    },
-    ReservedEntry {
-        name: "BadGateway",
-        id: 12,
-    },
-    ReservedEntry {
-        name: "ServiceUnavailable",
-        id: 13,
-    },
-    ReservedEntry {
-        name: "GatewayTimeout",
-        id: 14,
-    },
-    ReservedEntry {
-        name: "Identification",
-        id: 15,
-    },
-    ReservedEntry {
-        name: "IdentificationResponse",
-        id: 16,
-    },
-    ReservedEntry {
-        name: "Register",
-        id: 17,
-    },
-    ReservedEntry {
-        name: "RegisterResponse",
-        id: 18,
-    },
-    ReservedEntry {
-        name: "Ping",
-        id: 19,
-    },
-    ReservedEntry {
-        name: "Pong",
-        id: 20,
-    },
+    ReservedEntry { name: "Error", id: 0 },
+    ReservedEntry { name: "ErrorParsing", id: 1 },
+    ReservedEntry { name: "ErrorBadVersion", id: 2 },
+    ReservedEntry { name: "Disconnect", id: 3 },
+    ReservedEntry { name: "Redirect", id: 4 },
+    ReservedEntry { name: "Shutdown", id: 5 },
+    ReservedEntry { name: "BadRequest", id: 6 },
+    ReservedEntry { name: "Unauthorized", id: 7 },
+    ReservedEntry { name: "Forbidden", id: 8 },
+    ReservedEntry { name: "NotFound", id: 9 },
+    ReservedEntry { name: "TooManyRequests", id: 10 },
+    ReservedEntry { name: "InternalServerError", id: 11 },
+    ReservedEntry { name: "BadGateway", id: 12 },
+    ReservedEntry { name: "ServiceUnavailable", id: 13 },
+    ReservedEntry { name: "GatewayTimeout", id: 14 },
+    ReservedEntry { name: "Identification", id: 15 },
+    ReservedEntry { name: "IdentificationResponse", id: 16 },
+    ReservedEntry { name: "Register", id: 17 },
+    ReservedEntry { name: "RegisterResponse", id: 18 },
+    ReservedEntry { name: "Ping", id: 19 },
+    ReservedEntry { name: "Pong", id: 20 },
 ];
 
 const RESERVED_DATA_TYPES: &[ReservedEntry] = &[
-    ReservedEntry {
-        name: "Error",
-        id: 0,
-    },
-    ReservedEntry {
-        name: "ErrorParsing",
-        id: 1,
-    },
-    ReservedEntry {
-        name: "ErrorMessage",
-        id: 2,
-    },
-    ReservedEntry {
-        name: "Version",
-        id: 3,
-    },
-    ReservedEntry {
-        name: "Description",
-        id: 4,
-    },
-    ReservedEntry {
-        name: "Timestamp",
-        id: 5,
-    },
+    ReservedEntry { name: "Error", id: 0 },
+    ReservedEntry { name: "ErrorParsing", id: 1 },
+    ReservedEntry { name: "ErrorMessage", id: 2 },
+    ReservedEntry { name: "Version", id: 3 },
+    ReservedEntry { name: "Description", id: 4 },
+    ReservedEntry { name: "Timestamp", id: 5 },
     ReservedEntry { name: "Id", id: 6 },
-    ReservedEntry {
-        name: "Nonce",
-        id: 7,
-    },
-    ReservedEntry {
-        name: "PublicKeys",
-        id: 8,
-    },
-    ReservedEntry {
-        name: "Signature",
-        id: 9,
-    },
+    ReservedEntry { name: "Nonce", id: 7 },
+    ReservedEntry { name: "PublicKeys", id: 8 },
+    ReservedEntry { name: "Signature", id: 9 },
 ];
 
 fn main() {
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let multi_version = std::env::var("CARGO_FEATURE_MULTI_VERSION").is_ok();
 
     let config = match std::env::var("MTP_TYPE_MAPS") {
         Ok(config_path) => {
@@ -170,7 +81,7 @@ fn main() {
         }
     };
 
-    let code = generate(&config);
+    let code = generate(&config, multi_version);
     std::fs::write(out.join("types.rs"), code).unwrap();
 }
 
@@ -193,7 +104,7 @@ fn sorted_versions(config: &Config) -> Vec<(String, u16, u16)> {
     versions
 }
 
-fn generate(config: &Config) -> String {
+fn generate(config: &Config, multi_version: bool) -> String {
     let mut out = String::new();
     writeln!(
         out,
@@ -202,27 +113,48 @@ fn generate(config: &Config) -> String {
     .unwrap();
     writeln!(out).unwrap();
 
-    let mut all_comm_names: BTreeSet<&str> = BTreeSet::new();
-    let mut all_data_names: BTreeSet<&str> = BTreeSet::new();
-
-    for (_version_key, tm) in &config.type_maps {
-        for name in tm.communication_types.keys() {
-            all_comm_names.insert(name.as_str());
+    let (all_comm_names, all_data_names, sorted) = if multi_version {
+        let mut all_comm_names: BTreeSet<&str> = BTreeSet::new();
+        let mut all_data_names: BTreeSet<&str> = BTreeSet::new();
+        for (_version_key, tm) in &config.type_maps {
+            for name in tm.communication_types.keys() {
+                all_comm_names.insert(name.as_str());
+            }
+            for name in tm.data_types.keys() {
+                all_data_names.insert(name.as_str());
+            }
         }
-        for name in tm.data_types.keys() {
-            all_data_names.insert(name.as_str());
+        let sorted = sorted_versions(config);
+        (all_comm_names, all_data_names, sorted)
+    } else {
+        let mut all_comm_names: BTreeSet<&str> = BTreeSet::new();
+        let mut all_data_names: BTreeSet<&str> = BTreeSet::new();
+        if let Some(tm) = config.type_maps.get(&config.protocol_version) {
+            for name in tm.communication_types.keys() {
+                all_comm_names.insert(name.as_str());
+            }
+            for name in tm.data_types.keys() {
+                all_data_names.insert(name.as_str());
+            }
         }
-    }
-
-    let sorted = sorted_versions(config);
+        (all_comm_names, all_data_names, vec![])
+    };
 
     generate_protocol_version(&mut out, config);
     generate_comm_type_enum(&mut out, &all_comm_names);
     generate_data_type_enum(&mut out, &all_data_names);
-    generate_type_map_constructors(&mut out, &sorted);
-    generate_lookup_methods(&mut out, config, &sorted);
-    generate_builtin_type_maps(&mut out, &sorted);
-    generate_enum_conversion_methods(&mut out, &sorted);
+    generate_latest_method(&mut out, config);
+
+    if multi_version {
+        generate_versioned_constructors(&mut out, &sorted);
+        generate_builtin_type_maps(&mut out, &sorted);
+        generate_lookup_methods(&mut out, config, &sorted);
+    } else {
+        generate_single_version_lookup(&mut out, config);
+    }
+
+    generate_enum_conversion_methods(&mut out);
+    generate_reverse_lookups(&mut out, config, &sorted, multi_version);
 
     out
 }
@@ -246,6 +178,32 @@ fn generate_protocol_version(out: &mut String, config: &Config) {
         major, minor
     )
     .unwrap();
+    writeln!(out).unwrap();
+}
+
+fn generate_latest_method(out: &mut String, config: &Config) {
+    let (major, minor) = if config.protocol_version.is_empty() {
+        (0, 0)
+    } else {
+        let parts: Vec<&str> = config.protocol_version.split('.').collect();
+        if parts.len() == 2 {
+            let maj = parts[0].parse::<u16>().unwrap_or(0);
+            let min = parts[1].parse::<u16>().unwrap_or(0);
+            (maj, min)
+        } else {
+            (0, 0)
+        }
+    };
+    writeln!(out, "impl TypeMap {{").unwrap();
+    writeln!(out, "    pub fn latest() -> Self {{").unwrap();
+    writeln!(
+        out,
+        "        Self {{ version: Version({}, {}) }}",
+        major, minor
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 }
 
@@ -357,7 +315,7 @@ fn generate_data_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
     writeln!(out).unwrap();
 }
 
-fn generate_type_map_constructors(out: &mut String, sorted_versions: &[(String, u16, u16)]) {
+fn generate_versioned_constructors(out: &mut String, sorted_versions: &[(String, u16, u16)]) {
     for (version_key, _major, _minor) in sorted_versions {
         let version_ident = version_key.replace('.', "_");
 
@@ -377,22 +335,6 @@ fn generate_type_map_constructors(out: &mut String, sorted_versions: &[(String, 
         writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();
     }
-
-    let (latest_major, latest_minor) = match sorted_versions.last() {
-        Some((_key, major, minor)) => (*major, *minor),
-        None => (0, 0),
-    };
-    writeln!(out, "impl TypeMap {{").unwrap();
-    writeln!(out, "    pub fn latest() -> Self {{").unwrap();
-    writeln!(
-        out,
-        "        Self {{ version: Version({}, {}) }}",
-        latest_major, latest_minor
-    )
-    .unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out, "}}").unwrap();
-    writeln!(out).unwrap();
 }
 
 fn generate_lookup_methods(
@@ -400,7 +342,6 @@ fn generate_lookup_methods(
     config: &Config,
     sorted_versions: &[(String, u16, u16)],
 ) {
-    // comm_id_enum
     writeln!(out, "#[allow(unreachable_patterns, unused_variables)]").unwrap();
     writeln!(out, "impl TypeMap {{").unwrap();
     writeln!(
@@ -441,7 +382,6 @@ fn generate_lookup_methods(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // data_id_enum
     writeln!(out, "    #[allow(unused_variables)]").unwrap();
     writeln!(
         out,
@@ -478,6 +418,81 @@ fn generate_lookup_methods(
     writeln!(out).unwrap();
 }
 
+fn generate_single_version_lookup(out: &mut String, config: &Config) {
+    let tm_cfg = config.type_maps.get(&config.protocol_version);
+
+    writeln!(out, "#[allow(unreachable_patterns, unused_variables)]").unwrap();
+    writeln!(out, "impl TypeMap {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn comm_id_enum(&self, ct: CommunicationType) -> Option<u16> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self.version {{").unwrap();
+    writeln!(
+        out,
+        "            PROTOCOL_VERSION => match ct {{"
+    )
+    .unwrap();
+    for entry in RESERVED_COMM_TYPES {
+        writeln!(
+            out,
+            "                CommunicationType::{} => Some({}),",
+            entry.name, entry.id
+        )
+        .unwrap();
+    }
+    if let Some(tm_cfg) = tm_cfg {
+        for (name, id) in &tm_cfg.communication_types {
+            writeln!(
+                out,
+                "                CommunicationType::{} => Some({}),",
+                name, id
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "                _ => None,").unwrap();
+    writeln!(out, "            }},").unwrap();
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "    #[allow(unused_variables)]").unwrap();
+    writeln!(
+        out,
+        "    pub fn data_id_enum(&self, dt: DataType) -> Option<u16> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self.version {{").unwrap();
+    writeln!(
+        out,
+        "            PROTOCOL_VERSION => match dt {{"
+    )
+    .unwrap();
+    for entry in RESERVED_DATA_TYPES {
+        writeln!(
+            out,
+            "                DataType::{} => Some({}),",
+            entry.name, entry.id
+        )
+        .unwrap();
+    }
+    if let Some(tm_cfg) = tm_cfg {
+        for (name, id) in &tm_cfg.data_types {
+            writeln!(out, "                DataType::{} => Some({}),", name, id).unwrap();
+        }
+    }
+    writeln!(out, "                _ => None,").unwrap();
+    writeln!(out, "            }},").unwrap();
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
 fn generate_builtin_type_maps(out: &mut String, sorted_versions: &[(String, u16, u16)]) {
     writeln!(out, "pub fn builtin_type_maps() -> Vec<TypeMap> {{").unwrap();
     writeln!(out, "    vec![").unwrap();
@@ -490,7 +505,70 @@ fn generate_builtin_type_maps(out: &mut String, sorted_versions: &[(String, u16,
     writeln!(out).unwrap();
 }
 
-fn generate_enum_conversion_methods(out: &mut String, _sorted_versions: &[(String, u16, u16)]) {
+fn generate_reverse_lookups(
+    out: &mut String,
+    config: &Config,
+    sorted_versions: &[(String, u16, u16)],
+    multi_version: bool,
+) {
+    let mut id_to_comm: BTreeMap<u16, String> = BTreeMap::new();
+    for entry in RESERVED_COMM_TYPES {
+        id_to_comm.insert(entry.id, entry.name.to_string());
+    }
+    if multi_version {
+        for (version_key, _major, _minor) in sorted_versions {
+            if let Some(tm_cfg) = config.type_maps.get(version_key) {
+                for (name, id) in &tm_cfg.communication_types {
+                    id_to_comm.insert(*id, name.clone());
+                }
+            }
+        }
+    } else if let Some(tm_cfg) = config.type_maps.get(&config.protocol_version) {
+        for (name, id) in &tm_cfg.communication_types {
+            id_to_comm.insert(*id, name.clone());
+        }
+    }
+
+    writeln!(out, "pub fn communication_type_name(id: u16) -> Option<&'static str> {{").unwrap();
+    writeln!(out, "    match id {{").unwrap();
+    for (id, name) in &id_to_comm {
+        writeln!(out, "        {} => Some(\"{}\"),", id, name).unwrap();
+    }
+    writeln!(out, "        _ => None,").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    let mut id_to_data: BTreeMap<u16, String> = BTreeMap::new();
+    for entry in RESERVED_DATA_TYPES {
+        id_to_data.insert(entry.id, entry.name.to_string());
+    }
+    if multi_version {
+        for (version_key, _major, _minor) in sorted_versions {
+            if let Some(tm_cfg) = config.type_maps.get(version_key) {
+                for (name, id) in &tm_cfg.data_types {
+                    id_to_data.insert(*id, name.clone());
+                }
+            }
+        }
+    } else if let Some(tm_cfg) = config.type_maps.get(&config.protocol_version) {
+        for (name, id) in &tm_cfg.data_types {
+            id_to_data.insert(*id, name.clone());
+        }
+    }
+
+    writeln!(out, "pub fn data_type_name(id: u16) -> Option<&'static str> {{").unwrap();
+    writeln!(out, "    match id {{").unwrap();
+    for (id, name) in &id_to_data {
+        writeln!(out, "        {} => Some(\"{}\"),", id, name).unwrap();
+    }
+    writeln!(out, "        _ => None,").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn generate_enum_conversion_methods(out: &mut String) {
     writeln!(out, "impl CommunicationType {{").unwrap();
     writeln!(out, "    pub fn to_id(self, tm: &TypeMap) -> CommunicationTypeId {{").unwrap();
     writeln!(

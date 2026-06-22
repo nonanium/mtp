@@ -1,10 +1,14 @@
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io::{Cursor, Read};
 
 use crate::data_value::DataValue;
 use crate::rand_u32;
-use mtp_type_map::{CommunicationType, CommunicationTypeId, DataType, DataTypeId, TypeMap};
+use mtp_type_map::{
+    communication_type_name, data_type_name, CommunicationType, CommunicationTypeId, DataType,
+    DataTypeId, TypeMap, PROTOCOL_VERSION,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunicationValue {
@@ -18,17 +22,20 @@ pub struct CommunicationValue {
 
 #[allow(dead_code)]
 impl CommunicationValue {
-    pub fn new(comm_type: CommunicationTypeId) -> Self {
+    pub fn new(comm_type: CommunicationType) -> Self {
+        let tm = TypeMap::new(PROTOCOL_VERSION);
+        let id = comm_type.to_id(&tm);
         Self {
             id: rand_u32(),
-            comm_type,
+            comm_type: id,
             sender: 0,
             receiver: 0,
             data: BTreeMap::new(),
-            type_map: None,
+            type_map: Some(tm),
         }
     }
 
+    #[cfg(feature = "registry")]
     pub fn from_comm(comm_type: CommunicationType, tm: &TypeMap) -> Self {
         let id = comm_type.to_id(tm);
         Self {
@@ -42,8 +49,16 @@ impl CommunicationValue {
     }
 
     pub fn from_comm_default(comm_type: CommunicationType) -> Self {
-        let tm = TypeMap::latest();
-        Self::from_comm(comm_type, &tm)
+        let tm = TypeMap::new(PROTOCOL_VERSION);
+        let id = comm_type.to_id(&tm);
+        Self {
+            id: rand_u32(),
+            comm_type: id,
+            sender: 0,
+            receiver: 0,
+            data: BTreeMap::new(),
+            type_map: Some(tm),
+        }
     }
 
     pub fn with_id(mut self, p0: u32) -> Self {
@@ -86,16 +101,14 @@ impl CommunicationValue {
         self
     }
 
+    #[cfg(feature = "registry")]
     pub fn add_typed(mut self, data: DataType, tm: &TypeMap, value: DataValue) -> Self {
         self.data.insert(data.to_id(tm), value);
         self
     }
 
     pub fn add_typed_default(mut self, data: DataType, value: DataValue) -> Self {
-        let tm = self
-            .type_map
-            .clone()
-            .unwrap_or_else(TypeMap::latest);
+        let tm = self.type_map.clone().unwrap_or_else(TypeMap::latest);
         self.data.insert(data.to_id(&tm), value);
         self
     }
@@ -231,6 +244,79 @@ impl CommunicationValue {
     }
 }
 
+fn fmt_data_value(val: &DataValue, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match val {
+        DataValue::Container(entries) => {
+            write!(f, "{{")?;
+            for (i, (key, value)) in entries.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                let name = data_type_name(key.0).unwrap_or("?");
+                write!(f, "{}: ", name)?;
+                fmt_data_value(value, f)?;
+            }
+            write!(f, "}}")
+        }
+        DataValue::Array(arr) => {
+            write!(f, "[")?;
+            for (i, value) in arr.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                fmt_data_value(value, f)?;
+            }
+            write!(f, "]")
+        }
+        #[cfg(feature = "crypto")]
+        DataValue::EncryptedContainer(_) => write!(f, "(Secure)"),
+        DataValue::Bytes(_) => write!(f, "(Binary)"),
+        other => write!(f, "{}", other),
+    }
+}
+
+const BOLD_BLUE: &str = "\x1b[1;34m";
+const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
+const ORANGE: &str = "\x1b[38;5;208m";
+const RESET: &str = "\x1b[0m";
+
+impl fmt::Display for CommunicationValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let version = self
+            .type_map
+            .as_ref()
+            .map(|tm| &tm.version)
+            .unwrap_or(&PROTOCOL_VERSION);
+
+        write!(f, "V{}{}{}", BOLD_BLUE, version, RESET)?;
+
+        if self.id != 0 {
+            write!(f, ", ID:{}{:X}{}", GREEN, self.id, RESET)?;
+        }
+        if self.sender != 0 {
+            write!(f, ", S:{}{:X}{}", YELLOW, self.sender, RESET)?;
+        }
+        if self.receiver != 0 {
+            write!(f, ", R:{}{:X}{}", ORANGE, self.receiver, RESET)?;
+        }
+
+        let name = communication_type_name(self.comm_type.0).unwrap_or("?");
+        write!(f, ", {}: ", name)?;
+
+        write!(f, "{{")?;
+        for (i, (key, value)) in self.data.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            let dname = data_type_name(key.0).unwrap_or("?");
+            write!(f, "{}: ", dname)?;
+            fmt_data_value(value, f)?;
+        }
+        write!(f, "}}")
+    }
+}
+
 /* ================================ TESTS ================================ */
 #[cfg(test)]
 mod tests {
@@ -247,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_flags_and_order_without_optional() {
-        let cv = CommunicationValue::new(CommunicationTypeId(1)).with_id(0);
+        let cv = CommunicationValue::from_comm_default(CommunicationType::ErrorParsing).with_id(0);
         let bytes = cv.to_bytes();
 
         // [u32 len][u16 type][flags]...
@@ -265,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_flags_and_order_with_all_optional() {
-        let cv = CommunicationValue::new(CommunicationTypeId(2))
+        let cv = CommunicationValue::from_comm_default(CommunicationType::ErrorBadVersion)
             .with_id(0xAABBCCDD)
             .with_sender(0x0000_1122_3344_5566)
             .with_receiver(0x0000_6677_8899_AABB);
@@ -276,10 +362,10 @@ mod tests {
         let total_len = c.read_u32::<BigEndian>().expect("len");
         assert_eq!(total_len as usize + 4, bytes.len());
 
-        let typ = c.read_u16::<BigEndian>().expect("type");
+        let typ = c.read_u16::<BigEndian>().expect("read type");
         assert_eq!(typ, 2);
 
-        let flags = c.read_u8().expect("flags");
+        let flags = c.read_u8().expect("read flags");
         assert_eq!(flags & 0b0000_0111, 0b0000_0111);
 
         let id = c.read_u32::<BigEndian>().expect("id");
@@ -296,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_complex() {
-        let cv = CommunicationValue::new(CommunicationTypeId(3))
+        let cv = CommunicationValue::from_comm_default(CommunicationType::Disconnect)
             .with_id(1234)
             .with_sender(111)
             .with_receiver(222)

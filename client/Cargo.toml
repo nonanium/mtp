@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 mtp-common = { path = "../common" }
-mtp-type-map = { path = "../type-map" }
 mtp-codec = { path = "../codec" }
 mtp-transport = { path = "../transport" }
 tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,13 @@
+[package]
+name = "mtp-example-client"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "mtp-example-client"
+path = "src/main.rs"
+
+[dependencies]
+mtp-client = { path = "../../client" }
+mtp-codec = { path = "../../codec" }
+tokio = { version = "1", features = ["full"] }

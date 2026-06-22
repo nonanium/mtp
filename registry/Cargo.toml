@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 mtp-common = { path = "../common" }
-mtp-type-map = { path = "../type-map" }
+mtp-type-map = { path = "../type-map", features = ["multi-version"] }

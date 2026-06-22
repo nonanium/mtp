@@ -1,16 +1,6 @@
-use mtp_codec::{CommunicationValue, DataTypeId, DataValue, Version};
+use mtp_codec::{CommunicationValue, DataTypeId, DataValue, Version, PROTOCOL_VERSION};
 use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
-
-/*
- * The compiled-in protocol version for this client.
- *
- * This is set by the `protocol_version` field in `type-maps.yaml`.
- * At build time, the generated `builtin_type_maps()` determines
- * which type maps are available, and the client always advertises
- * the latest one.
- */
-pub use mtp_type_map::PROTOCOL_VERSION;
 
 pub struct ClientConfig {
     pub url: String,
@@ -42,7 +32,7 @@ impl MTPClient {
 
         // Build the initial identification message with the protocol version.
         let version_str = format!("{}", PROTOCOL_VERSION);
-        let ident = CommunicationValue::new(mtp_codec::CommunicationTypeId(15))
+        let ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)
             .add_data(DataTypeId(3), DataValue::Str(version_str))
             .add_data(DataTypeId(6), DataValue::UnsignedNumber(client_id.into()));
 

@@ -8,7 +8,8 @@ pub use data_value::{DataKind, DataValue};
 pub use util::rand_u32;
 
 pub use mtp_type_map::{
-    CommunicationType, CommunicationTypeId, DataType, DataTypeId, TypeMap, Version,
+    communication_type_name, data_type_name, CommunicationType, CommunicationTypeId, DataType,
+    DataTypeId, PROTOCOL_VERSION, TypeMap, Version,
 };
 
 use mtp_common::CodecError;
