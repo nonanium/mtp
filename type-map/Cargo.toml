@@ -6,7 +6,9 @@ build = "build.rs"
 
 [features]
 default = []
-multi-version = []
+# Enables multi-version type-map constructors, builtin_type_maps(), and
+# the Registry struct for version negotiation. Used by host, not client.
+registry = []
 
 [dependencies]
 

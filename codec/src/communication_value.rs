@@ -5,6 +5,7 @@ use std::io::{Cursor, Read};
 
 use crate::data_value::DataValue;
 use crate::rand_u32;
+use mtp_common::CodecError;
 use mtp_type_map::{
     communication_type_name, data_type_name, CommunicationType, CommunicationTypeId, DataType,
     DataTypeId, TypeMap, PROTOCOL_VERSION,
@@ -20,8 +21,8 @@ pub struct CommunicationValue {
     type_map: Option<TypeMap>,
 }
 
-#[allow(dead_code)]
 impl CommunicationValue {
+    #[must_use]
     pub fn new(comm_type: CommunicationType) -> Self {
         let tm = TypeMap::new(PROTOCOL_VERSION);
         let id = comm_type.to_id(&tm);
@@ -36,6 +37,7 @@ impl CommunicationValue {
     }
 
     #[cfg(feature = "registry")]
+    #[must_use]
     pub fn from_comm(comm_type: CommunicationType, tm: &TypeMap) -> Self {
         let id = comm_type.to_id(tm);
         Self {
@@ -48,19 +50,7 @@ impl CommunicationValue {
         }
     }
 
-    pub fn from_comm_default(comm_type: CommunicationType) -> Self {
-        let tm = TypeMap::new(PROTOCOL_VERSION);
-        let id = comm_type.to_id(&tm);
-        Self {
-            id: rand_u32(),
-            comm_type: id,
-            sender: 0,
-            receiver: 0,
-            data: BTreeMap::new(),
-            type_map: Some(tm),
-        }
-    }
-
+    #[must_use]
     pub fn with_id(mut self, p0: u32) -> Self {
         self.id = p0;
         self
@@ -70,6 +60,7 @@ impl CommunicationValue {
         self.id
     }
 
+    #[must_use]
     pub fn with_sender(mut self, sender: u64) -> Self {
         self.sender = sender;
         self
@@ -79,6 +70,7 @@ impl CommunicationValue {
         self.sender
     }
 
+    #[must_use]
     pub fn with_receiver(mut self, receiver: u64) -> Self {
         self.receiver = receiver;
         self
@@ -92,21 +84,20 @@ impl CommunicationValue {
         self.comm_type
     }
 
-    pub fn is_type(&self, p0: CommunicationTypeId) -> bool {
-        self.comm_type == p0
-    }
-
+    #[must_use]
     pub fn add_data(mut self, data: DataTypeId, value: DataValue) -> Self {
         self.data.insert(data, value);
         self
     }
 
     #[cfg(feature = "registry")]
+    #[must_use]
     pub fn add_typed(mut self, data: DataType, tm: &TypeMap, value: DataValue) -> Self {
         self.data.insert(data.to_id(tm), value);
         self
     }
 
+    #[must_use]
     pub fn add_typed_default(mut self, data: DataType, value: DataValue) -> Self {
         let tm = self.type_map.clone().unwrap_or_else(TypeMap::latest);
         self.data.insert(data.to_id(&tm), value);
@@ -117,9 +108,6 @@ impl CommunicationValue {
         self.data.get(&data_type).unwrap_or(&DataValue::Null)
     }
 
-    pub fn get_data_container(&self) -> &BTreeMap<DataTypeId, DataValue> {
-        &self.data
-    }
 }
 
 impl CommunicationValue {
@@ -184,33 +172,43 @@ impl CommunicationValue {
         frame
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CodecError> {
         let mut cursor = Cursor::new(bytes);
 
-        let total_len = cursor.read_u32::<BigEndian>().ok()? as usize;
+        let total_len = cursor
+            .read_u32::<BigEndian>()
+            .map_err(|_| CodecError::InvalidEncoding)? as usize;
         if bytes.len() < 4 + total_len {
-            return None;
+            return Err(CodecError::InvalidEncoding);
         }
 
         let frame_end = 4 + total_len;
 
-        let comm_type_num = cursor.read_u16::<BigEndian>().ok()?;
+        let comm_type_num = cursor
+            .read_u16::<BigEndian>()
+            .map_err(|_| CodecError::InvalidEncoding)?;
         let comm_type = CommunicationTypeId(comm_type_num);
 
-        let flags = cursor.read_u8().ok()?;
+        let flags = cursor
+            .read_u8()
+            .map_err(|_| CodecError::InvalidEncoding)?;
         let has_sender = (flags & 0b0000_0001) != 0;
         let has_receiver = (flags & 0b0000_0010) != 0;
         let has_id = (flags & 0b0000_0100) != 0;
 
         let id = if has_id {
-            cursor.read_u32::<BigEndian>().ok()?
+            cursor
+                .read_u32::<BigEndian>()
+                .map_err(|_| CodecError::InvalidEncoding)?
         } else {
             0
         };
 
         let sender = if has_sender {
             let mut buf = [0u8; 8];
-            cursor.read_exact(&mut buf[2..]).ok()?;
+            cursor
+                .read_exact(&mut buf[2..])
+                .map_err(|_| CodecError::InvalidEncoding)?;
             u64::from_be_bytes(buf)
         } else {
             0
@@ -218,7 +216,9 @@ impl CommunicationValue {
 
         let receiver = if has_receiver {
             let mut buf = [0u8; 8];
-            cursor.read_exact(&mut buf[2..]).ok()?;
+            cursor
+                .read_exact(&mut buf[2..])
+                .map_err(|_| CodecError::InvalidEncoding)?;
             u64::from_be_bytes(buf)
         } else {
             0
@@ -226,20 +226,65 @@ impl CommunicationValue {
 
         let pos = cursor.position() as usize;
         if pos > frame_end {
-            return None;
+            return Err(CodecError::InvalidEncoding);
         }
 
         let data_bytes = &bytes[pos..frame_end];
-        let data_value = DataValue::from_bytes(data_bytes)?;
-        let data = data_value.as_map()?;
+        let data_value = DataValue::from_bytes(data_bytes).ok_or(CodecError::InvalidEncoding)?;
+        let data = data_value.as_map().ok_or(CodecError::InvalidEncoding)?;
 
-        Some(Self {
+        Ok(Self {
             id,
             comm_type,
             sender,
             receiver,
             data,
             type_map: None,
+        })
+    }
+
+    pub fn from_bytes_with(bytes: &[u8], tm: &TypeMap) -> Result<Self, CodecError> {
+        let mut val = Self::from_bytes(bytes)?;
+        val.type_map = Some(tm.clone());
+        Ok(val)
+    }
+
+    #[cfg(feature = "registry")]
+    pub fn migrate(&self, target_tm: &TypeMap) -> Result<Self, CodecError> {
+        let comm_name =
+            communication_type_name(self.comm_type.0).ok_or_else(|| {
+                CodecError::UnknownCommunicationType(self.comm_type.0.to_string())
+            })?;
+        let comm_variant = CommunicationType::from_name(comm_name).ok_or_else(|| {
+            CodecError::UnknownCommunicationType(comm_name.to_string())
+        })?;
+        let new_comm_id = CommunicationTypeId(
+            target_tm
+                .comm_id_enum(comm_variant)
+                .ok_or_else(|| CodecError::UnknownCommunicationType(comm_name.to_string()))?,
+        );
+
+        let mut new_data = BTreeMap::new();
+        for (&old_id, value) in &self.data {
+            let name = data_type_name(old_id.0)
+                .ok_or_else(|| CodecError::UnknownDataType(old_id.0.to_string()))?;
+            let variant = DataType::from_name(name)
+                .ok_or_else(|| CodecError::UnknownDataType(name.to_string()))?;
+            let new_id = DataTypeId(
+                target_tm
+                    .data_id_enum(variant)
+                    .ok_or_else(|| CodecError::UnknownDataType(name.to_string()))?,
+            );
+            new_data.insert(new_id, value.clone());
+        }
+
+        Ok(Self {
+            id: self.id,
+            comm_type: new_comm_id,
+            sender: self.sender,
+            receiver: self.receiver,
+            data: new_data,
+            type_map: Some(target_tm.clone()),
         })
     }
 }
@@ -275,11 +320,26 @@ fn fmt_data_value(val: &DataValue, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     }
 }
 
+#[cfg(debug_assertions)]
 const BOLD_BLUE: &str = "\x1b[1;34m";
+#[cfg(not(debug_assertions))]
+const BOLD_BLUE: &str = "";
+#[cfg(debug_assertions)]
 const GREEN: &str = "\x1b[32m";
+#[cfg(not(debug_assertions))]
+const GREEN: &str = "";
+#[cfg(debug_assertions)]
 const YELLOW: &str = "\x1b[33m";
+#[cfg(not(debug_assertions))]
+const YELLOW: &str = "";
+#[cfg(debug_assertions)]
 const ORANGE: &str = "\x1b[38;5;208m";
+#[cfg(not(debug_assertions))]
+const ORANGE: &str = "";
+#[cfg(debug_assertions)]
 const RESET: &str = "\x1b[0m";
+#[cfg(not(debug_assertions))]
+const RESET: &str = "";
 
 impl fmt::Display for CommunicationValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -333,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_flags_and_order_without_optional() {
-        let cv = CommunicationValue::from_comm_default(CommunicationType::ErrorParsing).with_id(0);
+        let cv = CommunicationValue::new(CommunicationType::ErrorParsing).with_id(0);
         let bytes = cv.to_bytes();
 
         // [u32 len][u16 type][flags]...
@@ -351,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_flags_and_order_with_all_optional() {
-        let cv = CommunicationValue::from_comm_default(CommunicationType::ErrorBadVersion)
+        let cv = CommunicationValue::new(CommunicationType::ErrorBadVersion)
             .with_id(0xAABBCCDD)
             .with_sender(0x0000_1122_3344_5566)
             .with_receiver(0x0000_6677_8899_AABB);
@@ -382,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_complex() {
-        let cv = CommunicationValue::from_comm_default(CommunicationType::Disconnect)
+        let cv = CommunicationValue::new(CommunicationType::Disconnect)
             .with_id(1234)
             .with_sender(111)
             .with_receiver(222)
@@ -415,6 +475,6 @@ mod tests {
         let mut bad = vec![0u8; 8];
         // total_length claims more than available
         bad[0..4].copy_from_slice(&(1000u32.to_be_bytes()));
-        assert!(CommunicationValue::from_bytes(&bad).is_none());
+        assert!(CommunicationValue::from_bytes(&bad).is_err());
     }
 }

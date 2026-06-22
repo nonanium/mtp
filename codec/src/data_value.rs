@@ -311,7 +311,7 @@ impl DataValue {
         let kind = Self::kind_marker(value);
         buf.push(kind);
 
-        if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE {
+        if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL {
             let _ = buf.write_u16::<BigEndian>(key.0);
             return true;
         }
@@ -351,7 +351,7 @@ impl DataValue {
         let kind = Self::kind_marker(value);
         buf.push(kind);
 
-        if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE {
+        if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL {
             return true;
         }
 
@@ -448,12 +448,14 @@ impl DataValue {
         for _ in 0..count {
             let kind = cursor.read_u8().ok()?;
 
-            if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE {
+            if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL {
                 let key = DataTypeId(cursor.read_u16::<BigEndian>().ok()?);
                 let value = if kind == Self::KIND_BOOL_TRUE {
                     DataValue::BoolTrue
-                } else {
+                } else if kind == Self::KIND_BOOL_FALSE {
                     DataValue::BoolFalse
+                } else {
+                    DataValue::Null
                 };
                 entries.push((key, value));
                 continue;
@@ -489,12 +491,15 @@ impl DataValue {
         for _ in 0..count {
             let kind = cursor.read_u8().ok()?;
 
-            if kind == Self::KIND_BOOL_TRUE {
-                out.push(DataValue::BoolTrue);
-                continue;
-            }
-            if kind == Self::KIND_BOOL_FALSE {
-                out.push(DataValue::BoolFalse);
+            if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL {
+                let value = if kind == Self::KIND_BOOL_TRUE {
+                    DataValue::BoolTrue
+                } else if kind == Self::KIND_BOOL_FALSE {
+                    DataValue::BoolFalse
+                } else {
+                    DataValue::Null
+                };
+                out.push(value);
                 continue;
             }
 

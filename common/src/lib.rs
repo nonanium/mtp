@@ -1,16 +1,21 @@
 use thiserror::Error;
 
-pub enum RegistryError {
-    ReservedCommId(u16, String),
-}
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodecError {
+    #[error("Unknown version")]
     UnknownVersion,
+    #[error("Unknown communication type: {0}")]
     UnknownCommunicationType(String),
+    #[error("Unknown data type: {0}")]
     UnknownDataType(String),
+    #[error("Reserved communication type: {0}")]
     ReservedCommunicationType(u16),
+    #[error("Invalid encoding")]
     InvalidEncoding,
+    #[error("Crypto failed: {0}")]
+    CryptoFailed(String),
 }
 
 #[derive(Debug, Error, Clone)]
@@ -39,17 +44,8 @@ pub enum CommunicationError {
     #[error("Loading Certificate error")]
     CertificateLoadFailed,
 
-    #[error("ParseBool error: {0}")]
-    ParseBool(#[from] std::str::ParseBoolError),
-
-    #[error("ParseInt error: {0}")]
-    ParseInt(#[from] std::num::ParseIntError),
-
-    #[error("ParseFloat error: {0}")]
-    ParseFloat(#[from] std::num::ParseFloatError),
-
-    #[error("ParseAddr error: {0}")]
-    ParseAddr(#[from] std::net::AddrParseError),
+    #[error("Parse error: {0}")]
+    ParseError(String),
 
     #[error("Connection error: {0}")]
     ConnectionError(#[from] wtransport::error::ConnectionError),
@@ -86,6 +82,9 @@ pub enum CommunicationError {
 
     #[error("Crypto Provider Install Error")]
     CryptoProviderInstallFailed,
+
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
 
     #[error("Other: {0}")]
     Other(String),

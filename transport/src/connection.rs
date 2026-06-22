@@ -53,10 +53,10 @@ impl Default for Policy {
     }
 }
 
-#[allow(unused)]
 enum ReceivedFrame {
     Message(CommunicationValue),
     ClosedByPeer,
+    #[allow(dead_code)]
     Idle,
 }
 
@@ -215,7 +215,7 @@ impl Sender {
             .await
             .map_err(|_| CommunicationError::StreamError)?
         {
-            println!("[Sender] close frame finish failed: {e}");
+            log::warn!("[Sender] close frame finish failed: {e}");
         }
 
         Ok(())
@@ -445,7 +445,7 @@ impl Receiver {
                     if e.kind() == ErrorKind::UnexpectedEof {
                         return Ok(ReceivedFrame::Idle);
                     }
-                    println!("[Receiver] read_u32 failed: {e}");
+                    log::warn!("[Receiver] read_u32 failed: {e}");
                     return Err(CommunicationError::StreamError);
                 }
             }
@@ -468,13 +468,13 @@ impl Receiver {
                 _ => return Err(e.into()),
             },
             Err(_) => {
-                println!("[Receiver] read_exact timed out (len={})", len);
+                log::warn!("[Receiver] read_exact timed out (len={})", len);
                 return Err(CommunicationError::StreamError);
             }
         }
 
         let message = CommunicationValue::from_bytes(&buf)
-            .ok_or(CommunicationError::ParseCommunicationValue)?;
+            .map_err(|_| CommunicationError::ParseCommunicationValue)?;
 
         Ok(ReceivedFrame::Message(message))
     }

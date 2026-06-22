@@ -2,7 +2,6 @@
 members = [
     "common",
     "crypto",
-    "registry",
     "type-map",
     "codec",
     "transport",
@@ -10,3 +9,48 @@ members = [
     "client",
 ]
 resolver = "3"
+
+# =============================================================================
+# mtp - umbrella crate
+#
+# Re-exports all MTP sub-crates behind feature flags so consumers write:
+#
+#   [dependencies]
+#   mtp = { version = "0.1", features = ["client", "crypto"] }
+#
+# instead of listing every sub-crate individually.
+# =============================================================================
+[package]
+name = "mtp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# --- always-on core ---
+mtp-common = { path = "common" }
+mtp-type-map = { path = "type-map" }
+mtp-codec = { path = "codec" }
+mtp-transport = { path = "transport" }
+
+# --- optional, behind features ---
+mtp-crypto = { path = "crypto", optional = true }
+mtp-host = { path = "host", optional = true }
+mtp-client = { path = "client", optional = true }
+
+[features]
+default = []
+
+# Message encryption (AEAD, signatures, KEM, KDF, hashing).
+# When combined with `host` or `client`, also enables connection authentication.
+crypto = [
+    "dep:mtp-crypto",
+    "mtp-codec/crypto",
+    "mtp-host?/crypto",
+    "mtp-client?/crypto",
+]
+
+# MTP server host - version negotiation, Registry, incoming QUIC connections.
+host = ["dep:mtp-host", "mtp-codec/registry", "mtp-transport/host"]
+
+# MTP client - outgoing QUIC connections to a host.
+client = ["dep:mtp-client"]

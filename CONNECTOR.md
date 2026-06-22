@@ -4,10 +4,10 @@ This file documents the Connection and Version Negotiation logic.
 
 ## Registry
 
-The `registry` crate provides a multi-version `Registry` used by the host for version negotiation. A `Registry` holds one `TypeMap` per protocol version and supports `negotiate()`:
+The `registry` crate provides a multi-version `Registry` used by the host for version negotiation. Accessed through the `mtp` facade (requires the `host` feature):
 
 ```rust
-use registry::Registry;
+use mtp::codec::registry::Registry;
 
 let registry = Registry::builtin(); // loads all TypeMaps from config
 
@@ -34,7 +34,7 @@ The host creates a QUIC server, manages the registry, and handles version negoti
 ### Initialization
 
 ```rust
-use mtp_host::{MTPHost, HostConfig};
+use mtp::host::{MTPHost, HostConfig};
 
 let config = HostConfig {
     ip: "::".into(),
@@ -87,7 +87,7 @@ New clients use the `Register` variant instead, presenting their public key for 
 The client connects to a host and uses a single compiled-in protocol version.
 
 ```rust
-use mtp_client::{MTPClient, ClientConfig};
+use mtp::client::{MTPClient, ClientConfig};
 
 let config = ClientConfig {
     url: "https://host.example.com:4433".into(),
@@ -103,7 +103,7 @@ let conn = MTPClient::connect(config, 8765).await?;
  */
 ```
 
-The client's `PROTOCOL_VERSION` constant is set by `protocol_version` in `type-maps.yaml` and baked in at compile time. The client never imports the `registry` crate; it only uses `type-map` for enum types and `codec` for encoding.
+The client's `PROTOCOL_VERSION` constant is set by `protocol_version` in `type-maps.yaml` and baked in at compile time. The client never imports the `registry` crate; it only uses `mtp::type_map` for enum types and `mtp::codec` for encoding.
 
 ---
 

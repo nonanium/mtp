@@ -8,7 +8,10 @@ name = "mtp-example-server"
 path = "src/main.rs"
 
 [dependencies]
-mtp-host = { path = "../../host" }
+mtp-host = { path = "../../host", features = ["crypto"] }
 mtp-codec = { path = "../../codec" }
+mtp-crypto = { path = "../../crypto", features = ["serde"] }
 rcgen = "0.14"
 tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+hex = "0.4"

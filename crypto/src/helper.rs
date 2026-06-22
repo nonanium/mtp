@@ -57,15 +57,14 @@ impl MultiEncryptedMessage {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         let mut offset = 0;
         let read_u16 = |off: &mut usize| -> Result<u16, CryptoError> {
-            let v = u16::from_be_bytes(
-                bytes
-                    .get(*off..*off + 2)
-                    .ok_or(CryptoError::DecryptionFailed)?
-                    .try_into()
-                    .unwrap(),
-            );
+            let slice = bytes
+                .get(*off..*off + 2)
+                .ok_or(CryptoError::DecryptionFailed)?;
+            let arr: [u8; 2] = slice
+                .try_into()
+                .map_err(|_| CryptoError::DecryptionFailed)?;
             *off += 2;
-            Ok(v)
+            Ok(u16::from_be_bytes(arr))
         };
 
         let num = read_u16(&mut offset)? as usize;
@@ -198,36 +197,4 @@ pub fn decrypt_multi(
     Err(CryptoError::DecryptionFailed)
 }
 
-#[cfg(feature = "ed25519-dalek")]
-pub fn verify_ed25519_sig(
-    public_key: &crate::keypair::SignaturePublicKey,
-    msg: &[u8],
-    signature: &[u8],
-) -> Result<(), CryptoError> {
-    crate::sign::verify_ed25519(public_key, msg, signature)
-}
 
-#[cfg(feature = "ml-dsa")]
-pub fn verify_ml_dsa_sig(
-    public_key: &crate::keypair::SignaturePqPublicKey,
-    msg: &[u8],
-    signature: &[u8],
-) -> Result<(), CryptoError> {
-    crate::sign::verify_ml_dsa(public_key, msg, signature)
-}
-
-/*
- * Verify both an Ed25519 and ML-DSA signature (dual) against
- * the public keys in a `PublicKeyBundle`.
- */
-#[cfg(all(feature = "ed25519-dalek", feature = "ml-dsa"))]
-pub fn verify_dual_sig(
-    public_keys: &crate::keypair::PublicKeyBundle,
-    msg: &[u8],
-    ed25519_sig: &[u8],
-    mldsa_sig: &[u8],
-) -> Result<(), CryptoError> {
-    verify_ed25519_sig(&public_keys.sig_cl_public_key, msg, ed25519_sig)?;
-    verify_ml_dsa_sig(&public_keys.sig_pq_public_key, msg, mldsa_sig)?;
-    Ok(())
-}

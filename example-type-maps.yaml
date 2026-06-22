@@ -33,9 +33,11 @@ protocol_version: "0.0"
 #   Description: 4
 #   Timestamp: 5
 #   Id: 6
-#   Nonce: 7
-#   PublicKeys: 8
-#   Signature: 9
+#   ClientNonce: 7
+#   ServerNonce: 8
+#   PublicKeys: 9
+#   Signature: 10
+#   Connected: 11
 #
 # If a Type can't be used it will be mapped to 0
 

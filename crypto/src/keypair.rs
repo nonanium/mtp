@@ -287,14 +287,18 @@ impl PublicKeyBundle {
         use crate::error::CryptoError;
         let mut offset = 0;
 
-        let kem_len = u16::from_be_bytes(
-            bytes
-                .get(offset..offset + 2)
-                .ok_or(CryptoError::InvalidKeyLength)?
+        let read_u16 = |off: &mut usize| -> Result<u16, CryptoError> {
+            let slice = bytes
+                .get(*off..*off + 2)
+                .ok_or(CryptoError::InvalidKeyLength)?;
+            let arr: [u8; 2] = slice
                 .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += 2;
+                .map_err(|_| CryptoError::InvalidKeyLength)?;
+            *off += 2;
+            Ok(u16::from_be_bytes(arr))
+        };
+
+        let kem_len = read_u16(&mut offset)? as usize;
         let kem = KemPublicKey::new(
             bytes
                 .get(offset..offset + kem_len)
@@ -303,14 +307,7 @@ impl PublicKeyBundle {
         );
         offset += kem_len;
 
-        let pq_len = u16::from_be_bytes(
-            bytes
-                .get(offset..offset + 2)
-                .ok_or(CryptoError::InvalidKeyLength)?
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += 2;
+        let pq_len = read_u16(&mut offset)? as usize;
         let pq = SignaturePqPublicKey::new(
             bytes
                 .get(offset..offset + pq_len)
@@ -319,14 +316,7 @@ impl PublicKeyBundle {
         );
         offset += pq_len;
 
-        let cl_len = u16::from_be_bytes(
-            bytes
-                .get(offset..offset + 2)
-                .ok_or(CryptoError::InvalidKeyLength)?
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += 2;
+        let cl_len = read_u16(&mut offset)? as usize;
         let cl = SignaturePublicKey::new(
             bytes
                 .get(offset..offset + cl_len)

@@ -108,7 +108,8 @@ async fn configure_server(
         .ok()
         .and_then(|s| if s.is_empty() { None } else { Some(s) })
         .unwrap_or_else(|| "::".to_string())
-        .parse::<IpAddr>()?;
+        .parse::<IpAddr>()
+        .map_err(|e| CommunicationError::ParseError(e.to_string()))?;
     let bind_addr = SocketAddr::new(bind_ip, port);
 
     let server_config = ServerConfig::builder()

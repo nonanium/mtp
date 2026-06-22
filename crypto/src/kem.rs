@@ -12,7 +12,7 @@ pub struct HybridKem;
 #[cfg(feature = "mlkem-tls")]
 impl HybridKem {
     pub fn generate_keypair() -> (KemPrivateKey, KemPublicKey) {
-        let (dk, ek) =
+        let (ek, dk) =
             mlkem_tls::X25519MlKem768::keygen(&mut rand_core::OsRng);
         (
             KemPrivateKey::new(dk.as_bytes().to_vec()),

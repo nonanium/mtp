@@ -2,17 +2,41 @@
 
 **MTP** is a **m**odular **t**ransport **p**rotocol by Methanium.
 
-## Crates
-- Codec
-- Transport
-- Common
-- Crypto
-- TypeMap
-- Registry
-- Host
-- Client
+## Getting Started
 
-## Codec
+Add the `mtp` crate with your desired features:
+
+```toml
+[dependencies]
+mtp = { path = "..", features = ["client", "crypto"] }
+```
+
+The `mtp` umbrella crate re-exports all sub-crates behind feature flags:
+
+| Feature  | Pulls in                    | Enables                                   |
+| -------- | --------------------------- | ----------------------------------------- |
+| `crypto` | `mtp::crypto`               | AEAD, signatures, KEM, KDF, hashing       |
+| `host`   | `mtp::host`, `mtp::codec::registry` | QUIC server, version negotiation  |
+| `client` | `mtp::client`               | QUIC client connections                   |
+
+Core crates (`codec`, `transport`, `common`, `type_map`) are always available.
+
+```rust
+use mtp::codec::{encode, decode, DataValue};
+use mtp::type_map::TypeMap;
+use mtp::transport::Sender;
+
+#[cfg(feature = "crypto")]
+use mtp::crypto::ChaCha20Poly1305;
+```
+
+## Sub-crates
+
+All sub-crates are re-exported through the `mtp` facade and can be referenced
+as `mtp::codec`, `mtp::transport`, `mtp::common`, `mtp::type_map`,
+`mtp::crypto`, `mtp::host`, `mtp::client`.
+
+### Codec
 
 The Codec crate handles encoding and decoding of MTP packets using Communication Types and Data Types from the Registry.
 
@@ -33,15 +57,15 @@ The Codec uses the Crypto crate to encrypt and decrypt Encrypted Containers.
 
 ---
 
-## Transport
+### Transport
 
 The Transport crate wraps QUIC using `wtransport`. It provides `Sender`/`Receiver` for bidirectional message passing over QUIC streams.
 
-## Common
+### Common
 
 Common handles logging and error handling. Personal information reported to Common will be anonymized.
 
-## Crypto Stack
+### Crypto Stack
 
 | Crate            | Audited? | Notes                                            |
 | ---------------- | -------- | ------------------------------------------------ |

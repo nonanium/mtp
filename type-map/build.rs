@@ -24,45 +24,143 @@ struct ReservedEntry {
 }
 
 const RESERVED_COMM_TYPES: &[ReservedEntry] = &[
-    ReservedEntry { name: "Error", id: 0 },
-    ReservedEntry { name: "ErrorParsing", id: 1 },
-    ReservedEntry { name: "ErrorBadVersion", id: 2 },
-    ReservedEntry { name: "Disconnect", id: 3 },
-    ReservedEntry { name: "Redirect", id: 4 },
-    ReservedEntry { name: "Shutdown", id: 5 },
-    ReservedEntry { name: "BadRequest", id: 6 },
-    ReservedEntry { name: "Unauthorized", id: 7 },
-    ReservedEntry { name: "Forbidden", id: 8 },
-    ReservedEntry { name: "NotFound", id: 9 },
-    ReservedEntry { name: "TooManyRequests", id: 10 },
-    ReservedEntry { name: "InternalServerError", id: 11 },
-    ReservedEntry { name: "BadGateway", id: 12 },
-    ReservedEntry { name: "ServiceUnavailable", id: 13 },
-    ReservedEntry { name: "GatewayTimeout", id: 14 },
-    ReservedEntry { name: "Identification", id: 15 },
-    ReservedEntry { name: "IdentificationResponse", id: 16 },
-    ReservedEntry { name: "Register", id: 17 },
-    ReservedEntry { name: "RegisterResponse", id: 18 },
-    ReservedEntry { name: "Ping", id: 19 },
-    ReservedEntry { name: "Pong", id: 20 },
+    ReservedEntry {
+        name: "Error",
+        id: 0,
+    },
+    ReservedEntry {
+        name: "ErrorParsing",
+        id: 1,
+    },
+    ReservedEntry {
+        name: "ErrorBadVersion",
+        id: 2,
+    },
+    ReservedEntry {
+        name: "Disconnect",
+        id: 3,
+    },
+    ReservedEntry {
+        name: "Redirect",
+        id: 4,
+    },
+    ReservedEntry {
+        name: "Shutdown",
+        id: 5,
+    },
+    ReservedEntry {
+        name: "BadRequest",
+        id: 6,
+    },
+    ReservedEntry {
+        name: "Unauthorized",
+        id: 7,
+    },
+    ReservedEntry {
+        name: "Forbidden",
+        id: 8,
+    },
+    ReservedEntry {
+        name: "NotFound",
+        id: 9,
+    },
+    ReservedEntry {
+        name: "TooManyRequests",
+        id: 10,
+    },
+    ReservedEntry {
+        name: "InternalServerError",
+        id: 11,
+    },
+    ReservedEntry {
+        name: "BadGateway",
+        id: 12,
+    },
+    ReservedEntry {
+        name: "ServiceUnavailable",
+        id: 13,
+    },
+    ReservedEntry {
+        name: "GatewayTimeout",
+        id: 14,
+    },
+    ReservedEntry {
+        name: "Identification",
+        id: 15,
+    },
+    ReservedEntry {
+        name: "IdentificationResponse",
+        id: 16,
+    },
+    ReservedEntry {
+        name: "Register",
+        id: 17,
+    },
+    ReservedEntry {
+        name: "RegisterResponse",
+        id: 18,
+    },
+    ReservedEntry {
+        name: "Ping",
+        id: 19,
+    },
+    ReservedEntry {
+        name: "Pong",
+        id: 20,
+    },
 ];
 
 const RESERVED_DATA_TYPES: &[ReservedEntry] = &[
-    ReservedEntry { name: "Error", id: 0 },
-    ReservedEntry { name: "ErrorParsing", id: 1 },
-    ReservedEntry { name: "ErrorMessage", id: 2 },
-    ReservedEntry { name: "Version", id: 3 },
-    ReservedEntry { name: "Description", id: 4 },
-    ReservedEntry { name: "Timestamp", id: 5 },
+    ReservedEntry {
+        name: "Error",
+        id: 0,
+    },
+    ReservedEntry {
+        name: "ErrorParsing",
+        id: 1,
+    },
+    ReservedEntry {
+        name: "ErrorMessage",
+        id: 2,
+    },
+    ReservedEntry {
+        name: "Version",
+        id: 3,
+    },
+    ReservedEntry {
+        name: "Description",
+        id: 4,
+    },
+    ReservedEntry {
+        name: "Timestamp",
+        id: 5,
+    },
     ReservedEntry { name: "Id", id: 6 },
-    ReservedEntry { name: "Nonce", id: 7 },
-    ReservedEntry { name: "PublicKeys", id: 8 },
-    ReservedEntry { name: "Signature", id: 9 },
+    ReservedEntry {
+        name: "ClientNonce",
+        id: 7,
+    },
+    ReservedEntry {
+        name: "ServerNonce",
+        id: 8,
+    },
+    ReservedEntry {
+        name: "PublicKeys",
+        id: 9,
+    },
+    ReservedEntry {
+        name: "Signature",
+        id: 10,
+    },
+    ReservedEntry {
+        name: "Connected",
+        id: 11,
+    },
 ];
 
 fn main() {
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let multi_version = std::env::var("CARGO_FEATURE_MULTI_VERSION").is_ok();
+    let multi_version = std::env::var("CARGO_FEATURE_REGISTRY").is_ok();
 
     let config = match std::env::var("MTP_TYPE_MAPS") {
         Ok(config_path) => {
@@ -251,6 +349,33 @@ fn generate_comm_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
+    writeln!(out, "impl CommunicationType {{").unwrap();
+    writeln!(out, "    pub fn from_name(s: &str) -> Option<Self> {{").unwrap();
+    writeln!(out, "        match s {{").unwrap();
+
+    for entry in RESERVED_COMM_TYPES {
+        writeln!(
+            out,
+            "            \"{}\" => Some(CommunicationType::{}),",
+            entry.name, entry.name
+        )
+        .unwrap();
+    }
+    for name in user_names {
+        writeln!(
+            out,
+            "            \"{}\" => Some(CommunicationType::{}),",
+            name, name
+        )
+        .unwrap();
+    }
+
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
     writeln!(out, "impl std::fmt::Display for CommunicationType {{").unwrap();
     writeln!(
         out,
@@ -298,6 +423,33 @@ fn generate_data_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
         writeln!(out, "            DataType::{} => \"{}\",", name, name).unwrap();
     }
 
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "impl DataType {{").unwrap();
+    writeln!(out, "    pub fn from_name(s: &str) -> Option<Self> {{").unwrap();
+    writeln!(out, "        match s {{").unwrap();
+
+    for entry in RESERVED_DATA_TYPES {
+        writeln!(
+            out,
+            "            \"{}\" => Some(DataType::{}),",
+            entry.name, entry.name
+        )
+        .unwrap();
+    }
+    for name in user_names {
+        writeln!(
+            out,
+            "            \"{}\" => Some(DataType::{}),",
+            name, name
+        )
+        .unwrap();
+    }
+
+    writeln!(out, "            _ => None,").unwrap();
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
@@ -429,11 +581,7 @@ fn generate_single_version_lookup(out: &mut String, config: &Config) {
     )
     .unwrap();
     writeln!(out, "        match self.version {{").unwrap();
-    writeln!(
-        out,
-        "            PROTOCOL_VERSION => match ct {{"
-    )
-    .unwrap();
+    writeln!(out, "            PROTOCOL_VERSION => match ct {{").unwrap();
     for entry in RESERVED_COMM_TYPES {
         writeln!(
             out,
@@ -466,11 +614,7 @@ fn generate_single_version_lookup(out: &mut String, config: &Config) {
     )
     .unwrap();
     writeln!(out, "        match self.version {{").unwrap();
-    writeln!(
-        out,
-        "            PROTOCOL_VERSION => match dt {{"
-    )
-    .unwrap();
+    writeln!(out, "            PROTOCOL_VERSION => match dt {{").unwrap();
     for entry in RESERVED_DATA_TYPES {
         writeln!(
             out,
@@ -529,7 +673,11 @@ fn generate_reverse_lookups(
         }
     }
 
-    writeln!(out, "pub fn communication_type_name(id: u16) -> Option<&'static str> {{").unwrap();
+    writeln!(
+        out,
+        "pub fn communication_type_name(id: u16) -> Option<&'static str> {{"
+    )
+    .unwrap();
     writeln!(out, "    match id {{").unwrap();
     for (id, name) in &id_to_comm {
         writeln!(out, "        {} => Some(\"{}\"),", id, name).unwrap();
@@ -557,7 +705,11 @@ fn generate_reverse_lookups(
         }
     }
 
-    writeln!(out, "pub fn data_type_name(id: u16) -> Option<&'static str> {{").unwrap();
+    writeln!(
+        out,
+        "pub fn data_type_name(id: u16) -> Option<&'static str> {{"
+    )
+    .unwrap();
     writeln!(out, "    match id {{").unwrap();
     for (id, name) in &id_to_data {
         writeln!(out, "        {} => Some(\"{}\"),", id, name).unwrap();
@@ -570,7 +722,11 @@ fn generate_reverse_lookups(
 
 fn generate_enum_conversion_methods(out: &mut String) {
     writeln!(out, "impl CommunicationType {{").unwrap();
-    writeln!(out, "    pub fn to_id(self, tm: &TypeMap) -> CommunicationTypeId {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn to_id(self, tm: &TypeMap) -> CommunicationTypeId {{"
+    )
+    .unwrap();
     writeln!(
         out,
         "        CommunicationTypeId(tm.comm_id_enum(self).expect(\"CommunicationType not found in this TypeMap version\"))"

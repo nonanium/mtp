@@ -7,12 +7,11 @@ edition = "2024"
 mtp-type-map = { path = "../type-map" }
 mtp-common = { path = "../common" }
 mtp-crypto = { path = "../crypto", optional = true }
-registry = { path = "../registry", optional = true }
-base64 = "*"
-byteorder = "*"
-rand = { version = "*", features = ["std", "std_rng"] }
+base64 = "0.22"
+byteorder = "1.5"
+rand = { version = "0.8", features = ["std", "std_rng"] }
 
 [features]
 default = []
-registry = ["dep:registry", "mtp-type-map/multi-version"]
+registry = ["mtp-type-map/registry"]
 crypto = ["dep:mtp-crypto"]

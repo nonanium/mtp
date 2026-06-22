@@ -7,4 +7,9 @@ edition = "2024"
 mtp-common = { path = "../common" }
 mtp-codec = { path = "../codec" }
 mtp-transport = { path = "../transport" }
+mtp-crypto = { path = "../crypto", optional = true }
 tokio = { version = "1", features = ["full"] }
+rand = "0.8"
+
+[features]
+crypto = ["dep:mtp-crypto", "mtp-codec/crypto"]

@@ -17,7 +17,7 @@ An example `type-maps.yaml` is provided in the [`example-type-maps.yaml`](./exam
 After editing the config and rebuilding, `CommunicationType` and `DataType` enums are generated automatically. Use them in code:
 
 ```rust
-use mtp_type_map::{CommunicationType, DataType, TypeMap};
+use mtp::type_map::{CommunicationType, DataType, TypeMap};
 
 let tm = TypeMap::v2_0();
 let id = tm.data_id_enum(DataType::SomeType).unwrap();
@@ -28,8 +28,8 @@ The enums are a **union across all versions**; every type name from every versio
 Encoding/decoding uses a `TypeMap` to resolve type names to wire IDs:
 
 ```rust
-use mtp_codec::{encode, decode, DataValue};
-use mtp_type_map::TypeMap;
+use mtp::codec::{encode, decode, DataValue};
+use mtp::type_map::TypeMap;
 
 let tm = TypeMap::v2_0();
 let value = DataValue::Str("hello".into());
@@ -62,8 +62,15 @@ This is by design: the host maps unknown types to `Error`, and the client should
 
 The `registry` feature of the Codec crate adds `VersionedCodec` for version-aware encoding:
 
+Requires the `host` feature (which enables `mtp-codec`'s `registry` feature):
+
+```toml
+[dependencies]
+mtp = { path = "..", features = ["host"] }
+```
+
 ```rust
-use mtp_codec::registry::{Registry, VersionedCodec};
+use mtp::codec::registry::{Registry, VersionedCodec};
 
 let registry = Registry::builtin();
 let codec = VersionedCodec::new(registry);
