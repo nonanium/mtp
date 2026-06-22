@@ -5,13 +5,11 @@ pub use mtp_type_map::{
 };
 
 /*
- * Reserved communication-type namespace (0..32).
+ * Reserved communication & data-type namespace (0..32).
  * These are fixed across all protocol versions for version negotiation
  * and security. They are never assigned by user configuration.
  */
 pub const INTERNAL_COMM_RESERVED: std::ops::Range<u16> = 0..32;
-
-/* Reserved data-type namespace (0..32). */
 pub const INTERNAL_DATA_RESERVED: std::ops::Range<u16> = 0..32;
 
 /*
@@ -88,6 +86,7 @@ impl Default for Registry {
     }
 }
 
+/* ================================ TESTS ================================ */
 #[cfg(test)]
 mod tests {
     use super::*;

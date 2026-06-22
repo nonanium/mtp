@@ -4,7 +4,7 @@ use std::io::{Cursor, Read};
 
 use crate::data_value::DataValue;
 use crate::rand_u32;
-use mtp_type_map::{CommunicationTypeId, DataTypeId};
+use mtp_type_map::{CommunicationType, CommunicationTypeId, DataType, DataTypeId, TypeMap};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunicationValue {
@@ -13,6 +13,7 @@ pub struct CommunicationValue {
     sender: u64,
     receiver: u64,
     data: BTreeMap<DataTypeId, DataValue>,
+    type_map: Option<TypeMap>,
 }
 
 #[allow(dead_code)]
@@ -24,7 +25,25 @@ impl CommunicationValue {
             sender: 0,
             receiver: 0,
             data: BTreeMap::new(),
+            type_map: None,
         }
+    }
+
+    pub fn from_comm(comm_type: CommunicationType, tm: &TypeMap) -> Self {
+        let id = comm_type.to_id(tm);
+        Self {
+            id: rand_u32(),
+            comm_type: id,
+            sender: 0,
+            receiver: 0,
+            data: BTreeMap::new(),
+            type_map: Some(tm.clone()),
+        }
+    }
+
+    pub fn from_comm_default(comm_type: CommunicationType) -> Self {
+        let tm = TypeMap::latest();
+        Self::from_comm(comm_type, &tm)
     }
 
     pub fn with_id(mut self, p0: u32) -> Self {
@@ -64,6 +83,20 @@ impl CommunicationValue {
 
     pub fn add_data(mut self, data: DataTypeId, value: DataValue) -> Self {
         self.data.insert(data, value);
+        self
+    }
+
+    pub fn add_typed(mut self, data: DataType, tm: &TypeMap, value: DataValue) -> Self {
+        self.data.insert(data.to_id(tm), value);
+        self
+    }
+
+    pub fn add_typed_default(mut self, data: DataType, value: DataValue) -> Self {
+        let tm = self
+            .type_map
+            .clone()
+            .unwrap_or_else(TypeMap::latest);
+        self.data.insert(data.to_id(&tm), value);
         self
     }
 
@@ -193,15 +226,16 @@ impl CommunicationValue {
             sender,
             receiver,
             data,
+            type_map: None,
         })
     }
 }
 
+/* ================================ TESTS ================================ */
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::data_value::DataValue;
-    use mtp_type_map::{CommunicationTypeId, DataTypeId};
 
     fn roundtrip(cv: CommunicationValue) -> CommunicationValue {
         let bytes = cv.to_bytes();

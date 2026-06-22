@@ -62,13 +62,11 @@ impl MTPHost {
          * Extract the client's version from the first message.
          * The client is expected to send DataType::Version (reserved ID 3)
          * as a DataValue::Str("X.Y").
+         *
+         * Then negotiate the version for single-version clients
          */
         let client_version = extract_version(&first_msg)?;
 
-        /*
-         * Negotiate; for single-version clients, this is a simple
-         * membership check.
-         */
         let negotiated = self.registry.negotiate(&[client_version])?;
 
         let codec = VersionedCodec::new(self.registry.clone());
@@ -97,7 +95,6 @@ impl MTPHost {
  * (reserved ID 3) mapping to `DataValue::Str("major.minor")`.
  */
 fn extract_version(msg: &CommunicationValue) -> Option<Version> {
-    /* Reserved type: DataType::Version has fixed wire ID 3 */
     let value = msg.get_data(DataTypeId(3));
     match value {
         DataValue::Str(s) => Version::parse(s.as_str()),
@@ -105,6 +102,7 @@ fn extract_version(msg: &CommunicationValue) -> Option<Version> {
     }
 }
 
+/* ================================ TESTS ================================ */
 #[cfg(test)]
 mod tests {
     use super::*;

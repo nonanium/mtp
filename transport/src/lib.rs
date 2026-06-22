@@ -2,8 +2,9 @@ pub mod client;
 pub mod connection;
 pub mod connection_handle;
 
-pub use client::connect;
 pub use connection::{Policy, Receiver, SendMode, Sender};
+
+pub use client::connect;
 pub use connection_handle::ConnectionHandle;
 
 #[cfg(feature = "host")]

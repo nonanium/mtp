@@ -31,7 +31,7 @@ impl std::fmt::Display for Version {
  * Type-to-wire-ID mappings are generated at compile time and dispatched
  * via `comm_id_enum` / `data_id_enum` based on `self.version`.
  */
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeMap {
     pub version: Version,
 }

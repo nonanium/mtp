@@ -10,9 +10,8 @@ use mtp_transport::{Policy, Receiver, Sender};
  * which type maps are available, and the client always advertises
  * the latest one.
  */
-pub const PROTOCOL_VERSION: Version = Version(2, 0);
+pub use mtp_type_map::PROTOCOL_VERSION;
 
-/* Client configuration. */
 pub struct ClientConfig {
     pub url: String,
     pub server_cert: Option<Vec<u8>>,
@@ -25,7 +24,6 @@ pub struct MTPConnection {
     pub receiver: Receiver,
 }
 
-// High-level MTP client.
 pub struct MTPClient;
 
 impl MTPClient {
@@ -42,11 +40,7 @@ impl MTPClient {
         let (sender, receiver) =
             mtp_transport::connect(&config.url, config.server_cert, Policy::default()).await?;
 
-        /*
-         * Build the initial identification message with the protocol
-         * version.  Uses only reserved type IDs (0-31), which are
-         * identical across all protocol versions.
-         */
+        // Build the initial identification message with the protocol version.
         let version_str = format!("{}", PROTOCOL_VERSION);
         let ident = CommunicationValue::new(mtp_codec::CommunicationTypeId(15))
             .add_data(DataTypeId(3), DataValue::Str(version_str))
@@ -59,15 +53,5 @@ impl MTPClient {
             sender,
             receiver,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn protocol_version_is_compiled_in() {
-        assert_eq!(PROTOCOL_VERSION, Version(2, 0));
     }
 }
