@@ -11,6 +11,9 @@ pub mod kdf;
 #[cfg(any(feature = "ed25519-dalek", feature = "ml-dsa"))]
 pub mod sign;
 
+#[cfg(any(feature = "ed25519-dalek", feature = "ml-dsa"))]
+pub use sign::SigAlgorithm;
+
 #[cfg(feature = "mlkem-tls")]
 pub mod kem;
 
@@ -19,7 +22,7 @@ pub mod helper;
 pub use aead::{AeadCipher, AeadDecrypt, AeadEncrypt};
 pub use error::CryptoError;
 pub use keypair::{
-    EncryptionPrivateKey, EncryptionPublicKey, KemPrivateKey, KemPublicKey, KeyGroup, Keyring,
+    EncryptionPrivateKey, EncryptionPublicKey, KemPrivateKey, KemPublicKey, Keyring,
     PublicKeyBundle, SignaturePqPrivateKey, SignaturePqPublicKey, SignaturePrivateKey,
     SignaturePublicKey,
 };

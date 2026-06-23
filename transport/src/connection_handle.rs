@@ -63,3 +63,70 @@ impl Default for ConnectionHandle {
         Self::new()
     }
 }
+
+/* ================================ TESTS ================================ */
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_is_open() {
+        let h = ConnectionHandle::new();
+        assert!(h.is_open());
+        assert!(!h.is_closed());
+    }
+
+    #[test]
+    fn test_close_transitions_state() {
+        let h = ConnectionHandle::new();
+        h.close(Some(CommunicationError::StreamClosed));
+        assert!(!h.is_open());
+        assert!(h.is_closed());
+    }
+
+    #[test]
+    fn test_close_reason_some() {
+        let h = ConnectionHandle::new();
+        h.close(Some(CommunicationError::UseAfterClosed));
+        assert!(h.close_reason().is_some());
+    }
+
+    #[test]
+    fn test_close_reason_none() {
+        let h = ConnectionHandle::new();
+        h.close(None);
+        assert!(h.close_reason().is_none());
+    }
+
+    #[test]
+    fn test_default_is_new() {
+        let h = ConnectionHandle::default();
+        assert!(h.is_open());
+    }
+
+    #[test]
+    fn test_close_with_error() {
+        let h = ConnectionHandle::new();
+        h.close_with_error(CommunicationError::MessageTooLarge);
+        assert!(h.is_closed());
+        assert!(h.close_reason().is_some());
+    }
+
+    #[test]
+    fn test_multiple_close_first_wins() {
+        let h = ConnectionHandle::new();
+        h.close(Some(CommunicationError::StreamClosed));
+        h.close(Some(CommunicationError::UseAfterClosed));
+        // First close reason is preserved
+        assert!(h.close_reason().is_some());
+    }
+
+    #[test]
+    fn test_close_sends_reason() {
+        let h = ConnectionHandle::new();
+        let mut rx = h.subscribe_close();
+        h.close(Some(CommunicationError::ClosedLocally));
+        // After close, the watch channel is updated
+        assert!(rx.borrow_and_update().is_some());
+    }
+}

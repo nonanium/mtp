@@ -81,8 +81,8 @@ pub use registry::*;
 
 #[cfg(feature = "registry")]
 mod registry {
+    use crate::{TypeMap, Version, builtin_type_maps};
     use std::collections::BTreeMap;
-    use crate::{Version, TypeMap, builtin_type_maps};
 
     /*
      * Multi-version type-map registry.
@@ -142,6 +142,7 @@ mod registry {
         }
     }
 
+    /* ================================ TESTS ================================ */
     #[cfg(test)]
     mod tests {
         use super::*;

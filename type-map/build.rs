@@ -156,22 +156,28 @@ const RESERVED_DATA_TYPES: &[ReservedEntry] = &[
         name: "Connected",
         id: 11,
     },
+    ReservedEntry {
+        name: "PqSignature",
+        id: 12,
+    },
 ];
 
 fn main() {
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let multi_version = std::env::var("CARGO_FEATURE_REGISTRY").is_ok();
 
+    println!("cargo:rerun-if-env-changed=MTP_TYPE_MAPS");
+
     let config = match std::env::var("MTP_TYPE_MAPS") {
         Ok(config_path) => {
+            println!("cargo:rerun-if-changed={}", config_path);
+
             let content =
                 std::fs::read_to_string(&config_path).expect("Failed to read type-maps.yaml");
             serde_yaml::from_str(&content).expect("Failed to parse type-maps.yaml")
         }
         Err(_) => {
-            eprintln!(
-                "warning: MTP_TYPE_MAPS not set; generating types with reserved entries only"
-            );
+            eprint!("warning: MTP_TYPE_MAPS not set; generating types with reserved entries only");
             Config {
                 protocol_version: String::new(),
                 type_maps: BTreeMap::new(),
@@ -441,12 +447,7 @@ fn generate_data_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
         .unwrap();
     }
     for name in user_names {
-        writeln!(
-            out,
-            "            \"{}\" => Some(DataType::{}),",
-            name, name
-        )
-        .unwrap();
+        writeln!(out, "            \"{}\" => Some(DataType::{}),", name, name).unwrap();
     }
 
     writeln!(out, "            _ => None,").unwrap();

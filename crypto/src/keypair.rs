@@ -84,32 +84,6 @@ impl From<Vec<u8>> for SignaturePublicKey {
     }
 }
 
-#[derive(ZeroizeOnDrop)]
-pub struct KeyGroup {
-    #[zeroize(skip)]
-    pub encryption_public_key: EncryptionPublicKey,
-    pub encryption_private_key: EncryptionPrivateKey,
-    #[zeroize(skip)]
-    pub signature_public_key: SignaturePublicKey,
-    pub signature_private_key: SignaturePrivateKey,
-}
-
-impl KeyGroup {
-    pub fn new(
-        encryption_public_key: EncryptionPublicKey,
-        encryption_private_key: EncryptionPrivateKey,
-        signature_public_key: SignaturePublicKey,
-        signature_private_key: SignaturePrivateKey,
-    ) -> Self {
-        Self {
-            encryption_public_key,
-            encryption_private_key,
-            signature_public_key,
-            signature_private_key,
-        }
-    }
-}
-
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
 #[derive(Zeroize, ZeroizeOnDrop)]

@@ -1,4 +1,6 @@
 client_keys.json
 host_keys.json
 host_sig_pk.bin
+host_sig_pq_pk.bin
+host_enc_kem_pk.bin
 clients.json

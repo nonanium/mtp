@@ -3,6 +3,24 @@ use crate::error::CryptoError;
 #[cfg(feature = "ed25519-dalek")]
 use crate::keypair::{SignaturePrivateKey, SignaturePublicKey};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SigAlgorithm;
+
+impl SigAlgorithm {
+    pub const ED25519: u8 = 0x01;
+    pub const ML_DSA_65: u8 = 0x02;
+    pub const DUAL: u8 = 0x03;
+
+    pub const fn length(alg: u8) -> Option<usize> {
+        match alg {
+            Self::ED25519 => Some(64),
+            Self::ML_DSA_65 => Some(3309),
+            Self::DUAL => Some(3373),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(feature = "ed25519-dalek")]
 use rand_core::RngCore;
 

@@ -56,7 +56,6 @@ impl Default for Policy {
 enum ReceivedFrame {
     Message(CommunicationValue),
     ClosedByPeer,
-    #[allow(dead_code)]
     Idle,
 }
 
@@ -515,5 +514,50 @@ impl Receiver {
 
     pub fn close_reason(&self) -> Option<CommunicationError> {
         self.handle.close_reason()
+    }
+}
+
+/* ================================ TESTS ================================ */
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_send_mode_derive() {
+        assert_eq!(SendMode::PersistentStream, SendMode::PersistentStream);
+        assert_ne!(SendMode::PersistentStream, SendMode::SingleStreamPerMessage);
+    }
+
+    #[test]
+    fn test_policy_default_values() {
+        let p = Policy::default();
+        assert_eq!(p.send_mode, SendMode::PersistentStream);
+        assert_eq!(p.max_message_size, 1_000_000_000);
+        assert_eq!(p.close_frame_len, u32::MAX);
+        assert_eq!(p.application_close_code, 0);
+        assert_eq!(p.open_stream_timeout, Duration::from_millis(2_000));
+        assert_eq!(p.write_timeout, Duration::from_millis(2_000));
+        assert_eq!(p.accept_stream_timeout, Duration::from_millis(10_000));
+        assert_eq!(p.read_timeout, Duration::from_millis(30_000));
+        assert_eq!(p.keep_alive_interval, Some(Duration::from_secs(3)));
+        assert_eq!(p.max_idle_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(p.force_close_delay, Duration::from_millis(300));
+        assert_eq!(p.max_transient_recv_errors, 20);
+        assert_eq!(p.transient_recv_backoff, Duration::from_millis(100));
+        assert_eq!(p.receiver_queue_capacity, 1000);
+    }
+
+    #[test]
+    fn test_policy_clone() {
+        let p = Policy::default();
+        let cloned = p.clone();
+        assert_eq!(p.send_mode, cloned.send_mode);
+    }
+
+    #[test]
+    fn test_policy_debug() {
+        let p = Policy::default();
+        let debug_str = format!("{:?}", p);
+        assert!(debug_str.contains("Policy"));
     }
 }

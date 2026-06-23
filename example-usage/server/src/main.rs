@@ -2,19 +2,19 @@ use std::collections::HashMap;
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue, TypeMap};
-use mtp_host::{HostConfig, MTPHost};
-use mtp_crypto::{
-    Ed25519Signer, KemPrivateKey, KemPublicKey, Keyring, PublicKeyBundle,
-    SignaturePqPrivateKey, SignaturePqPublicKey,
-};
+use mtp::codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue, TypeMap};
+use mtp::crypto::{Ed25519Signer, Keyring, MlDsaSigner, PublicKeyBundle, kem::HybridKem};
+use mtp::host::{HostConfig, MTPHost};
 
 /*
  * Load an existing TLS certificate and key pair from disk.  If neither
  * file exists, generate a self-signed certificate so the server is
  * immediately usable without external tooling.
  */
-fn load_or_generate_tls(cert_path: &str, key_path: &str) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+fn load_or_generate_tls(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
     if let (Ok(c), Ok(k)) = (fs::read(cert_path), fs::read(key_path)) {
         println!("Using existing TLS cert from {cert_path}");
         return Ok((c, k));
@@ -50,15 +50,10 @@ fn load_or_generate_host_keys(path: &str) -> Result<(u64, Keyring), Box<dyn std:
         return Ok((hid, keyring));
     }
 
-    let (_signer, sig_sk, sig_pk) = Ed25519Signer::generate();
-    let keyring = Keyring::new(
-        KemPublicKey::new(vec![]),
-        KemPrivateKey::new(vec![]),
-        SignaturePqPublicKey::new(vec![]),
-        SignaturePqPrivateKey::new(vec![]),
-        sig_pk,
-        sig_sk,
-    );
+    let (_ed_signer, sig_sk, sig_pk) = Ed25519Signer::generate();
+    let (_pq_signer, sig_pq_sk, sig_pq_pk) = MlDsaSigner::generate();
+    let (kem_sk, kem_pk) = HybridKem::generate_keypair();
+    let keyring = Keyring::new(kem_pk, kem_sk, sig_pq_pk, sig_pq_sk, sig_pk, sig_sk);
 
     let json = serde_json::json!({
         "host_id": 1,
@@ -76,20 +71,14 @@ fn load_or_generate_host_keys(path: &str) -> Result<(u64, Keyring), Box<dyn std:
  */
 fn load_client_db(
     path: &str,
-) -> Result<
-    (
-        Arc<Mutex<HashMap<u64, PublicKeyBundle>>>,
-        Arc<Mutex<u64>>,
-    ),
-    Box<dyn std::error::Error>,
-> {
-    let clients: Arc<Mutex<HashMap<u64, PublicKeyBundle>>> = Arc::new(Mutex::new(
-        if let Ok(data) = fs::read_to_string(path) {
+) -> Result<(Arc<Mutex<HashMap<u64, PublicKeyBundle>>>, Arc<Mutex<u64>>), Box<dyn std::error::Error>>
+{
+    let clients: Arc<Mutex<HashMap<u64, PublicKeyBundle>>> =
+        Arc::new(Mutex::new(if let Ok(data) = fs::read_to_string(path) {
             serde_json::from_str(&data).unwrap_or_default()
         } else {
             HashMap::new()
-        },
-    ));
+        }));
     let next_id = Arc::new(Mutex::new(
         clients.lock().unwrap().keys().max().unwrap_or(&999) + 1,
     ));
@@ -126,10 +115,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (cert_pem, key_pem) = load_or_generate_tls("server.pem", "server.key")?;
     let (host_id, host_keyring) = load_or_generate_host_keys("host_keys.json")?;
 
-    // Export the host's Ed25519 public key so clients can verify it
+    // Export the host's public keys so clients can verify it
     fs::write(
-        "host_sig_pk.bin",
-        host_keyring.sig_cl_public_key.as_bytes(),
+        "host_enc_kem_pk.bin",
+        host_keyring.kem_public_key.as_bytes(),
+    )?;
+    fs::write("host_sig_pk.bin", host_keyring.sig_cl_public_key.as_bytes())?;
+    fs::write(
+        "host_sig_pq_pk.bin",
+        host_keyring.sig_pq_public_key.as_bytes(),
     )?;
 
     let (clients, next_id) = load_client_db("clients.json")?;
@@ -157,6 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting MTP server on port 8080 ...");
 
     let config = HostConfig {
+        ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         port: 8080,
         tls_fullchain: cert_pem,
         tls_key: key_pem,

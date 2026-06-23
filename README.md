@@ -1,6 +1,6 @@
-# **M**ethanium **T**ransport **P**rotocol
+# Methanium Transport Protocol
 
-**MTP** is a **m**odular **t**ransport **p**rotocol by Methanium.
+MTP is a modular transport protocol built on QUIC. It provides version-negotiable type maps, a binary codec, cryptographic primitives (classical and post-quantum), and host/client connection management with mutual authentication.
 
 ## Getting Started
 
@@ -22,9 +22,9 @@ The `mtp` umbrella crate re-exports all sub-crates behind feature flags:
 Core crates (`codec`, `transport`, `common`, `type_map`) are always available.
 
 ```rust
-use mtp::codec::{encode, decode, DataValue};
-use mtp::type_map::TypeMap;
-use mtp::transport::Sender;
+use mtp::codec::{CommunicationValue, DataValue};
+use mtp::type_map::{CommunicationType, DataType, TypeMap};
+use mtp::transport::{Sender, Receiver};
 
 #[cfg(feature = "crypto")]
 use mtp::crypto::ChaCha20Poly1305;
@@ -32,38 +32,47 @@ use mtp::crypto::ChaCha20Poly1305;
 
 ## Sub-crates
 
-All sub-crates are re-exported through the `mtp` facade and can be referenced
-as `mtp::codec`, `mtp::transport`, `mtp::common`, `mtp::type_map`,
-`mtp::crypto`, `mtp::host`, `mtp::client`.
+All sub-crates are re-exported through the `mtp` facade and can be referenced as `mtp::codec`, `mtp::transport`, `mtp::common`, `mtp::type_map`, `mtp::crypto`, `mtp::host`, `mtp::client`.
 
 ### Codec
 
-The Codec crate handles encoding and decoding of MTP packets using Communication Types and Data Types from the Registry.
+The codec crate handles binary encoding and decoding of MTP packets using Communication Types and Data Types resolved through the type-map registry.
 
-**Data Values:**
-- Container
-- Encrypted Container (requires `crypto` feature)
-- Signed Integer
-- Unsigned Integer
+**Data Value types:**
+- Container (key-value map of typed entries)
+- Encrypted Container (requires `crypto`)
+- Signed Container (requires `crypto`)
+- SignedEncrypted Container (requires `crypto`)
+- Signed Integer (i128)
+- Unsigned Integer (u128)
 - Boolean
-- Signed Float
+- Float (exponent + mantissa)
 - String
 - Array
-- Binary (List of Bytes)
+- Bytes
+- Null
 
-Encoding/decoding uses a `TypeMap` to resolve type names to wire IDs.
-
-The Codec uses the Crypto crate to encrypt and decrypt Encrypted Containers.
-
----
+Encoding and decoding use a `TypeMap` to resolve type names to wire IDs. The `CommunicationValue` struct provides the frame format (type, flags, optional id/sender/receiver, data payload, optional signature).
 
 ### Transport
 
-The Transport crate wraps QUIC using `wtransport`. It provides `Sender`/`Receiver` for bidirectional message passing over QUIC streams.
+The transport crate wraps QUIC using `wtransport`. It provides `Sender`/`Receiver` for bidirectional message passing over uni-directional QUIC streams. Supports two send modes: persistent stream and single-stream-per-message.
+
+### Host
+
+The host crate provides `MTPHost` with built-in version negotiation and optional authenticated login/registration (requires `crypto`). Accepts connections, negotiates protocol version, and returns `MTPConnection` handles.
+
+### Client
+
+The client crate provides `MTPClient` that connects to an MTP host. Supports `connect` (unauthenticated), `auth_connect` (login), and `auth_register` (registration) when built with `crypto`.
 
 ### Common
 
-Common handles logging and error handling. Personal information reported to Common will be anonymized.
+Common defines shared error types (`CodecError`, `CommunicationError`) used across all crates.
+
+### Type Map
+
+The type-map build script reads a YAML configuration to generate `CommunicationType` and `DataType` enums at compile time. The runtime crate provides `TypeMap`, `Version`, `CommunicationTypeId`, `DataTypeId`, and the multi-version `Registry` (requires `registry` feature).
 
 ### Crypto Stack
 
@@ -77,3 +86,16 @@ Common handles logging and error handling. Personal information reported to Comm
 | sha2             | No       | Standard construction; widely reviewed           |
 | zeroize          | No       | Simple; widely used                              |
 | mlkem-tls        | No       | mlkem-rs backend unaudited                       |
+
+## Test Coverage
+
+| Crate          | Tests | Notes                                      |
+| -------------- | ----- | ------------------------------------------ |
+| common         | 7     | Error type Display, Clone, format          |
+| type-map       | 3     | Registry builtin, negotiate, latest        |
+| codec          | 32    | DataValue roundtrip, accessors, Display, Hash, base64; CommunicationValue frame encode/decode |
+| crypto         | 20    | AEAD, signatures, KEM, KDF, hash, key types, multi-encrypt |
+| transport      | 12    | ConnectionHandle state transitions; Policy defaults; SendMode |
+| host           | 3     | Version extraction from messages           |
+| client         | 7     | ClientConfig; AuthState derives            |
+| **Total**      | **84** |                                            |

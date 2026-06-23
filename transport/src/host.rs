@@ -1,4 +1,5 @@
 use crate::{ConnectionHandle, Policy, Receiver, Sender};
+use log;
 use mtp_common::CommunicationError;
 use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
 use std::net::{IpAddr, SocketAddr};
@@ -13,7 +14,13 @@ pub struct Host {
 
 impl Host {
     pub async fn next(&mut self) -> Option<(Sender, Receiver)> {
-        self.incoming.recv().await
+        log::warn!("[transport Host::next] waiting on recv...");
+        let result = self.incoming.recv().await;
+        match &result {
+            Some(_) => log::warn!("[transport Host::next] received connection"),
+            None => log::warn!("[transport Host::next] incoming channel closed - sender dropped"),
+        }
+        result
     }
 
     pub fn local_addr(&self) -> std::net::SocketAddr {
@@ -22,6 +29,7 @@ impl Host {
 }
 
 pub async fn host(
+    ip: IpAddr,
     port: u16,
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
@@ -29,7 +37,7 @@ pub async fn host(
 ) -> Result<Host, CommunicationError> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let server_config = configure_server(port, cert_pem, key_pem, &policy).await?;
+    let server_config = configure_server(ip, port, cert_pem, key_pem, &policy).await?;
     let endpoint = Endpoint::server(server_config)
         .map_err(|e| CommunicationError::Other(format!("Endpoint creation failed: {}", e)))?;
 
@@ -42,25 +50,37 @@ pub async fn host(
     let policy = Arc::new(policy);
 
     let task = tokio::spawn(async move {
+        log::warn!("[transport bg task] started");
         loop {
+            log::warn!("[transport bg task] waiting for connection...");
             let incoming_session = endpoint.accept().await;
+            log::warn!("[transport bg task] got incoming session");
 
             let request = match incoming_session.await {
-                Ok(req) => req,
-                Err(_) => {
+                Ok(req) => {
+                    log::warn!("[transport bg task] got request");
+                    req
+                }
+                Err(e) => {
+                    log::warn!("[transport bg task] incoming session error: {e}");
                     continue;
                 }
             };
 
             let connection = match request.accept().await {
-                Ok(conn) => conn,
-                Err(_) => {
+                Ok(conn) => {
+                    log::warn!("[transport bg task] connection accepted");
+                    conn
+                }
+                Err(e) => {
+                    log::warn!("[transport bg task] accept error: {e}");
                     continue;
                 }
             };
 
             let incoming_tx = incoming_tx.clone();
             let policy = policy.clone();
+            eprintln!("[transport bg task] spawning handle_connection");
             tokio::spawn(handle_connection(connection, incoming_tx, policy));
         }
     });
@@ -85,6 +105,7 @@ async fn handle_connection(
 }
 
 async fn configure_server(
+    bind_ip: IpAddr,
     port: u16,
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
@@ -104,12 +125,6 @@ async fn configure_server(
 
     tls_config.alpn_protocols = vec![b"h3".to_vec()];
 
-    let bind_ip = std::env::var("mtp_BIND")
-        .ok()
-        .and_then(|s| if s.is_empty() { None } else { Some(s) })
-        .unwrap_or_else(|| "::".to_string())
-        .parse::<IpAddr>()
-        .map_err(|e| CommunicationError::ParseError(e.to_string()))?;
     let bind_addr = SocketAddr::new(bind_ip, port);
 
     let server_config = ServerConfig::builder()

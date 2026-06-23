@@ -33,12 +33,18 @@ mtp-codec = { path = "codec" }
 mtp-transport = { path = "transport" }
 
 # --- optional, behind features ---
-mtp-crypto = { path = "crypto", optional = true }
+mtp-crypto = { path = "crypto", optional = true, features = [
+    "serde",
+    "mlkem-tls",
+] }
 mtp-host = { path = "host", optional = true }
 mtp-client = { path = "client", optional = true }
 
 [features]
 default = []
+
+# Serialization
+serde = ["mtp-crypto/serde"]
 
 # Message encryption (AEAD, signatures, KEM, KDF, hashing).
 # When combined with `host` or `client`, also enables connection authentication.

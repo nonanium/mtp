@@ -6,9 +6,11 @@ use mtp_codec::{
 };
 use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
+use std::net::IpAddr;
 
 // Host configuration.
 pub struct HostConfig {
+    pub ip: IpAddr,
     pub port: u16,
     pub tls_fullchain: Vec<u8>,
     pub tls_key: Vec<u8>,
@@ -60,6 +62,7 @@ impl MTPHost {
         let registry = Registry::builtin();
 
         let transport = mtp_transport::host(
+            config.ip,
             config.port,
             config.tls_fullchain.clone(),
             config.tls_key.clone(),
@@ -90,7 +93,7 @@ impl MTPHost {
             return self.accept_authenticated(sender, receiver).await;
         }
 
-        /* Read the first message (always encoded with reserved types). */
+        // Read the first message (always encoded with reserved types).
         let first_msg = receiver.receive().await.ok()?;
 
         /*
@@ -136,30 +139,12 @@ impl MTPHost {
         sender: Sender,
         receiver: Receiver,
     ) -> Option<MTPConnection> {
-        use mtp_crypto::{Ed25519Signer, PublicKeyBundle, SignatureScheme, verify_ed25519};
+        use mtp_crypto::{
+            Ed25519Signer, PublicKeyBundle, SignatureScheme, verify_ed25519, verify_ml_dsa,
+        };
 
-        // 1. Send host greeting
-        let host_nonce: u128 = rand::random();
-        let host_bundle = self.config.host_keyring.public_key_bundle();
-
-        let greeting =
-            CommunicationValue::new(mtp_codec::CommunicationType::IdentificationResponse)
-                .add_typed_default(
-                    DataType::Id,
-                    DataValue::UnsignedNumber(self.config.host_id as u128),
-                )
-                .add_typed_default(
-                    DataType::PublicKeys,
-                    DataValue::Bytes(host_bundle.as_bytes()),
-                )
-                .add_typed_default(DataType::ServerNonce, DataValue::UnsignedNumber(host_nonce));
-
-        sender.send(&greeting).await.ok()?;
-
-        // 2. Receive client message
+        // 1. Receive client message first (no host greeting)
         let msg = receiver.receive().await.ok()?;
-
-        // Extract common fields
         let version_str = match msg.get_data(DataTypeId(3)) {
             DataValue::Str(s) => s.clone(),
             _ => {
@@ -184,6 +169,11 @@ impl MTPHost {
                 sender.close();
                 return None;
             }
+        };
+
+        let pq_sig_bytes: Vec<u8> = match msg.get_data(DataTypeId(12)) {
+            DataValue::Bytes(b) => b.clone(),
+            _ => vec![],
         };
 
         let (assigned_id, client_bundle) = if msg.get_type() == mtp_codec::CommunicationTypeId(15) {
@@ -231,12 +221,26 @@ impl MTPHost {
                 sender.close();
                 return None;
             }
+            if !pq_sig_bytes.is_empty()
+                && verify_ml_dsa(&bundle.sig_pq_public_key, &sig_payload, &pq_sig_bytes).is_err()
+            {
+                let rejection =
+                    CommunicationValue::new(mtp_codec::CommunicationType::IdentificationResponse)
+                        .add_typed_default(DataType::Connected, DataValue::BoolFalse)
+                        .add_typed_default(
+                            DataType::ClientNonce,
+                            DataValue::UnsignedNumber(client_nonce),
+                        );
+                let _ = sender.send(&rejection).await;
+                sender.close();
+                return None;
+            }
             /* ===== End Signature ===== */
 
             (cid, bundle)
-        } else if msg.get_type() == mtp_codec::CommunicationTypeId(14) {
+        } else if msg.get_type() == mtp_codec::CommunicationTypeId(17) {
             // REGISTER
-            let bundle = match msg.get_data(DataTypeId(8)) {
+            let bundle = match msg.get_data(DataTypeId(9)) {
                 DataValue::Bytes(b) => PublicKeyBundle::from_bytes(b).ok()?,
                 _ => {
                     sender.close();
@@ -263,6 +267,20 @@ impl MTPHost {
                 sender.close();
                 return None;
             }
+            if !pq_sig_bytes.is_empty()
+                && verify_ml_dsa(&bundle.sig_pq_public_key, &sig_payload, &pq_sig_bytes).is_err()
+            {
+                let rejection =
+                    CommunicationValue::new(mtp_codec::CommunicationType::RegisterResponse)
+                        .add_typed_default(DataType::Connected, DataValue::BoolFalse)
+                        .add_typed_default(
+                            DataType::ClientNonce,
+                            DataValue::UnsignedNumber(client_nonce),
+                        );
+                let _ = sender.send(&rejection).await;
+                sender.close();
+                return None;
+            }
             /* ===== End Signature ===== */
 
             let new_id = (self.config.complete_register)(bundle.clone());
@@ -272,11 +290,11 @@ impl MTPHost {
             return None;
         };
 
-        // 4. Send success response
+        // 2. Send success response (single host message)
         let new_nonce: u128 = rand::random();
 
         let mut host_sig_payload = Vec::new();
-        host_sig_payload.extend_from_slice(b"true");
+        host_sig_payload.push(0x01);
         host_sig_payload.extend_from_slice(&assigned_id.to_be_bytes());
         host_sig_payload.extend_from_slice(&client_nonce.to_be_bytes());
         host_sig_payload.extend_from_slice(&new_nonce.to_be_bytes());
@@ -285,9 +303,8 @@ impl MTPHost {
 
         /* ===== Signature ===== */
         let host_sig = host_signer.sign(&host_sig_payload).ok()?;
-        /* ===== End Signature ===== */
 
-        let response =
+        let mut response =
             CommunicationValue::new(mtp_codec::CommunicationType::IdentificationResponse)
                 .add_typed_default(DataType::Connected, DataValue::BoolTrue)
                 .add_typed_default(
@@ -298,9 +315,28 @@ impl MTPHost {
                 .add_typed_default(DataType::Signature, DataValue::Bytes(host_sig))
                 .add_typed_default(DataType::Id, DataValue::UnsignedNumber(assigned_id as u128));
 
+        if !self
+            .config
+            .host_keyring
+            .sig_pq_secret_key
+            .as_bytes()
+            .is_empty()
+        {
+            use mtp_crypto::MlDsaSigner;
+            let host_pq_signer = MlDsaSigner::new(
+                &self.config.host_keyring.sig_pq_secret_key,
+                &self.config.host_keyring.sig_pq_public_key,
+            )
+            .ok()?;
+            let host_pq_sig = host_pq_signer.sign(&host_sig_payload).ok()?;
+            response =
+                response.add_typed_default(DataType::PqSignature, DataValue::Bytes(host_pq_sig));
+        }
+        /* ===== End Signature ===== */
+
         sender.send(&response).await.ok()?;
 
-        // 5. Version negotiation
+        // 3. Version negotiation
         let negotiated = self.registry.negotiate(&[client_version])?;
         let codec = VersionedCodec::new(self.registry.clone());
 

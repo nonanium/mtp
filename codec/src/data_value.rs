@@ -9,7 +9,7 @@ use std::io::Cursor;
 use mtp_type_map::DataTypeId;
 
 #[cfg(feature = "crypto")]
-use mtp_crypto::{AeadDecrypt, AeadEncrypt};
+use mtp_crypto::{AeadDecrypt, AeadEncrypt, SigAlgorithm, SignatureScheme};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataKind {
@@ -27,6 +27,10 @@ pub enum DataKind {
 
     #[cfg(feature = "crypto")]
     EncryptedContainer,
+    #[cfg(feature = "crypto")]
+    SignedContainer,
+    #[cfg(feature = "crypto")]
+    SignedEncryptedContainer,
 
     Null,
 }
@@ -44,11 +48,46 @@ pub enum DataValue {
     Str(String),
     Bytes(Vec<u8>),
     Array(Vec<DataValue>),
-
+    /*
+     * Container format:
+     * [2 bytes u16 entry_count]       // number of entries
+     * [1 byte kind]                   // DataValue kind marker
+     * [if kind == BOOL_TRUE or BOOL_FALSE:]
+     *     [2 bytes u16 key]           // DataTypeId discriminant
+     * [else:]
+     *     [4 bytes u32 payload_len]   // length of the value payload
+     *     [2 bytes u16 key]           // DataTypeId discriminant
+     *     [payload_len bytes payload] // value data (interpreted based on kind)
+     */
     Container(Vec<(DataTypeId, DataValue)>),
 
+    /*
+     * Container format:
+     * [4 bytes u32 entry_count]       // length of the container
+     * [binary data]
+     * -> After decryption, the container is parsed as a regular container
+     */
     #[cfg(feature = "crypto")]
     EncryptedContainer(Vec<u8>),
+
+    /*
+     * Container format:
+     * [4 bytes u32 entry_count]       // length of the container
+     * [binary data]
+     * -> Can be turned into Container
+     * -> Can be used with a public key to verify integrity
+     */
+    #[cfg(feature = "crypto")]
+    SignedContainer(Vec<u8>),
+
+    /*
+     * Container format:
+     * [4 bytes u32 entry_count]       // length of the container
+     * [binary data]
+     * -> After decryption, the container is parsed as a signed container
+     */
+    #[cfg(feature = "crypto")]
+    SignedEncryptedContainer(Vec<u8>),
 
     Null,
 }
@@ -86,7 +125,9 @@ impl DataValue {
      * 0x08 => Array
      * 0x09 => Container
      * 0x0A => EncryptedContainer (4 bytes u32 len + encrypted bytes)
-     * 0x0B => Null
+     * 0x0B => SignedContainer (4 bytes u32 len + 3373 bytes signature)
+     * 0x0C => SignedEncryptedContainer (4 bytes u32 len + 3373 bytes signature + encrypted bytes)
+     * 0xFF => Null
      */
     const KIND_BOOL_TRUE: u8 = 0x01;
     const KIND_BOOL_FALSE: u8 = 0x02;
@@ -102,8 +143,12 @@ impl DataValue {
     const KIND_CONTAINER: u8 = 0x09;
     #[cfg(feature = "crypto")]
     const KIND_ENCRYPTED_CONTAINER: u8 = 0x0A;
+    #[cfg(feature = "crypto")]
+    const KIND_SIGNED_CONTAINER: u8 = 0x0B;
+    #[cfg(feature = "crypto")]
+    const KIND_SIGNED_ENCRYPTED_CONTAINER: u8 = 0x0C;
 
-    const KIND_NULL: u8 = 0x0B;
+    const KIND_NULL: u8 = 0xFF;
 
     pub fn container_from_map(map: &BTreeMap<DataTypeId, DataValue>) -> DataValue {
         let mut container = Vec::new();
@@ -131,6 +176,10 @@ impl DataValue {
             DataValue::Container(_) => DataKind::Container,
             #[cfg(feature = "crypto")]
             DataValue::EncryptedContainer(_) => DataKind::EncryptedContainer,
+            #[cfg(feature = "crypto")]
+            DataValue::SignedContainer(_) => DataKind::SignedContainer,
+            #[cfg(feature = "crypto")]
+            DataValue::SignedEncryptedContainer(_) => DataKind::SignedEncryptedContainer,
             DataValue::Null => DataKind::Null,
         }
     }
@@ -205,17 +254,29 @@ impl DataValue {
         }
     }
 
+    #[cfg(feature = "crypto")]
+    pub fn as_signed_container(&self) -> Option<Vec<u8>> {
+        match self {
+            DataValue::SignedContainer(b) => Some(b.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn as_signed_encrypted_container(&self) -> Option<Vec<u8>> {
+        match self {
+            DataValue::SignedEncryptedContainer(c) => Some(c.clone()),
+            _ => None,
+        }
+    }
+
     /*
      * Decrypt an `EncryptedContainer` in-place, replacing it with the
      * deserialized `Container`. Returns `None` if decryption or
      * deserialization fails.
      */
     #[cfg(feature = "crypto")]
-    pub fn decrypt_into_container(
-        &mut self,
-        cipher: &impl AeadDecrypt,
-        aad: &[u8],
-    ) -> Option<()> {
+    pub fn decrypt_into_container(&mut self, cipher: &impl AeadDecrypt, aad: &[u8]) -> Option<()> {
         let data = self.as_encrypted_container()?;
         let plaintext = cipher.decrypt(&data, aad).ok()?;
         let dv = DataValue::from_bytes(&plaintext)?;
@@ -233,15 +294,103 @@ impl DataValue {
      * Returns `None` if the value is not a `Container` or encryption fails.
      */
     #[cfg(feature = "crypto")]
-    pub fn encrypt_container(
-        &mut self,
-        cipher: &impl AeadEncrypt,
-        aad: &[u8],
-    ) -> Option<()> {
+    pub fn encrypt_container(&mut self, cipher: &impl AeadEncrypt, aad: &[u8]) -> Option<()> {
         let entries = self.as_container()?;
         let plaintext = DataValue::Container(entries).to_bytes();
         let ct = cipher.encrypt(&plaintext, aad).ok()?;
         *self = DataValue::EncryptedContainer(ct);
+        Some(())
+    }
+
+    /*
+     * Sign a `Container` in-place, replacing it with a `SignedContainer`.
+     * The wire blob is: [1 byte alg] [N bytes sig] [serialized container bytes].
+     * The signature covers only the serialized container bytes (not the alg byte).
+     * Returns `None` if the value is not a `Container` or signing fails.
+     */
+    #[cfg(feature = "crypto")]
+    pub fn sign_container(
+        &mut self,
+        algorithm: u8,
+        signer: &impl SignatureScheme,
+    ) -> Option<()> {
+        let entries = self.as_container()?;
+        let container_bytes = Self::encode_container(&entries);
+
+        let sig = signer.sign(&container_bytes).ok()?;
+
+        let mut blob = Vec::with_capacity(1 + sig.len() + container_bytes.len());
+        blob.push(algorithm);
+        blob.extend_from_slice(&sig);
+        blob.extend_from_slice(&container_bytes);
+
+        *self = DataValue::SignedContainer(blob);
+        Some(())
+    }
+
+    /*
+     * Verify a `SignedContainer` in-place, replacing it with the deserialized
+     * `Container` on success. Returns `None` if verification fails or the
+     * blob is malformed.
+     */
+    #[cfg(feature = "crypto")]
+    pub fn verify_into_container(
+        &mut self,
+        verifier: &impl SignatureScheme,
+    ) -> Option<()> {
+        let blob = self.as_signed_container()?;
+        if blob.len() < 1 + 64 + 2 {
+            return None;
+        }
+
+        let algorithm = blob[0];
+        let sig_len = SigAlgorithm::length(algorithm)?;
+        if blob.len() < 1 + sig_len + 2 {
+            return None;
+        }
+
+        let signature = &blob[1..1 + sig_len];
+        let container_bytes = &blob[1 + sig_len..];
+
+        verifier.verify(container_bytes, signature).ok()?;
+
+        let entries = DataValue::from_bytes(container_bytes)?.as_container()?;
+        *self = DataValue::Container(entries);
+        Some(())
+    }
+
+    /*
+     * Encrypt a `Container` into a `SignedEncryptedContainer` in-place.
+     * The result is an opaque ciphertext that decrypts to a `SignedContainer`.
+     */
+    #[cfg(feature = "crypto")]
+    pub fn sign_and_encrypt_container(
+        &mut self,
+        algorithm: u8,
+        signer: &impl SignatureScheme,
+        cipher: &impl AeadEncrypt,
+        aad: &[u8],
+    ) -> Option<()> {
+        self.sign_container(algorithm, signer)?;
+        let blob = self.as_signed_container()?;
+        let ct = cipher.encrypt(&blob, aad).ok()?;
+        *self = DataValue::SignedEncryptedContainer(ct);
+        Some(())
+    }
+
+    /*
+     * Decrypt a `SignedEncryptedContainer` in-place, replacing it with a
+     * `SignedContainer`. Does NOT verify — call `verify_into_container` next.
+     */
+    #[cfg(feature = "crypto")]
+    pub fn decrypt_signed_encrypted_container(
+        &mut self,
+        cipher: &impl AeadDecrypt,
+        aad: &[u8],
+    ) -> Option<()> {
+        let data = self.as_signed_encrypted_container()?;
+        let plaintext = cipher.decrypt(&data, aad).ok()?;
+        *self = DataValue::SignedContainer(plaintext);
         Some(())
     }
 
@@ -311,7 +460,8 @@ impl DataValue {
         let kind = Self::kind_marker(value);
         buf.push(kind);
 
-        if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL {
+        if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL
+        {
             let _ = buf.write_u16::<BigEndian>(key.0);
             return true;
         }
@@ -351,7 +501,8 @@ impl DataValue {
         let kind = Self::kind_marker(value);
         buf.push(kind);
 
-        if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL {
+        if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL
+        {
             return true;
         }
 
@@ -414,6 +565,16 @@ impl DataValue {
                 buf.extend_from_slice(data);
                 Some(())
             }
+            #[cfg(feature = "crypto")]
+            DataValue::SignedContainer(data) => {
+                buf.extend_from_slice(data);
+                Some(())
+            }
+            #[cfg(feature = "crypto")]
+            DataValue::SignedEncryptedContainer(data) => {
+                buf.extend_from_slice(data);
+                Some(())
+            }
 
             DataValue::Null => Some(()),
         }
@@ -448,7 +609,10 @@ impl DataValue {
         for _ in 0..count {
             let kind = cursor.read_u8().ok()?;
 
-            if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL {
+            if kind == Self::KIND_BOOL_TRUE
+                || kind == Self::KIND_BOOL_FALSE
+                || kind == Self::KIND_NULL
+            {
                 let key = DataTypeId(cursor.read_u16::<BigEndian>().ok()?);
                 let value = if kind == Self::KIND_BOOL_TRUE {
                     DataValue::BoolTrue
@@ -491,7 +655,10 @@ impl DataValue {
         for _ in 0..count {
             let kind = cursor.read_u8().ok()?;
 
-            if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL {
+            if kind == Self::KIND_BOOL_TRUE
+                || kind == Self::KIND_BOOL_FALSE
+                || kind == Self::KIND_NULL
+            {
                 let value = if kind == Self::KIND_BOOL_TRUE {
                     DataValue::BoolTrue
                 } else if kind == Self::KIND_BOOL_FALSE {
@@ -609,9 +776,33 @@ impl DataValue {
                 cursor.set_position(end as u64);
                 Some(DataValue::EncryptedContainer(data))
             }
+            #[cfg(feature = "crypto")]
+            Self::KIND_SIGNED_CONTAINER => {
+                let len = payload_len?;
+                let start = cursor.position() as usize;
+                let end = start.checked_add(len)?;
+                if end > cursor.get_ref().len() {
+                    return None;
+                }
+                let data = cursor.get_ref()[start..end].to_vec();
+                cursor.set_position(end as u64);
+                Some(DataValue::SignedContainer(data))
+            }
+            #[cfg(feature = "crypto")]
+            Self::KIND_SIGNED_ENCRYPTED_CONTAINER => {
+                let len = payload_len?;
+                let start = cursor.position() as usize;
+                let end = start.checked_add(len)?;
+                if end > cursor.get_ref().len() {
+                    return None;
+                }
+                let data = cursor.get_ref()[start..end].to_vec();
+                cursor.set_position(end as u64);
+                Some(DataValue::SignedEncryptedContainer(data))
+            }
             Self::KIND_NULL => Some(DataValue::Null),
             #[cfg(not(feature = "crypto"))]
-            0x0A => None,
+            0x0A | 0x0B | 0x0C => None,
             _ => None,
         }
     }
@@ -636,6 +827,10 @@ impl DataValue {
             DataValue::Container(_) => Self::KIND_CONTAINER,
             #[cfg(feature = "crypto")]
             DataValue::EncryptedContainer(_) => Self::KIND_ENCRYPTED_CONTAINER,
+            #[cfg(feature = "crypto")]
+            DataValue::SignedContainer(_) => Self::KIND_SIGNED_CONTAINER,
+            #[cfg(feature = "crypto")]
+            DataValue::SignedEncryptedContainer(_) => Self::KIND_SIGNED_ENCRYPTED_CONTAINER,
             DataValue::Null => Self::KIND_NULL,
         }
     }
@@ -674,6 +869,10 @@ impl fmt::Display for DataValue {
             DataValue::Bytes(_) => write!(f, "(Binary)"),
             #[cfg(feature = "crypto")]
             DataValue::EncryptedContainer(_) => write!(f, "(Secure)"),
+            #[cfg(feature = "crypto")]
+            DataValue::SignedContainer(_) => write!(f, "(Signed)"),
+            #[cfg(feature = "crypto")]
+            DataValue::SignedEncryptedContainer(_) => write!(f, "(SignedSecure)"),
             DataValue::Null => write!(f, "null"),
         }
     }
@@ -696,6 +895,10 @@ impl PartialEq for DataValue {
             (Container(a), Container(b)) => a == b,
             #[cfg(feature = "crypto")]
             (EncryptedContainer(a), EncryptedContainer(b)) => a == b,
+            #[cfg(feature = "crypto")]
+            (SignedContainer(a), SignedContainer(b)) => a == b,
+            #[cfg(feature = "crypto")]
+            (SignedEncryptedContainer(a), SignedEncryptedContainer(b)) => a == b,
             (Null, Null) => true,
             _ => false,
         }
@@ -748,9 +951,408 @@ impl Hash for DataValue {
                 6u8.hash(state);
                 c.hash(state);
             }
-            Null => {
+            #[cfg(feature = "crypto")]
+            SignedContainer(c) => {
                 7u8.hash(state);
+                c.hash(state);
+            }
+            #[cfg(feature = "crypto")]
+            SignedEncryptedContainer(c) => {
+                8u8.hash(state);
+                c.hash(state);
+            }
+            Null => {
+                9u8.hash(state);
             }
         }
+    }
+}
+
+/* ================================ TESTS ================================ */
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only Container and Array can be top-level serialized forms.
+    /// Scalars must be tested inside a container.
+    fn container_roundtrip(values: Vec<(DataTypeId, DataValue)>) {
+        let dv = DataValue::Container(values.clone());
+        let bytes = dv.to_bytes();
+        let decoded = DataValue::from_bytes(&bytes).expect("roundtrip failed");
+        assert_eq!(dv, decoded, "container roundtrip mismatch");
+    }
+
+    fn array_roundtrip(values: Vec<DataValue>) {
+        let dv = DataValue::Array(values.clone());
+        let bytes = dv.to_bytes();
+        let decoded = DataValue::from_bytes(&bytes).expect("roundtrip failed");
+        assert_eq!(dv, decoded, "array roundtrip mismatch");
+    }
+
+    #[test]
+    fn test_bool_in_container() {
+        container_roundtrip(vec![
+            (DataTypeId(1), DataValue::BoolTrue),
+            (DataTypeId(2), DataValue::BoolFalse),
+        ]);
+    }
+
+    #[test]
+    fn test_bool_true_eq() {
+        assert_eq!(DataValue::BoolTrue, DataValue::Bool(true));
+        assert_eq!(DataValue::BoolFalse, DataValue::Bool(false));
+        assert_ne!(DataValue::BoolTrue, DataValue::Bool(false));
+    }
+
+    #[test]
+    fn test_bool_as_bool() {
+        assert_eq!(DataValue::BoolTrue.as_bool(), Some(true));
+        assert_eq!(DataValue::BoolFalse.as_bool(), Some(false));
+        assert_eq!(DataValue::Bool(true).as_bool(), Some(true));
+        assert_eq!(DataValue::Null.as_bool(), None);
+    }
+
+    #[test]
+    fn test_signed_number_in_container() {
+        container_roundtrip(vec![
+            (DataTypeId(1), DataValue::SignedNumber(0)),
+            (DataTypeId(2), DataValue::SignedNumber(42)),
+            (DataTypeId(3), DataValue::SignedNumber(-42)),
+            (DataTypeId(4), DataValue::SignedNumber(i128::MAX)),
+            (DataTypeId(5), DataValue::SignedNumber(i128::MIN)),
+        ]);
+    }
+
+    #[test]
+    fn test_unsigned_number_in_container() {
+        container_roundtrip(vec![
+            (DataTypeId(1), DataValue::UnsignedNumber(0)),
+            (DataTypeId(2), DataValue::UnsignedNumber(42)),
+            (DataTypeId(3), DataValue::UnsignedNumber(u128::MAX)),
+        ]);
+    }
+
+    #[test]
+    fn test_float_in_container() {
+        container_roundtrip(vec![
+            (DataTypeId(1), DataValue::Float(0, 0)),
+            (DataTypeId(2), DataValue::Float(2, 12345)),
+            (DataTypeId(3), DataValue::Float(255, 4294967295)),
+        ]);
+    }
+
+    #[test]
+    fn test_str_in_container() {
+        container_roundtrip(vec![
+            (DataTypeId(1), DataValue::Str(String::new())),
+            (DataTypeId(2), DataValue::Str("hello".to_string())),
+            (DataTypeId(3), DataValue::Str("a".repeat(1000))),
+        ]);
+    }
+
+    #[test]
+    fn test_bytes_in_container() {
+        container_roundtrip(vec![
+            (DataTypeId(1), DataValue::Bytes(vec![])),
+            (DataTypeId(2), DataValue::Bytes(vec![0x00, 0xFF, 0xAB])),
+            (DataTypeId(3), DataValue::Bytes(vec![0x42; 100])),
+        ]);
+    }
+
+    #[test]
+    fn test_null_in_container() {
+        container_roundtrip(vec![
+            (DataTypeId(1), DataValue::Null),
+        ]);
+    }
+
+    #[test]
+    fn test_array_non_empty_roundtrip() {
+        array_roundtrip(vec![
+            DataValue::BoolTrue,
+            DataValue::SignedNumber(42),
+            DataValue::Str("hello".to_string()),
+            DataValue::Null,
+        ]);
+    }
+
+    #[test]
+    fn test_array_nested_roundtrip() {
+        array_roundtrip(vec![
+            DataValue::Array(vec![DataValue::BoolTrue, DataValue::BoolFalse]),
+            DataValue::Array(vec![DataValue::SignedNumber(1), DataValue::SignedNumber(2)]),
+        ]);
+    }
+
+    #[test]
+    fn test_container_empty_roundtrip() {
+        container_roundtrip(vec![]);
+    }
+
+    #[test]
+    fn test_container_mixed_roundtrip() {
+        container_roundtrip(vec![
+            (DataTypeId(1), DataValue::BoolTrue),
+            (DataTypeId(2), DataValue::SignedNumber(-100)),
+            (DataTypeId(3), DataValue::Str("test".to_string())),
+            (DataTypeId(4), DataValue::UnsignedNumber(u128::MAX)),
+            (DataTypeId(5), DataValue::Null),
+        ]);
+    }
+
+    #[test]
+    fn test_container_nested_roundtrip() {
+        container_roundtrip(vec![
+            (DataTypeId(1), DataValue::Container(vec![
+                (DataTypeId(10), DataValue::BoolTrue),
+            ])),
+            (DataTypeId(2), DataValue::Array(vec![
+                DataValue::SignedNumber(1),
+                DataValue::SignedNumber(2),
+            ])),
+        ]);
+    }
+
+    #[test]
+    fn test_container_base64_roundtrip() {
+        let dv = DataValue::Container(vec![
+            (DataTypeId(7), DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])),
+        ]);
+        let b64 = dv.to_base64();
+        let decoded = DataValue::from_base64(&b64).expect("base64 roundtrip failed");
+        assert_eq!(dv, decoded);
+    }
+
+    #[test]
+    fn test_kind_classification() {
+        assert_eq!(DataValue::BoolTrue.kind(), DataKind::Bool);
+        assert_eq!(DataValue::Bool(false).kind(), DataKind::Bool);
+        assert_eq!(DataValue::SignedNumber(0).kind(), DataKind::SignedNumber);
+        assert_eq!(DataValue::UnsignedNumber(0).kind(), DataKind::UnsignedNumber);
+        assert_eq!(DataValue::Float(0, 0).kind(), DataKind::Float);
+        assert_eq!(DataValue::Str(String::new()).kind(), DataKind::Str);
+        assert_eq!(DataValue::Bytes(vec![]).kind(), DataKind::Bytes);
+        assert_eq!(DataValue::Array(vec![]).kind(), DataKind::Array(Box::new(DataKind::Null)));
+        assert_eq!(DataValue::Container(vec![]).kind(), DataKind::Container);
+        assert_eq!(DataValue::Null.kind(), DataKind::Null);
+    }
+
+    #[test]
+    fn test_as_accessors() {
+        let dv = DataValue::Container(vec![
+            (DataTypeId(1), DataValue::Str("alice".to_string())),
+            (DataTypeId(2), DataValue::SignedNumber(42)),
+            (DataTypeId(3), DataValue::Bytes(vec![0x01, 0x02])),
+            (DataTypeId(4), DataValue::Array(vec![DataValue::BoolTrue])),
+        ]);
+
+        let map = dv.as_map().expect("should be a container");
+        assert_eq!(map.get(&DataTypeId(1)).and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(map.get(&DataTypeId(2)).and_then(|v| v.as_signed_number()), Some(42));
+        assert_eq!(map.get(&DataTypeId(3)).and_then(|v| v.as_bytes()), Some(vec![0x01, 0x02]));
+        assert_eq!(map.get(&DataTypeId(4)).and_then(|v| v.as_array()), Some(vec![DataValue::BoolTrue]));
+    }
+
+    #[test]
+    fn test_as_string() {
+        let dv = DataValue::Str("hello".to_string());
+        assert_eq!(dv.as_string(), Some("hello".to_string()));
+        assert_eq!(dv.as_str(), Some("hello"));
+        assert_eq!(DataValue::Null.as_string(), None);
+    }
+
+    #[test]
+    fn test_as_float() {
+        assert_eq!(DataValue::Float(3, 14).as_float(), Some((3, 14)));
+        assert_eq!(DataValue::Null.as_float(), None);
+    }
+
+    #[test]
+    fn test_container_from_map() {
+        let mut map = BTreeMap::new();
+        map.insert(DataTypeId(1), DataValue::BoolTrue);
+        map.insert(DataTypeId(2), DataValue::SignedNumber(99));
+        let dv = DataValue::container_from_map(&map);
+        let container = dv.as_container().expect("should be container");
+        assert_eq!(container.len(), 2);
+    }
+
+    #[test]
+    fn test_invalid_short_input() {
+        assert!(DataValue::from_bytes(&[]).is_none());
+        assert!(DataValue::from_bytes(&[0x01]).is_none());
+    }
+
+    #[test]
+    fn test_invalid_kind_rejected() {
+        let bytes = vec![0x00, 0x01, 0x0D, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x41];
+        assert!(DataValue::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_truncated_container_rejected() {
+        let dv = DataValue::Container(vec![
+            (DataTypeId(1), DataValue::Str("hello".to_string())),
+        ]);
+        let bytes = dv.to_bytes();
+        // Truncate to fewer than 2 bytes so neither container nor array can be read
+        assert!(DataValue::from_bytes(&bytes[..1]).is_none());
+        assert!(DataValue::from_bytes(&bytes[..0]).is_none());
+    }
+
+    #[test]
+    fn test_display_basic() {
+        assert_eq!(format!("{}", DataValue::BoolTrue), "true");
+        assert_eq!(format!("{}", DataValue::BoolFalse), "false");
+        assert_eq!(format!("{}", DataValue::Null), "null");
+        assert_eq!(format!("{}", DataValue::SignedNumber(42)), "42");
+        assert_eq!(format!("{}", DataValue::UnsignedNumber(42)), "42");
+        assert_eq!(format!("{}", DataValue::Str("hi".to_string())), "\"hi\"");
+        assert_eq!(format!("{}", DataValue::Bytes(vec![])), "(Binary)");
+    }
+
+    #[test]
+    fn test_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(DataValue::BoolTrue);
+        set.insert(DataValue::BoolFalse);
+        set.insert(DataValue::Null);
+        set.insert(DataValue::SignedNumber(1));
+        set.insert(DataValue::UnsignedNumber(1));
+        assert_eq!(set.len(), 5);
+        set.insert(DataValue::Bool(true));
+        assert_eq!(set.len(), 5);
+    }
+
+    #[test]
+    fn test_float_display() {
+        let s = format!("{}", DataValue::Float(2, 12345));
+        assert_eq!(s, "12345e2");
+    }
+
+    #[test]
+    fn test_container_display() {
+        let dv = DataValue::Container(vec![
+            (DataTypeId(3), DataValue::Str("v2.0".to_string())),
+            (DataTypeId(6), DataValue::UnsignedNumber(42)),
+        ]);
+        let s = format!("{}", dv);
+        assert!(s.contains("3:"));
+        assert!(s.contains("6:"));
+    }
+
+    #[test]
+    fn test_array_display() {
+        let dv = DataValue::Array(vec![DataValue::SignedNumber(1), DataValue::SignedNumber(2)]);
+        let s = format!("{}", dv);
+        assert_eq!(s, "[1, 2]");
+    }
+
+    /* ===== Crypto container tests ===== */
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_encrypt_decrypt_container_roundtrip() {
+        use mtp_crypto::ChaCha20Poly1305;
+        let key = [0xAB; 32];
+        let cipher = ChaCha20Poly1305::new(key);
+
+        let mut dv = DataValue::Container(vec![
+            (DataTypeId(1), DataValue::Str("secret".to_string())),
+            (DataTypeId(2), DataValue::UnsignedNumber(42)),
+        ]);
+
+        assert!(dv.encrypt_container(&cipher, b"aad").is_some());
+        assert!(matches!(dv, DataValue::EncryptedContainer(_)));
+
+        assert!(dv.decrypt_into_container(&cipher, b"aad").is_some());
+        assert!(matches!(dv, DataValue::Container(_)));
+
+        let entries = dv.as_container().unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_encrypt_container_wrong_key_fails() {
+        use mtp_crypto::ChaCha20Poly1305;
+        let cipher_a = ChaCha20Poly1305::new([0xAB; 32]);
+        let cipher_b = ChaCha20Poly1305::new([0xCD; 32]);
+
+        let mut dv = DataValue::Container(vec![
+            (DataTypeId(1), DataValue::Str("secret".to_string())),
+        ]);
+
+        assert!(dv.encrypt_container(&cipher_a, b"aad").is_some());
+        assert!(dv.decrypt_into_container(&cipher_b, b"aad").is_none());
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_encrypt_container_wrong_aad_fails() {
+        use mtp_crypto::ChaCha20Poly1305;
+        let cipher = ChaCha20Poly1305::new([0xAB; 32]);
+
+        let mut dv = DataValue::Container(vec![
+            (DataTypeId(1), DataValue::Str("secret".to_string())),
+        ]);
+
+        assert!(dv.encrypt_container(&cipher, b"correct-aad").is_some());
+        assert!(dv.decrypt_into_container(&cipher, b"wrong-aad").is_none());
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_encrypt_non_container_fails() {
+        let cipher = mtp_crypto::ChaCha20Poly1305::new([0xAB; 32]);
+
+        let mut dv = DataValue::Str("not a container".to_string());
+        assert!(dv.encrypt_container(&cipher, b"aad").is_none());
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_sign_verify_container_roundtrip() {
+        use mtp_crypto::{ChaCha20Poly1305, Ed25519Signer, SigAlgorithm};
+
+        let (signer, sk, _pk) = Ed25519Signer::generate();
+        let cipher = ChaCha20Poly1305::new([0xAB; 32]);
+
+        let mut dv = DataValue::Container(vec![
+            (DataTypeId(1), DataValue::Str("signed data".to_string())),
+        ]);
+
+        assert!(dv
+            .sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, &cipher, b"aad")
+            .is_some());
+        assert!(matches!(dv, DataValue::SignedEncryptedContainer(_)));
+
+        assert!(dv.decrypt_signed_encrypted_container(&cipher, b"aad").is_some());
+        assert!(matches!(dv, DataValue::SignedContainer(_)));
+
+        let verifier = Ed25519Signer::new(&sk).unwrap();
+        assert!(dv.verify_into_container(&verifier).is_some());
+        assert!(matches!(dv, DataValue::Container(_)));
+
+        let entries = dv.as_container().unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_sign_container_wrong_key_fails() {
+        use mtp_crypto::{Ed25519Signer, SigAlgorithm};
+
+        let (signer, _, _) = Ed25519Signer::generate();
+        let (_, sk2, _) = Ed25519Signer::generate();
+        let wrong_verifier = Ed25519Signer::new(&sk2).unwrap();
+
+        let mut dv = DataValue::Container(vec![
+            (DataTypeId(1), DataValue::Str("signed data".to_string())),
+        ]);
+
+        assert!(dv.sign_container(SigAlgorithm::ED25519, &signer).is_some());
+        assert!(dv.verify_into_container(&wrong_verifier).is_none());
     }
 }
