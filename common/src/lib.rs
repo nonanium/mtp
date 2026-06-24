@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-
-
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodecError {
     #[error("Unknown version")]
@@ -40,43 +38,19 @@ mod tests {
         let b = a.clone();
         assert_eq!(a, b);
     }
-
-    #[test]
-    fn test_communication_error_display() {
-        assert_eq!(format!("{}", CommunicationError::UseAfterClosed), "Use after Closed");
-        assert_eq!(format!("{}", CommunicationError::StreamClosed), "Stream Closed");
-        assert_eq!(format!("{}", CommunicationError::StreamError), "Stream Error");
-    }
-
-    #[test]
-    fn test_communication_error_clone() {
-        let a = CommunicationError::UseAfterClosed;
-        let b = a.clone();
-        assert_eq!(format!("{:?}", a), format!("{:?}", b));
-    }
-
-    #[test]
-    fn test_communication_error_authentication_failed() {
-        let e = CommunicationError::AuthenticationFailed("bad key".into());
-        assert!(format!("{}", e).contains("bad key"));
-    }
-
-    #[test]
-    fn test_communication_error_other() {
-        let e = CommunicationError::Other("custom error".into());
-        assert!(format!("{}", e).contains("custom error"));
-    }
 }
 
+// ===========================================================================
+// CommunicationError
+//
+// On native targets the full variant set (including quinn / wtransport
+// wrappers) is available.  On WASM only the transport-independent subset is
+// compiled.
+// ===========================================================================
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Error, Clone)]
 pub enum CommunicationError {
-    /* ====== NOTE on PartialEq ======
-     * Manual PartialEq implementation below compares some inner
-     * values (String, Vec<u8>) structurally and others only by
-     * variant discriminant (types from quinn / wtransport that
-     * don't themselves implement PartialEq).  Keep this impl in
-     * sync if variants are added or changed.
-     */
     #[error("Use after Closed")]
     UseAfterClosed,
 
@@ -147,12 +121,58 @@ pub enum CommunicationError {
     Other(String),
 }
 
-/* ===== Manual PartialEq =====
- *
- * Compare by variant, and structurally for String-holding variants.
- * Third-party error types (quinn, wtransport) are compared only by
- * discriminant since they don't implement PartialEq themselves.
- */
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Error, Clone)]
+pub enum CommunicationError {
+    #[error("Use after Closed")]
+    UseAfterClosed,
+
+    #[error("Connection closed by local shutdown")]
+    ClosedLocally,
+
+    #[error("Connection closed by peer")]
+    ClosedByPeer,
+
+    #[error("Connection terminated unexpectedly")]
+    ConnectionLost,
+
+    #[error("ParseCommunicationValue error")]
+    ParseCommunicationValue,
+
+    #[error("Parse Certificate error")]
+    CertificateParseFailed,
+
+    #[error("Loading Certificate error")]
+    CertificateLoadFailed,
+
+    #[error("Parse error: {0}")]
+    ParseError(String),
+
+    #[error("Connecting error: {0}")]
+    ConnectingError(String),
+
+    #[error("Message too large")]
+    MessageTooLarge,
+
+    #[error("Stream Closed")]
+    StreamClosed,
+
+    #[error("Stream Error")]
+    StreamError,
+
+    #[error("Crypto Provider Install Error")]
+    CryptoProviderInstallFailed,
+
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
+
+    #[error("Other: {0}")]
+    Other(String),
+}
+
+// ---- manual PartialEq (quinn / wtransport types don't impl PartialEq) ----
+
+#[cfg(not(target_arch = "wasm32"))]
 impl PartialEq for CommunicationError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -184,4 +204,71 @@ impl PartialEq for CommunicationError {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+impl PartialEq for CommunicationError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::UseAfterClosed, Self::UseAfterClosed) => true,
+            (Self::ClosedLocally, Self::ClosedLocally) => true,
+            (Self::ClosedByPeer, Self::ClosedByPeer) => true,
+            (Self::ConnectionLost, Self::ConnectionLost) => true,
+            (Self::ParseCommunicationValue, Self::ParseCommunicationValue) => true,
+            (Self::CertificateParseFailed, Self::CertificateParseFailed) => true,
+            (Self::CertificateLoadFailed, Self::CertificateLoadFailed) => true,
+            (Self::ParseError(a), Self::ParseError(b)) => a == b,
+            (Self::ConnectingError(a), Self::ConnectingError(b)) => a == b,
+            (Self::MessageTooLarge, Self::MessageTooLarge) => true,
+            (Self::StreamClosed, Self::StreamClosed) => true,
+            (Self::StreamError, Self::StreamError) => true,
+            (Self::CryptoProviderInstallFailed, Self::CryptoProviderInstallFailed) => true,
+            (Self::AuthenticationFailed(a), Self::AuthenticationFailed(b)) => a == b,
+            (Self::Other(a), Self::Other(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl Eq for CommunicationError {}
+
+#[cfg(target_arch = "wasm32")]
+impl Eq for CommunicationError {}
+
+/* ================================ TESTS ================================ */
+#[cfg(test)]
+mod communication_error_tests {
+    use super::*;
+
+    #[test]
+    fn test_communication_error_display() {
+        assert_eq!(format!("{}", CommunicationError::UseAfterClosed), "Use after Closed");
+        assert_eq!(format!("{}", CommunicationError::StreamClosed), "Stream Closed");
+        assert_eq!(format!("{}", CommunicationError::StreamError), "Stream Error");
+    }
+
+    #[test]
+    fn test_communication_error_clone() {
+        let a = CommunicationError::UseAfterClosed;
+        let b = a.clone();
+        assert_eq!(format!("{:?}", a), format!("{:?}", b));
+    }
+
+    #[test]
+    fn test_communication_error_authentication_failed() {
+        let e = CommunicationError::AuthenticationFailed("bad key".into());
+        assert!(format!("{}", e).contains("bad key"));
+    }
+
+    #[test]
+    fn test_communication_error_other() {
+        let e = CommunicationError::Other("custom error".into());
+        assert!(format!("{}", e).contains("custom error"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_connecting_error_display() {
+        let e = CommunicationError::ConnectingError("refused".into());
+        assert!(format!("{}", e).contains("refused"));
+    }
+}

@@ -8,7 +8,21 @@ type_maps:
     CommunicationTypes:
     DataTypes:
       Data: 32
+      Flags: 33
+      Value: 34
+      BinaryData: 35
+      Items: 36
+      EncryptedPayload: 37
+      SignedPayload: 38
+      SecurePayload: 39
   "2.0":
     CommunicationTypes:
     DataTypes:
       Data: 34
+      Flags: 33
+      Value: 35
+      BinaryData: 36
+      Items: 37
+      EncryptedPayload: 38
+      SignedPayload: 39
+      SecurePayload: 40

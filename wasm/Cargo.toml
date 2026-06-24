@@ -1,0 +1,40 @@
+[package]
+name = "mtp-wasm"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "WebTransport",
+    "WebTransportOptions",
+    "WebTransportHash",
+    "WebTransportBidirectionalStream",
+    "WebTransportCloseInfo",
+    "WebTransportDatagramDuplexStream",
+    "WebTransportError",
+    "WebTransportReceiveStream",
+    "WebTransportSendStream",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "WritableStream",
+    "WritableStreamDefaultWriter",
+] }
+console_error_panic_hook = "0.1"
+
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom-v02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+mtp-common = { path = "../common" }
+mtp-type-map = { path = "../type-map" }
+mtp-codec = { path = "../codec", features = ["crypto"] }
+mtp-crypto = { path = "../crypto", features = ["wasm"] }

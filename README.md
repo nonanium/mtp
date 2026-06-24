@@ -86,16 +86,3 @@ The type-map build script reads a YAML configuration to generate `CommunicationT
 | sha2             | No       | Standard construction; widely reviewed           |
 | zeroize          | No       | Simple; widely used                              |
 | mlkem-tls        | No       | mlkem-rs backend unaudited                       |
-
-## Test Coverage
-
-| Crate          | Tests | Notes                                      |
-| -------------- | ----- | ------------------------------------------ |
-| common         | 7     | Error type Display, Clone, format          |
-| type-map       | 3     | Registry builtin, negotiate, latest        |
-| codec          | 32    | DataValue roundtrip, accessors, Display, Hash, base64; CommunicationValue frame encode/decode |
-| crypto         | 20    | AEAD, signatures, KEM, KDF, hash, key types, multi-encrypt |
-| transport      | 12    | ConnectionHandle state transitions; Policy defaults; SendMode |
-| host           | 3     | Version extraction from messages           |
-| client         | 7     | ClientConfig; AuthState derives            |
-| **Total**      | **84** |                                            |
