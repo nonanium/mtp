@@ -15,3 +15,48 @@ pub fn from_communication_error(e: mtp_common::CommunicationError) -> JsValue {
 pub fn from_crypto_error(e: mtp_crypto::CryptoError) -> JsValue {
     js_error(e.to_string())
 }
+
+#[cfg(test)]
+#[cfg(target_arch = "wasm32")]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    #[wasm_bindgen_test]
+    fn js_error_contains_message() {
+        let err = js_error("test error message");
+        assert_eq!(err.as_string(), Some("test error message".to_string()));
+    }
+
+    #[wasm_bindgen_test]
+    fn js_error_from_string() {
+        let err = js_error(String::from("owned string error"));
+        assert_eq!(err.as_string(), Some("owned string error".to_string()));
+    }
+
+    #[wasm_bindgen_test]
+    fn from_codec_error_invalid_encoding() {
+        let err = from_codec_error(mtp_common::CodecError::InvalidEncoding);
+        assert!(err.as_string().unwrap().contains("Invalid encoding"));
+    }
+
+    #[wasm_bindgen_test]
+    fn from_codec_error_unknown_version() {
+        let err = from_codec_error(mtp_common::CodecError::UnknownVersion);
+        assert!(err.as_string().unwrap().contains("Unknown version"));
+    }
+
+    #[wasm_bindgen_test]
+    fn from_communication_error_renders() {
+        use mtp_common::CommunicationError;
+        let err = from_communication_error(CommunicationError::ConnectionLost);
+        assert!(err.as_string().unwrap().contains("Connection terminated"));
+    }
+
+    #[wasm_bindgen_test]
+    fn from_crypto_error_renders() {
+        use mtp_crypto::CryptoError;
+        let err = from_crypto_error(CryptoError::InvalidKeyLength);
+        assert!(err.as_string().unwrap().contains("invalid key length"));
+    }
+}

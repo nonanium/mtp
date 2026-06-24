@@ -38,3 +38,7 @@ mtp-common = { path = "../common" }
 mtp-type-map = { path = "../type-map" }
 mtp-codec = { path = "../codec", features = ["crypto"] }
 mtp-crypto = { path = "../crypto", features = ["wasm"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+hex = "0.4"

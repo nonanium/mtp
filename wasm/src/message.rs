@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 use mtp_codec::{
-    CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue,
+    CommunicationType, CommunicationTypeId, CommunicationValue, DataType, DataTypeId, DataValue,
 };
 use mtp_crypto::{
     ChaCha20Poly1305, Ed25519Signer, Keyring, SigAlgorithm,
@@ -132,4 +132,131 @@ pub fn parse_auth_response(response: &[u8]) -> Result<JsValue, JsValue> {
     }
 
     Ok(obj.into())
+}
+
+#[cfg(test)]
+#[cfg(target_arch = "wasm32")]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    #[wasm_bindgen_test]
+    fn build_ping_frame_roundtrip() {
+        let bytes = build_ping_frame(42, "test-ping", 1234567890, &[]);
+        let cv = CommunicationValue::from_bytes(&bytes).expect("decode failed");
+
+        assert_eq!(cv.get_type(), CommunicationTypeId(19)); // Ping
+        assert_eq!(cv.get_sender(), 42);
+        assert_eq!(cv.get_data(DataTypeId(4)), &DataValue::Str("test-ping".into()));
+        assert_eq!(cv.get_data(DataTypeId(5)), &DataValue::UnsignedNumber(1234567890));
+    }
+
+    #[wasm_bindgen_test]
+    fn build_ping_frame_with_data() {
+        let payload = b"attachment-data";
+        let bytes = build_ping_frame(99, "with-data", 555, payload);
+        let cv = CommunicationValue::from_bytes(&bytes).expect("decode failed");
+
+        assert_eq!(cv.get_type(), CommunicationTypeId(19));
+        assert_eq!(cv.get_sender(), 99);
+        assert_eq!(cv.get_data(DataTypeId(4)), &DataValue::Str("with-data".into()));
+        assert_eq!(cv.get_data(DataTypeId(5)), &DataValue::UnsignedNumber(555));
+        assert_eq!(cv.get_data(DataTypeId(6)), &DataValue::Bytes(payload.to_vec()));
+    }
+
+    #[wasm_bindgen_test]
+    fn build_ping_frame_client_id_zero() {
+        let bytes = build_ping_frame(0, "zero-id", 0, &[]);
+        let cv = CommunicationValue::from_bytes(&bytes).expect("decode failed");
+        assert_eq!(cv.get_sender(), 0);
+    }
+
+    #[wasm_bindgen_test]
+    fn build_demo_message_roundtrip() {
+        let (_signer, sk, pk) = Ed25519Signer::generate();
+        let keyring = Keyring::new(
+            mtp_crypto::KemPublicKey::new(vec![]),
+            mtp_crypto::KemPrivateKey::new(vec![]),
+            mtp_crypto::SignaturePqPublicKey::new(vec![]),
+            mtp_crypto::SignaturePqPrivateKey::new(vec![]),
+            pk,
+            sk,
+        );
+        let keyring_bytes = keyring.to_bytes();
+
+        let result = build_demo_message(7, &keyring_bytes);
+        assert!(result.is_ok());
+
+        let bytes = result.unwrap();
+        let cv = CommunicationValue::from_bytes(&bytes).expect("decode failed");
+
+        assert_eq!(cv.get_type(), CommunicationTypeId(19)); // Ping
+        assert_eq!(cv.get_sender(), 7);
+        assert_eq!(cv.get_data(DataTypeId(4)), &DataValue::Str("MTP WASM Demo".into()));
+    }
+
+    #[wasm_bindgen_test]
+    fn build_demo_message_invalid_keyring() {
+        let result = build_demo_message(1, b"not-a-valid-keyring");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.as_string().unwrap().contains("invalid keyring"));
+    }
+
+    #[wasm_bindgen_test]
+    fn parse_auth_response_success() {
+        let resp = CommunicationValue::new(CommunicationType::IdentificationResponse)
+            .add_typed_default(DataType::Connected, DataValue::BoolTrue)
+            .add_typed_default(DataType::ClientNonce, DataValue::UnsignedNumber(999))
+            .add_typed_default(DataType::Id, DataValue::UnsignedNumber(42))
+            .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(12345))
+            .to_bytes();
+
+        let result = parse_auth_response(&resp).expect("parse failed");
+
+        let connected = js_sys::Reflect::get(&result, &"connected".into())
+            .ok().and_then(|v| v.as_bool());
+        assert_eq!(connected, Some(true));
+
+        let id = js_sys::Reflect::get(&result, &"assignedId".into())
+            .ok().and_then(|v| v.as_f64());
+        assert_eq!(id, Some(42.0));
+    }
+
+    #[wasm_bindgen_test]
+    fn parse_auth_response_rejected() {
+        let resp = CommunicationValue::new(CommunicationType::IdentificationResponse)
+            .add_typed_default(DataType::Connected, DataValue::BoolFalse)
+            .to_bytes();
+
+        let result = parse_auth_response(&resp).expect("parse failed");
+
+        let connected = js_sys::Reflect::get(&result, &"connected".into())
+            .ok().and_then(|v| v.as_bool());
+        assert_eq!(connected, Some(false));
+
+        // rejected should have no assignedId
+        let has_id = js_sys::Reflect::has(&result, &"assignedId".into()).unwrap_or(false);
+        assert!(!has_id);
+    }
+
+    #[wasm_bindgen_test]
+    fn parse_auth_response_with_signature() {
+        let sig_bytes = vec![0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe];
+        let resp = CommunicationValue::new(CommunicationType::IdentificationResponse)
+            .add_typed_default(DataType::Connected, DataValue::BoolTrue)
+            .add_typed_default(DataType::Signature, DataValue::Bytes(sig_bytes.clone()))
+            .to_bytes();
+
+        let result = parse_auth_response(&resp).expect("parse failed");
+
+        let has_sig = js_sys::Reflect::has(&result, &"signature".into()).unwrap_or(false);
+        assert!(has_sig);
+    }
+
+    #[wasm_bindgen_test]
+    fn parse_auth_response_invalid_frame() {
+        let result = parse_auth_response(b"garbage-data");
+        assert!(result.is_err());
+    }
 }
