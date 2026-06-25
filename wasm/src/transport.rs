@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::WebTransport;
+use web_sys::{WebTransport, WebTransportHash, WebTransportOptions};
 
 use crate::error::js_error;
 
@@ -11,8 +11,28 @@ pub struct WasmTransport {
 }
 
 impl WasmTransport {
-    pub async fn connect(url: &str) -> Result<Self, JsValue> {
-        let transport = WebTransport::new(url)?;
+    pub async fn connect(url: &str, cert_hashes: Option<Vec<String>>) -> Result<Self, JsValue> {
+        let transport = match cert_hashes {
+            Some(hashes) => {
+                let opts = WebTransportOptions::new();
+                let mut wt_hashes = Vec::new();
+                for h in hashes {
+                    if let Some((algo, hex_val)) = h.split_once(':') {
+                        if let Ok(bytes) = hex::decode(hex_val) {
+                            let hash = WebTransportHash::new();
+                            hash.set_algorithm(algo);
+                            hash.set_value_u8_array(&js_sys::Uint8Array::from(&bytes[..]));
+                            wt_hashes.push(hash);
+                        }
+                    }
+                }
+                if !wt_hashes.is_empty() {
+                    opts.set_server_certificate_hashes(&wt_hashes);
+                }
+                WebTransport::new_with_options(url, &opts)?
+            }
+            None => WebTransport::new(url)?,
+        };
         JsFuture::from(transport.ready()).await
             .map_err(|e| js_error(&format!("WebTransport ready failed: {:?}", e)))?;
         Ok(Self { inner: transport })

@@ -90,7 +90,7 @@ impl WasmClient {
     #[wasm_bindgen]
     pub async fn connect(&mut self, config: &ConnectionConfig) -> Result<(), JsValue> {
         self.set_state(ConnectionState::Connecting);
-        let transport = WasmTransport::connect(&config.url).await?;
+        let transport = WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
         let inner = transport.inner().clone();
 
         let version_str = format!("{}", PROTOCOL_VERSION);
@@ -157,7 +157,7 @@ impl WasmClient {
             .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
             .to_bytes();
 
-        let transport = WasmTransport::connect(&config.url).await?;
+        let transport = WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
         let inner = transport.inner().clone();
         transport.send_frame(&frame).await?;
 
@@ -249,7 +249,7 @@ impl WasmClient {
             .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
             .to_bytes();
 
-        let transport = WasmTransport::connect(&config.url).await?;
+        let transport = WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
         let inner = transport.inner().clone();
         transport.send_frame(&frame).await?;
 
