@@ -12,6 +12,8 @@ pub enum CodecError {
     ReservedCommunicationType(u16),
     #[error("Invalid encoding")]
     InvalidEncoding,
+    #[error("Too many entries to encode")]
+    TooManyEntries,
     #[error("Crypto failed: {0}")]
     CryptoFailed(String),
 }
@@ -68,6 +70,9 @@ pub enum CommunicationError {
 
     #[error("ParseCommunicationValue error")]
     ParseCommunicationValue,
+
+    #[error("Encode error")]
+    Encode,
 
     #[error("Parse Certificate error")]
     CertificateParseFailed,
@@ -139,6 +144,9 @@ pub enum CommunicationError {
     #[error("ParseCommunicationValue error")]
     ParseCommunicationValue,
 
+    #[error("Encode error")]
+    Encode,
+
     #[error("Parse Certificate error")]
     CertificateParseFailed,
 
@@ -182,6 +190,7 @@ impl PartialEq for CommunicationError {
             (Self::ConnectionLost, Self::ConnectionLost) => true,
             (Self::Quinn(_), Self::Quinn(_)) => true,
             (Self::ParseCommunicationValue, Self::ParseCommunicationValue) => true,
+            (Self::Encode, Self::Encode) => true,
             (Self::CertificateParseFailed, Self::CertificateParseFailed) => true,
             (Self::CertificateLoadFailed, Self::CertificateLoadFailed) => true,
             (Self::ParseError(a), Self::ParseError(b)) => a == b,
@@ -213,6 +222,7 @@ impl PartialEq for CommunicationError {
             (Self::ClosedByPeer, Self::ClosedByPeer) => true,
             (Self::ConnectionLost, Self::ConnectionLost) => true,
             (Self::ParseCommunicationValue, Self::ParseCommunicationValue) => true,
+            (Self::Encode, Self::Encode) => true,
             (Self::CertificateParseFailed, Self::CertificateParseFailed) => true,
             (Self::CertificateLoadFailed, Self::CertificateLoadFailed) => true,
             (Self::ParseError(a), Self::ParseError(b)) => a == b,

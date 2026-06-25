@@ -1,5 +1,7 @@
 use mtp::codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue, TypeMap};
-use mtp::crypto::{ChaCha20Poly1305, CryptoError, SignatureScheme, SignaturePublicKey, verify_ed25519};
+use mtp::crypto::{
+    CryptoError, Keyring, SignaturePublicKey, SignatureScheme, verify_ed25519,
+};
 
 struct Ed25519Verifier(SignaturePublicKey);
 
@@ -12,19 +14,11 @@ impl SignatureScheme for Ed25519Verifier {
     }
 }
 
-fn derive_demo_key() -> [u8; 32] {
-    mtp::crypto::derive_encryption_key(
-        b"MTP-demo-shared-secret",
-        b"MTP-demo-salt",
-        b"encrypted-container-demo",
-    )
-    .expect("key derivation must succeed")
-}
-
 pub fn process_and_respond(
     msg: &CommunicationValue,
     tm: &TypeMap,
     client_pk: Option<&mtp::crypto::PublicKeyBundle>,
+    host_keyring: &Keyring,
 ) -> CommunicationValue {
     let desc_id = DataTypeId(tm.data_id_enum(DataType::Description).unwrap());
     let ts_id = DataTypeId(tm.data_id_enum(DataType::Timestamp).unwrap());
@@ -56,8 +50,6 @@ pub fn process_and_respond(
     println!("  Binary: {:?}", binary.as_bytes());
     println!("  Items: {:?}", items.as_array());
 
-    let cipher = ChaCha20Poly1305::new(derive_demo_key());
-
     let mut enc_status = String::from("EncryptedPayload: not present");
     let mut sig_status = String::from("SignedPayload: not present");
     let mut secure_status = String::from("SecurePayload: not present");
@@ -65,7 +57,7 @@ pub fn process_and_respond(
     let enc = msg.get_data(enc_id);
     if matches!(enc, DataValue::EncryptedContainer(_)) {
         let mut dv = enc.clone();
-        if dv.decrypt_into_container(&cipher, b"demo-aad").is_some() {
+        if dv.decrypt_into_container(host_keyring, b"demo-aad").is_some() {
             if let Some(entries) = dv.as_container() {
                 println!("  Decrypted EncryptedPayload: {:?}", entries);
                 enc_status = format!("EncryptedPayload decrypted OK ({} entries)", entries.len());
@@ -99,7 +91,7 @@ pub fn process_and_respond(
         if let Some(pk_bundle) = client_pk {
             let verifier = Ed25519Verifier(pk_bundle.sig_cl_public_key.clone());
             let mut dv = secure.clone();
-            if dv.decrypt_signed_encrypted_container(&cipher, b"demo-aad").is_some()
+            if dv.decrypt_signed_encrypted_container(host_keyring, b"demo-aad").is_some()
                 && dv.verify_into_container(&verifier).is_some()
             {
                 if let Some(entries) = dv.as_container() {

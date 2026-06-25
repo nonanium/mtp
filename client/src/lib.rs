@@ -1,6 +1,4 @@
-#[cfg(feature = "crypto")]
-use mtp_codec::DataType;
-use mtp_codec::{CommunicationValue, DataTypeId, DataValue, PROTOCOL_VERSION, Version};
+use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Version};
 use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
 
@@ -45,9 +43,9 @@ impl MTPClient {
         // Build the initial identification message with the protocol version.
         let version_str = format!("{}", PROTOCOL_VERSION);
         let ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)
-            .add_data(DataTypeId(3), DataValue::Str(version_str))
-            .add_data(
-                DataTypeId(6),
+            .add_typed_default(DataType::Version, DataValue::Str(version_str))
+            .add_typed_default(
+                DataType::Id,
                 DataValue::UnsignedNumber(config.client_id.into()),
             );
 
@@ -124,7 +122,9 @@ impl MTPClient {
         // 2. Receive host response (single message)
         let response = receiver.receive().await?;
 
-        let connected = response.get_data(DataTypeId(11));
+        let tm = mtp_codec::TypeMap::latest();
+
+        let connected = response.get_data(DataType::Connected.to_id(&tm));
         match connected {
             DataValue::BoolTrue => {}
             DataValue::BoolFalse => {
@@ -139,7 +139,7 @@ impl MTPClient {
             }
         }
 
-        let echo_nonce = response.get_data(DataTypeId(7));
+        let echo_nonce = response.get_data(DataType::ClientNonce.to_id(&tm));
         match echo_nonce {
             DataValue::UnsignedNumber(n) if *n == client_nonce as u128 => {}
             _ => {
@@ -149,7 +149,7 @@ impl MTPClient {
             }
         }
 
-        let host_new_nonce = match response.get_data(DataTypeId(5)) {
+        let host_new_nonce = match response.get_data(DataType::Timestamp.to_id(&tm)) {
             DataValue::UnsignedNumber(n) => *n as u128,
             _ => {
                 return Err(CommunicationError::AuthenticationFailed(
@@ -158,7 +158,7 @@ impl MTPClient {
             }
         };
 
-        let host_sig = match response.get_data(DataTypeId(10)) {
+        let host_sig = match response.get_data(DataType::Signature.to_id(&tm)) {
             DataValue::Bytes(b) => b.clone(),
             _ => {
                 return Err(CommunicationError::AuthenticationFailed(
@@ -167,7 +167,7 @@ impl MTPClient {
             }
         };
 
-        let host_pq_sig = match response.get_data(DataTypeId(12)) {
+        let host_pq_sig = match response.get_data(DataType::PqSignature.to_id(&tm)) {
             DataValue::Bytes(b) => b.clone(),
             _ => vec![],
         };
@@ -264,7 +264,9 @@ impl MTPClient {
         // 2. Receive host response (single message)
         let response = receiver.receive().await?;
 
-        let connected = response.get_data(DataTypeId(11));
+        let tm = mtp_codec::TypeMap::latest();
+
+        let connected = response.get_data(DataType::Connected.to_id(&tm));
         match connected {
             DataValue::BoolTrue => {}
             DataValue::BoolFalse => {
@@ -279,7 +281,7 @@ impl MTPClient {
             }
         }
 
-        let assigned_id = match response.get_data(DataTypeId(6)) {
+        let assigned_id = match response.get_data(DataType::Id.to_id(&tm)) {
             DataValue::UnsignedNumber(n) => *n as u128,
             _ => {
                 return Err(CommunicationError::AuthenticationFailed(
@@ -288,7 +290,7 @@ impl MTPClient {
             }
         };
 
-        let echo_nonce = response.get_data(DataTypeId(7));
+        let echo_nonce = response.get_data(DataType::ClientNonce.to_id(&tm));
         match echo_nonce {
             DataValue::UnsignedNumber(n) if *n == client_nonce as u128 => {}
             _ => {
@@ -298,7 +300,7 @@ impl MTPClient {
             }
         }
 
-        let host_new_nonce = match response.get_data(DataTypeId(5)) {
+        let host_new_nonce = match response.get_data(DataType::Timestamp.to_id(&tm)) {
             DataValue::UnsignedNumber(n) => *n as u128,
             _ => {
                 return Err(CommunicationError::AuthenticationFailed(
@@ -307,7 +309,7 @@ impl MTPClient {
             }
         };
 
-        let host_sig = match response.get_data(DataTypeId(10)) {
+        let host_sig = match response.get_data(DataType::Signature.to_id(&tm)) {
             DataValue::Bytes(b) => b.clone(),
             _ => {
                 return Err(CommunicationError::AuthenticationFailed(
@@ -316,7 +318,7 @@ impl MTPClient {
             }
         };
 
-        let host_pq_sig = match response.get_data(DataTypeId(12)) {
+        let host_pq_sig = match response.get_data(DataType::PqSignature.to_id(&tm)) {
             DataValue::Bytes(b) => b.clone(),
             _ => vec![],
         };

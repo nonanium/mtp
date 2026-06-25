@@ -1,18 +1,14 @@
 use mtp::client::MTPConnection;
 use mtp::codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue};
-use mtp::crypto::{ChaCha20Poly1305, Ed25519Signer, Keyring, SigAlgorithm};
+use mtp::crypto::{Ed25519Signer, EncryptionType, Keyring, PublicKeyBundle, SigAlgorithm};
 
-fn derive_demo_key() -> [u8; 32] {
-    mtp::crypto::derive_encryption_key(
-        b"MTP-demo-shared-secret",
-        b"MTP-demo-salt",
-        b"encrypted-container-demo",
-    )
-    .expect("key derivation must succeed")
-}
-
-pub fn build_demo_message(client_id: u64, keyring: &Keyring) -> CommunicationValue {
-    let cipher = ChaCha20Poly1305::new(derive_demo_key());
+pub fn build_demo_message(
+    client_id: u64,
+    keyring: &Keyring,
+    server_bundle: &PublicKeyBundle,
+) -> CommunicationValue {
+    // Encrypt to the server's KEM public key; the server decrypts with its keyring.
+    let enc_type = EncryptionType::MlKemChaCha20Poly1305;
     let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)
         .expect("Ed25519 signer from keyring");
 
@@ -21,7 +17,7 @@ pub fn build_demo_message(client_id: u64, keyring: &Keyring) -> CommunicationVal
         (DataTypeId(2), DataValue::UnsignedNumber(42)),
     ]);
     let mut dv_enc = inner_enc;
-    dv_enc.encrypt_container(&cipher, b"demo-aad");
+    dv_enc.encrypt_container(enc_type, server_bundle, b"demo-aad");
 
     let inner_sig = DataValue::Container(vec![
         (DataTypeId(1), DataValue::Str("signed by client".into())),
@@ -35,7 +31,7 @@ pub fn build_demo_message(client_id: u64, keyring: &Keyring) -> CommunicationVal
         (DataTypeId(2), DataValue::UnsignedNumber(7)),
     ]);
     let mut dv_sec = inner_sec;
-    dv_sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, &cipher, b"demo-aad");
+    dv_sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, enc_type, server_bundle, b"demo-aad");
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -66,8 +62,9 @@ pub fn build_demo_message(client_id: u64, keyring: &Keyring) -> CommunicationVal
 pub async fn send_and_receive(
     conn: &MTPConnection,
     keyring: &Keyring,
+    server_bundle: &PublicKeyBundle,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let msg = build_demo_message(conn.client_id, keyring);
+    let msg = build_demo_message(conn.client_id, keyring, server_bundle);
     println!("Sending: {msg}");
     conn.sender.send(&msg).await?;
 

@@ -146,18 +146,35 @@ impl CommunicationValue {
      * bit3 => is data encrypted If so data bytes will be an encrypted container
      * bit4 => is communication value signed
      */
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /*
+     * Build the canonical metadata header and data payload shared by both
+     * `to_bytes` and `build_signed_payload`. Keeping a single source here
+     * guarantees the serialized frame and the signed-over bytes stay in sync.
+     *
+     * Returns `(metadata, data_bytes)` where
+     *   metadata = comm_type || flags || id? || sender? || receiver?
+     *
+     * `force_signed` forces the `FLAG_SIGNED` bit on regardless of whether a
+     * signature is currently attached. The signed-payload path passes `true` so
+     * that the bytes signed by `sign_frame` (before the signature is stored) and
+     * the bytes verified by `verify_frame` (after it is stored) are identical.
+     */
+    fn build_metadata_and_data(
+        &self,
+        force_signed: bool,
+    ) -> Result<(Vec<u8>, Vec<u8>), CodecError> {
         let has_sender = self.sender != 0;
         let has_receiver = self.receiver != 0;
         let has_id = self.id != 0;
 
         #[cfg(feature = "crypto")]
-        let is_encrypted = self.data.len() == 1 && self.data.values().any(|v| {
-            matches!(
-                v,
-                DataValue::EncryptedContainer(_) | DataValue::SignedEncryptedContainer(_)
-            )
-        });
+        let is_encrypted = self.data.len() == 1
+            && self.data.values().any(|v| {
+                matches!(
+                    v,
+                    DataValue::EncryptedContainer(_) | DataValue::SignedEncryptedContainer(_)
+                )
+            });
         #[cfg(not(feature = "crypto"))]
         let is_encrypted = false;
 
@@ -179,7 +196,7 @@ impl CommunicationValue {
         if is_encrypted {
             flags |= FLAG_ENCRYPTED;
         }
-        if has_frame_sig {
+        if has_frame_sig || force_signed {
             flags |= FLAG_SIGNED;
         }
 
@@ -212,34 +229,39 @@ impl CommunicationValue {
                 })
                 .unwrap_or_default()
         } else {
-            let container_value = DataValue::container_from_map(&self.data);
-            container_value.to_bytes()
+            DataValue::container_from_map(&self.data).to_bytes()?
         };
 
         #[cfg(not(feature = "crypto"))]
-        let data_bytes = {
-            let container_value = DataValue::container_from_map(&self.data);
-            container_value.to_bytes()
-        };
+        let data_bytes = DataValue::container_from_map(&self.data).to_bytes()?;
+
+        Ok((metadata, data_bytes))
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CodecError> {
+        let (metadata, data_bytes) = self.build_metadata_and_data(false)?;
 
         let mut payload = Vec::new();
         payload.extend_from_slice(&metadata);
 
         #[cfg(feature = "crypto")]
-        if let Some((_alg, _sig)) = &self.frame_signature {
+        if let Some((alg, sig)) = &self.frame_signature {
             // algorithm and signature are computed by sign_frame() and stored.
             // The frame bytes are built by using the pre-computed signature.
-            payload.push(*_alg);
-            payload.extend_from_slice(_sig);
+            payload.push(*alg);
+            payload.extend_from_slice(sig);
         }
 
         payload.extend_from_slice(&data_bytes);
 
+        let len = u32::try_from(payload.len()).map_err(|_| CodecError::TooManyEntries)?;
         let mut frame = Vec::with_capacity(4 + payload.len());
-        let _ = frame.write_u32::<BigEndian>(payload.len() as u32);
+        frame
+            .write_u32::<BigEndian>(len)
+            .map_err(|_| CodecError::InvalidEncoding)?;
         frame.extend_from_slice(&payload);
 
-        frame
+        Ok(frame)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CodecError> {
@@ -372,7 +394,7 @@ impl CommunicationValue {
         algorithm: u8,
         signer: &impl SignatureScheme,
     ) -> Option<()> {
-        let signed_payload = self.build_signed_payload();
+        let signed_payload = self.build_signed_payload().ok()?;
         let sig = signer.sign(&signed_payload).ok()?;
         self.frame_signature = Some((algorithm, sig));
         Some(())
@@ -389,7 +411,7 @@ impl CommunicationValue {
             .as_ref()
             .ok_or(CodecError::InvalidEncoding)?;
 
-        let signed_payload = self.build_signed_payload();
+        let signed_payload = self.build_signed_payload()?;
         verifier
             .verify(&signed_payload, sig)
             .map_err(|_| CodecError::InvalidEncoding)
@@ -400,75 +422,11 @@ impl CommunicationValue {
      *   comm_type || flags || id? || sender? || receiver? || data_bytes
      */
     #[cfg(feature = "crypto")]
-    fn build_signed_payload(&self) -> Vec<u8> {
-        let has_sender = self.sender != 0;
-        let has_receiver = self.receiver != 0;
-        let has_id = self.id != 0;
-
-        let is_encrypted = self.data.len() == 1 && self.data.values().any(|v| {
-            matches!(
-                v,
-                DataValue::EncryptedContainer(_) | DataValue::SignedEncryptedContainer(_)
-            )
-        });
-
-        let mut flags: u8 = 0;
-        if has_sender {
-            flags |= FLAG_HAS_SENDER;
-        }
-        if has_receiver {
-            flags |= FLAG_HAS_RECEIVER;
-        }
-        if has_id {
-            flags |= FLAG_HAS_ID;
-        }
-        if is_encrypted {
-            flags |= FLAG_ENCRYPTED;
-        }
-        if self.frame_signature.is_some() {
-            flags |= FLAG_SIGNED;
-        }
-
-        let mut metadata = Vec::new();
-        let _ = metadata.write_u16::<BigEndian>(self.comm_type.0);
-        metadata.push(flags);
-
-        if has_id {
-            let _ = metadata.write_u32::<BigEndian>(self.id);
-        }
-
-        if has_sender {
-            let sender_be = self.sender.to_be_bytes();
-            metadata.extend_from_slice(&sender_be[2..]);
-        }
-
-        if has_receiver {
-            let receiver_be = self.receiver.to_be_bytes();
-            metadata.extend_from_slice(&receiver_be[2..]);
-        }
-
-        #[cfg(feature = "crypto")]
-        let data_bytes = if is_encrypted {
-            self.data
-                .values()
-                .find_map(|v| match v {
-                    DataValue::EncryptedContainer(ct) => Some(ct.clone()),
-                    DataValue::SignedEncryptedContainer(ct) => Some(ct.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default()
-        } else {
-            let container_value = DataValue::container_from_map(&self.data);
-            container_value.to_bytes()
-        };
-
-        #[cfg(not(feature = "crypto"))]
-        let data_bytes = {
-            let container_value = DataValue::container_from_map(&self.data);
-            container_value.to_bytes()
-        };
-
-        [metadata, data_bytes].concat()
+    fn build_signed_payload(&self) -> Result<Vec<u8>, CodecError> {
+        // Force FLAG_SIGNED on so the signed bytes match whether or not the
+        // signature has been attached yet (sign_frame runs before storing it).
+        let (metadata, data_bytes) = self.build_metadata_and_data(true)?;
+        Ok([metadata, data_bytes].concat())
     }
 
     #[cfg(feature = "crypto")]
@@ -610,9 +568,9 @@ mod tests {
     use crate::data_value::DataValue;
 
     fn roundtrip(cv: CommunicationValue) -> CommunicationValue {
-        let bytes = cv.to_bytes();
+        let bytes = cv.to_bytes().expect("encode failed");
         let decoded = CommunicationValue::from_bytes(&bytes).expect("failed to deserialize");
-        let bytes2 = decoded.to_bytes();
+        let bytes2 = decoded.to_bytes().expect("encode failed");
         assert_eq!(bytes, bytes2);
         decoded
     }
@@ -620,7 +578,7 @@ mod tests {
     #[test]
     fn test_flags_and_order_without_optional() {
         let cv = CommunicationValue::new(CommunicationType::ErrorParsing).with_id(0);
-        let bytes = cv.to_bytes();
+        let bytes = cv.to_bytes().expect("encode failed");
 
         // [u32 len][u16 type][flags]...
         assert!(bytes.len() >= 7);
@@ -642,7 +600,7 @@ mod tests {
             .with_sender(0x0000_1122_3344_5566)
             .with_receiver(0x0000_6677_8899_AABB);
 
-        let bytes = cv.to_bytes();
+        let bytes = cv.to_bytes().expect("encode failed");
         let mut c = Cursor::new(bytes.as_slice());
 
         let total_len = c.read_u32::<BigEndian>().expect("len");
@@ -702,5 +660,46 @@ mod tests {
         // total_length claims more than available
         bad[0..4].copy_from_slice(&(1000u32.to_be_bytes()));
         assert!(CommunicationValue::from_bytes(&bad).is_err());
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_sign_verify_frame_roundtrip() {
+        use mtp_crypto::{Ed25519Signer, SigAlgorithm};
+
+        let (signer, sk, _pk) = Ed25519Signer::generate();
+
+        let mut cv = CommunicationValue::new(CommunicationType::Ping)
+            .with_id(7)
+            .with_sender(1)
+            .with_receiver(2)
+            .add_data(DataTypeId(6), DataValue::UnsignedNumber(42));
+
+        assert!(cv.sign_frame(SigAlgorithm::ED25519, &signer).is_some());
+
+        // Same in-memory value verifies (FLAG_SIGNED forced on both sides).
+        let verifier = Ed25519Signer::new(&sk).unwrap();
+        assert!(cv.verify_frame(&verifier).is_ok());
+
+        // Survives a wire round-trip.
+        let bytes = cv.to_bytes().expect("encode failed");
+        let decoded = CommunicationValue::from_bytes(&bytes).expect("decode failed");
+        assert!(decoded.verify_frame(&verifier).is_ok());
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_verify_frame_wrong_key_fails() {
+        use mtp_crypto::{Ed25519Signer, SigAlgorithm};
+
+        let (signer, _, _) = Ed25519Signer::generate();
+        let (_, other_sk, _) = Ed25519Signer::generate();
+
+        let mut cv = CommunicationValue::new(CommunicationType::Ping)
+            .add_data(DataTypeId(6), DataValue::UnsignedNumber(42));
+        assert!(cv.sign_frame(SigAlgorithm::ED25519, &signer).is_some());
+
+        let wrong = Ed25519Signer::new(&other_sk).unwrap();
+        assert!(cv.verify_frame(&wrong).is_err());
     }
 }

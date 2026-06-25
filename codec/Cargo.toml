@@ -14,4 +14,4 @@ rand = { version = "0.8", features = ["std", "std_rng"] }
 [features]
 default = []
 registry = ["mtp-type-map/registry"]
-crypto = ["dep:mtp-crypto"]
+crypto = ["dep:mtp-crypto", "mtp-crypto/mlkem-tls"]

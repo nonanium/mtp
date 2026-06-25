@@ -97,7 +97,10 @@ impl WasmClient {
         let ident = CommunicationValue::new(CommunicationType::Identification)
             .add_typed_default(DataType::Version, DataValue::Str(version_str))
             .add_typed_default(DataType::Id, DataValue::UnsignedNumber(config.client_id as u128));
-        transport.send_frame(&ident.to_bytes()).await?;
+        let ident_bytes = ident
+            .to_bytes()
+            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        transport.send_frame(&ident_bytes).await?;
 
         self.transport = Some(transport);
         self.set_state(ConnectionState::Connected);
@@ -155,7 +158,8 @@ impl WasmClient {
             .add_typed_default(DataType::Id, DataValue::UnsignedNumber(client_id as u128))
             .add_typed_default(DataType::ClientNonce, DataValue::UnsignedNumber(client_nonce))
             .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
-            .to_bytes();
+            .to_bytes()
+            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
 
         let transport = WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
         let inner = transport.inner().clone();
@@ -247,7 +251,8 @@ impl WasmClient {
             .add_typed_default(DataType::ClientNonce, DataValue::UnsignedNumber(client_nonce))
             .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes))
             .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
-            .to_bytes();
+            .to_bytes()
+            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
 
         let transport = WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
         let inner = transport.inner().clone();

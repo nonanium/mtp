@@ -218,19 +218,20 @@ pub fn sign_dual(
     ed25519_sk: &ed25519_dalek::SigningKey,
     mldsa_sk: &ml_dsa::SigningKey<ml_dsa::MlDsa65>,
     message: &[u8],
-) -> DualSignature {
+) -> Result<DualSignature, CryptoError> {
     let ed25519 = {
         use ed25519_dalek::Signer;
         ed25519_sk.sign(message).to_bytes().to_vec()
     };
     let mldsa = {
         use ml_dsa::Signer;
-        mldsa_sk.try_sign(message)
-            .expect("ML-DSA signing failed")
+        mldsa_sk
+            .try_sign(message)
+            .map_err(|_| CryptoError::SigningFailed)?
             .encode()
             .to_vec()
     };
-    DualSignature { ed25519, mldsa }
+    Ok(DualSignature { ed25519, mldsa })
 }
 
 impl DualSignature {

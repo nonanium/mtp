@@ -12,6 +12,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (host_id, host_keyring) = keys::load_or_generate_host_keys("host_keys.json")?;
     keys::export_host_public_keys(&host_keyring)?;
 
+    // The keyring is moved into the host config; keep a copy for decrypting the
+    // demo payloads clients encrypt to our KEM public key.
+    let decrypt_keyring = mtp::crypto::Keyring::from_bytes(&host_keyring.to_bytes())
+        .expect("re-load host keyring for decryption");
+
     let (clients, next_id) = clients::load_client_db("clients.json")?;
 
     let clients_for_get = clients.clone();
@@ -62,8 +67,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match conn.receiver.receive().await {
             Ok(msg) => {
                 println!("Received: {msg}");
-                let response =
-                    handlers::process_and_respond(&msg, tm, conn.client_public_key.as_ref());
+                let response = handlers::process_and_respond(
+                    &msg,
+                    tm,
+                    conn.client_public_key.as_ref(),
+                    &decrypt_keyring,
+                );
                 println!("Sending: {response}");
                 conn.sender.send(&response).await?;
             }

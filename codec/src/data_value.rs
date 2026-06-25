@@ -6,10 +6,11 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 
+use mtp_common::CodecError;
 use mtp_type_map::DataTypeId;
 
 #[cfg(feature = "crypto")]
-use mtp_crypto::{AeadDecrypt, AeadEncrypt, SigAlgorithm, SignatureScheme};
+use mtp_crypto::{EncryptionType, Keyring, PublicKeyBundle, SigAlgorithm, SignatureScheme};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataKind {
@@ -124,9 +125,9 @@ impl DataValue {
      * 0x07 => Bytes
      * 0x08 => Array
      * 0x09 => Container
-     * 0x0A => EncryptedContainer (4 bytes u32 len + encrypted bytes)
-     * 0x0B => SignedContainer (4 bytes u32 len + 3373 bytes signature)
-     * 0x0C => SignedEncryptedContainer (4 bytes u32 len + 3373 bytes signature + encrypted bytes)
+     * 0x0A => EncryptedContainer (1 byte EncryptionType + KEM ciphertext + AEAD payload)
+     * 0x0B => SignedContainer (1 byte SigAlgorithm + signature + serialized container)
+     * 0x0C => SignedEncryptedContainer (encrypted blob that decrypts to a SignedContainer)
      * 0xFF => Null
      */
     const KIND_BOOL_TRUE: u8 = 0x01;
@@ -272,13 +273,14 @@ impl DataValue {
 
     /*
      * Decrypt an `EncryptedContainer` in-place, replacing it with the
-     * deserialized `Container`. Returns `None` if decryption or
-     * deserialization fails.
+     * deserialized `Container`. The algorithm (and which keypair to use) is read
+     * from the blob's leading `EncryptionType` byte; the matching key is taken
+     * from `keyring`. Returns `None` if decryption or deserialization fails.
      */
     #[cfg(feature = "crypto")]
-    pub fn decrypt_into_container(&mut self, cipher: &impl AeadDecrypt, aad: &[u8]) -> Option<()> {
+    pub fn decrypt_into_container(&mut self, keyring: &Keyring, aad: &[u8]) -> Option<()> {
         let data = self.as_encrypted_container()?;
-        let plaintext = cipher.decrypt(&data, aad).ok()?;
+        let plaintext = mtp_crypto::decrypt_with(&data, keyring, aad).ok()?;
         let dv = DataValue::from_bytes(&plaintext)?;
         match dv {
             DataValue::Container(entries) => {
@@ -291,13 +293,21 @@ impl DataValue {
 
     /*
      * Encrypt a `Container` into an `EncryptedContainer` in-place.
+     * `enc_type` selects the algorithm and `recipient` provides the public key
+     * encapsulated to. The resulting blob is self-describing: its leading byte
+     * is `enc_type`, so `decrypt_into_container` needs only a `Keyring`.
      * Returns `None` if the value is not a `Container` or encryption fails.
      */
     #[cfg(feature = "crypto")]
-    pub fn encrypt_container(&mut self, cipher: &impl AeadEncrypt, aad: &[u8]) -> Option<()> {
+    pub fn encrypt_container(
+        &mut self,
+        enc_type: EncryptionType,
+        recipient: &PublicKeyBundle,
+        aad: &[u8],
+    ) -> Option<()> {
         let entries = self.as_container()?;
-        let plaintext = DataValue::Container(entries).to_bytes();
-        let ct = cipher.encrypt(&plaintext, aad).ok()?;
+        let plaintext = DataValue::Container(entries).to_bytes().ok()?;
+        let ct = mtp_crypto::encrypt_for(enc_type, recipient, &plaintext, aad).ok()?;
         *self = DataValue::EncryptedContainer(ct);
         Some(())
     }
@@ -311,7 +321,7 @@ impl DataValue {
     #[cfg(feature = "crypto")]
     pub fn sign_container(&mut self, algorithm: u8, signer: &impl SignatureScheme) -> Option<()> {
         let entries = self.as_container()?;
-        let container_bytes = Self::encode_container(&entries);
+        let container_bytes = Self::encode_container(&entries).ok()?;
 
         let sig = signer.sign(&container_bytes).ok()?;
 
@@ -354,35 +364,40 @@ impl DataValue {
 
     /*
      * Encrypt a `Container` into a `SignedEncryptedContainer` in-place.
-     * The result is an opaque ciphertext that decrypts to a `SignedContainer`.
+     * The container is first signed (with `algorithm`/`signer`), then the signed
+     * blob is encrypted with `enc_type` to `recipient`. The result is an opaque
+     * ciphertext that decrypts to a `SignedContainer`.
      */
     #[cfg(feature = "crypto")]
     pub fn sign_and_encrypt_container(
         &mut self,
         algorithm: u8,
         signer: &impl SignatureScheme,
-        cipher: &impl AeadEncrypt,
+        enc_type: EncryptionType,
+        recipient: &PublicKeyBundle,
         aad: &[u8],
     ) -> Option<()> {
         self.sign_container(algorithm, signer)?;
         let blob = self.as_signed_container()?;
-        let ct = cipher.encrypt(&blob, aad).ok()?;
+        let ct = mtp_crypto::encrypt_for(enc_type, recipient, &blob, aad).ok()?;
         *self = DataValue::SignedEncryptedContainer(ct);
         Some(())
     }
 
     /*
      * Decrypt a `SignedEncryptedContainer` in-place, replacing it with a
-     * `SignedContainer`. Does NOT verify; call `verify_into_container` next.
+     * `SignedContainer`. The algorithm and keypair are resolved from the blob's
+     * leading byte and `keyring`. Does NOT verify; call `verify_into_container`
+     * next.
      */
     #[cfg(feature = "crypto")]
     pub fn decrypt_signed_encrypted_container(
         &mut self,
-        cipher: &impl AeadDecrypt,
+        keyring: &Keyring,
         aad: &[u8],
     ) -> Option<()> {
         let data = self.as_signed_encrypted_container()?;
-        let plaintext = cipher.decrypt(&data, aad).ok()?;
+        let plaintext = mtp_crypto::decrypt_with(&data, keyring, aad).ok()?;
         *self = DataValue::SignedContainer(plaintext);
         Some(())
     }
@@ -400,16 +415,14 @@ impl DataValue {
         }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CodecError> {
         match self {
             DataValue::Container(entries) => Self::encode_container(entries),
             DataValue::Array(arr) => Self::encode_array(arr),
             _ => {
                 let mut out = Vec::new();
-                if Self::write_value_payload(&mut out, self).is_none() {
-                    return Vec::new();
-                }
-                out
+                Self::write_value_payload(&mut out, self)?;
+                Ok(out)
             }
         }
     }
@@ -423,8 +436,8 @@ impl DataValue {
         Some(value)
     }
 
-    pub fn to_base64(&self) -> String {
-        general_purpose::STANDARD.encode(self.to_bytes())
+    pub fn to_base64(&self) -> Result<String, CodecError> {
+        Ok(general_purpose::STANDARD.encode(self.to_bytes()?))
     }
 
     pub fn from_base64(base64_str: &str) -> Option<Self> {
@@ -432,144 +445,141 @@ impl DataValue {
         Self::from_bytes(&bytes)
     }
 
-    fn encode_container(entries: &[(DataTypeId, DataValue)]) -> Vec<u8> {
+    fn encode_container(entries: &[(DataTypeId, DataValue)]) -> Result<Vec<u8>, CodecError> {
         let mut out = Vec::new();
-        if out
-            .write_u16::<BigEndian>(u16::try_from(entries.len()).ok().unwrap_or(0))
-            .is_err()
-        {
-            return Vec::new();
-        }
+        let count = u16::try_from(entries.len()).map_err(|_| CodecError::TooManyEntries)?;
+        out.write_u16::<BigEndian>(count)
+            .map_err(|_| CodecError::InvalidEncoding)?;
 
         for (key, value) in entries {
-            if !Self::write_container_entry(&mut out, key.clone(), value) {
-                return Vec::new();
-            }
+            Self::write_container_entry(&mut out, key.clone(), value)?;
         }
-        out
+        Ok(out)
     }
 
-    fn write_container_entry(buf: &mut Vec<u8>, key: DataTypeId, value: &DataValue) -> bool {
+    fn write_container_entry(
+        buf: &mut Vec<u8>,
+        key: DataTypeId,
+        value: &DataValue,
+    ) -> Result<(), CodecError> {
         let kind = Self::kind_marker(value);
         buf.push(kind);
 
         if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL
         {
-            let _ = buf.write_u16::<BigEndian>(key.0);
-            return true;
+            buf.write_u16::<BigEndian>(key.0)
+                .map_err(|_| CodecError::InvalidEncoding)?;
+            return Ok(());
         }
 
         let mut payload = Vec::new();
-        if Self::write_value_payload(&mut payload, value).is_none() {
-            return false;
-        }
+        Self::write_value_payload(&mut payload, value)?;
 
-        if buf.write_u32::<BigEndian>(payload.len() as u32).is_err() {
-            return false;
-        }
-        let _ = buf.write_u16::<BigEndian>(key.0);
+        let len = u32::try_from(payload.len()).map_err(|_| CodecError::TooManyEntries)?;
+        buf.write_u32::<BigEndian>(len)
+            .map_err(|_| CodecError::InvalidEncoding)?;
+        buf.write_u16::<BigEndian>(key.0)
+            .map_err(|_| CodecError::InvalidEncoding)?;
         buf.extend_from_slice(&payload);
-        true
+        Ok(())
     }
 
-    fn encode_array(arr: &[DataValue]) -> Vec<u8> {
+    fn encode_array(arr: &[DataValue]) -> Result<Vec<u8>, CodecError> {
         let mut out = Vec::new();
-        if out
-            .write_u16::<BigEndian>(u16::try_from(arr.len()).ok().unwrap_or(0))
-            .is_err()
-        {
-            return Vec::new();
-        }
+        let count = u16::try_from(arr.len()).map_err(|_| CodecError::TooManyEntries)?;
+        out.write_u16::<BigEndian>(count)
+            .map_err(|_| CodecError::InvalidEncoding)?;
 
         for value in arr {
-            if !Self::write_array_entry(&mut out, value) {
-                return Vec::new();
-            }
+            Self::write_array_entry(&mut out, value)?;
         }
 
-        out
+        Ok(out)
     }
 
-    fn write_array_entry(buf: &mut Vec<u8>, value: &DataValue) -> bool {
+    fn write_array_entry(buf: &mut Vec<u8>, value: &DataValue) -> Result<(), CodecError> {
         let kind = Self::kind_marker(value);
         buf.push(kind);
 
         if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL
         {
-            return true;
+            return Ok(());
         }
 
         let mut payload = Vec::new();
-        if Self::write_value_payload(&mut payload, value).is_none() {
-            return false;
-        }
+        Self::write_value_payload(&mut payload, value)?;
 
-        if buf.write_u32::<BigEndian>(payload.len() as u32).is_err() {
-            return false;
-        }
+        let len = u32::try_from(payload.len()).map_err(|_| CodecError::TooManyEntries)?;
+        buf.write_u32::<BigEndian>(len)
+            .map_err(|_| CodecError::InvalidEncoding)?;
         buf.extend_from_slice(&payload);
-        true
+        Ok(())
     }
 
-    fn write_value_payload(buf: &mut Vec<u8>, value: &DataValue) -> Option<()> {
+    fn write_value_payload(buf: &mut Vec<u8>, value: &DataValue) -> Result<(), CodecError> {
         match value {
-            DataValue::BoolTrue => Some(()),
-            DataValue::BoolFalse => Some(()),
+            DataValue::BoolTrue => Ok(()),
+            DataValue::BoolFalse => Ok(()),
             DataValue::Bool(v) => {
+                // Kept intentionally: the kind marker already encodes the boolean,
+                // so both arms carry no payload. Retained for clear compatibility.
                 if *v {
-                    Some(())
+                    Ok(())
                 } else {
-                    Some(())
+                    Ok(())
                 }
             }
             DataValue::SignedNumber(n) => {
-                buf.write_i128::<BigEndian>(*n).ok()?;
-                Some(())
+                buf.write_i128::<BigEndian>(*n)
+                    .map_err(|_| CodecError::InvalidEncoding)?;
+                Ok(())
             }
             DataValue::UnsignedNumber(n) => {
-                buf.write_u128::<BigEndian>(*n).ok()?;
-                Some(())
+                buf.write_u128::<BigEndian>(*n)
+                    .map_err(|_| CodecError::InvalidEncoding)?;
+                Ok(())
             }
             DataValue::Float(a, b) => {
-                buf.write_u8(*a).ok()?;
-                buf.write_u32::<BigEndian>(*b).ok()?;
-                Some(())
+                buf.write_u8(*a).map_err(|_| CodecError::InvalidEncoding)?;
+                buf.write_u32::<BigEndian>(*b)
+                    .map_err(|_| CodecError::InvalidEncoding)?;
+                Ok(())
             }
             DataValue::Str(s) => {
                 buf.extend_from_slice(s.as_bytes());
-                Some(())
+                Ok(())
             }
             DataValue::Array(arr) => {
-                let bytes = Self::encode_array(arr);
+                let bytes = Self::encode_array(arr)?;
                 buf.extend_from_slice(&bytes);
-                Some(())
+                Ok(())
             }
             DataValue::Bytes(b) => {
                 buf.extend_from_slice(b);
-                Some(())
+                Ok(())
             }
             DataValue::Container(entries) => {
-                let bytes = Self::encode_container(entries);
+                let bytes = Self::encode_container(entries)?;
                 buf.extend_from_slice(&bytes);
-                Some(())
+                Ok(())
             }
             #[cfg(feature = "crypto")]
             DataValue::EncryptedContainer(data) => {
                 buf.extend_from_slice(data);
-                Some(())
+                Ok(())
             }
             #[cfg(feature = "crypto")]
             DataValue::SignedContainer(data) => {
                 buf.extend_from_slice(data);
-                Some(())
+                Ok(())
             }
             #[cfg(feature = "crypto")]
             DataValue::SignedEncryptedContainer(data) => {
                 buf.extend_from_slice(data);
-                Some(())
+                Ok(())
             }
 
-            DataValue::Null => Some(()),
+            DataValue::Null => Ok(()),
         }
     }
 
@@ -901,62 +911,28 @@ impl PartialEq for DataValue {
 impl Hash for DataValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
         use DataValue::*;
+        // Use the wire kind marker as the per-variant discriminant. It is unique
+        // per kind and maps BoolTrue/Bool(true) (and BoolFalse/Bool(false)) to the
+        // same marker, keeping the hash consistent with the Eq bool equivalence.
+        Self::kind_marker(self).hash(state);
         match self {
-            BoolTrue | Bool(true) => {
-                0u8.hash(state);
-                true.hash(state);
-            }
-            BoolFalse | Bool(false) => {
-                0u8.hash(state);
-                false.hash(state);
-            }
-            SignedNumber(n) => {
-                1u8.hash(state);
-                n.hash(state);
-            }
-            UnsignedNumber(n) => {
-                2u8.hash(state);
-                n.hash(state);
-            }
+            BoolTrue | BoolFalse | Bool(_) | Null => {}
+            SignedNumber(n) => n.hash(state),
+            UnsignedNumber(n) => n.hash(state),
             Float(n, m) => {
-                3u8.hash(state);
                 n.hash(state);
                 m.hash(state);
             }
-            Str(s) => {
-                2u8.hash(state);
-                s.hash(state);
-            }
-            Array(a) => {
-                3u8.hash(state);
-                a.hash(state);
-            }
-            Bytes(a) => {
-                4u8.hash(state);
-                a.hash(state);
-            }
-            Container(c) => {
-                5u8.hash(state);
-                c.hash(state);
-            }
+            Str(s) => s.hash(state),
+            Array(a) => a.hash(state),
+            Bytes(a) => a.hash(state),
+            Container(c) => c.hash(state),
             #[cfg(feature = "crypto")]
-            EncryptedContainer(c) => {
-                6u8.hash(state);
-                c.hash(state);
-            }
+            EncryptedContainer(c) => c.hash(state),
             #[cfg(feature = "crypto")]
-            SignedContainer(c) => {
-                7u8.hash(state);
-                c.hash(state);
-            }
+            SignedContainer(c) => c.hash(state),
             #[cfg(feature = "crypto")]
-            SignedEncryptedContainer(c) => {
-                8u8.hash(state);
-                c.hash(state);
-            }
-            Null => {
-                9u8.hash(state);
-            }
+            SignedEncryptedContainer(c) => c.hash(state),
         }
     }
 }
@@ -970,14 +946,14 @@ mod tests {
     /// Scalars must be tested inside a container.
     fn container_roundtrip(values: Vec<(DataTypeId, DataValue)>) {
         let dv = DataValue::Container(values.clone());
-        let bytes = dv.to_bytes();
+        let bytes = dv.to_bytes().expect("encode failed");
         let decoded = DataValue::from_bytes(&bytes).expect("roundtrip failed");
         assert_eq!(dv, decoded, "container roundtrip mismatch");
     }
 
     fn array_roundtrip(values: Vec<DataValue>) {
         let dv = DataValue::Array(values.clone());
-        let bytes = dv.to_bytes();
+        let bytes = dv.to_bytes().expect("encode failed");
         let decoded = DataValue::from_bytes(&bytes).expect("roundtrip failed");
         assert_eq!(dv, decoded, "array roundtrip mismatch");
     }
@@ -1111,7 +1087,7 @@ mod tests {
             DataTypeId(7),
             DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         )]);
-        let b64 = dv.to_base64();
+        let b64 = dv.to_base64().expect("encode failed");
         let decoded = DataValue::from_base64(&b64).expect("base64 roundtrip failed");
         assert_eq!(dv, decoded);
     }
@@ -1203,7 +1179,7 @@ mod tests {
     #[test]
     fn test_truncated_container_rejected() {
         let dv = DataValue::Container(vec![(DataTypeId(1), DataValue::Str("hello".to_string()))]);
-        let bytes = dv.to_bytes();
+        let bytes = dv.to_bytes().expect("encode failed");
         // Truncate to fewer than 2 bytes so neither container nor array can be read
         assert!(DataValue::from_bytes(&bytes[..1]).is_none());
         assert!(DataValue::from_bytes(&bytes[..0]).is_none());
@@ -1263,19 +1239,22 @@ mod tests {
     #[cfg(feature = "crypto")]
     #[test]
     fn test_encrypt_decrypt_container_roundtrip() {
-        use mtp_crypto::ChaCha20Poly1305;
-        let key = [0xAB; 32];
-        let cipher = ChaCha20Poly1305::new(key);
+        use mtp_crypto::{EncryptionType, Keyring};
+        let keyring = Keyring::generate();
+        let bundle = keyring.public_key_bundle();
 
         let mut dv = DataValue::Container(vec![
             (DataTypeId(1), DataValue::Str("secret".to_string())),
             (DataTypeId(2), DataValue::UnsignedNumber(42)),
         ]);
 
-        assert!(dv.encrypt_container(&cipher, b"aad").is_some());
+        assert!(
+            dv.encrypt_container(EncryptionType::MlKemChaCha20Poly1305, &bundle, b"aad")
+                .is_some()
+        );
         assert!(matches!(dv, DataValue::EncryptedContainer(_)));
 
-        assert!(dv.decrypt_into_container(&cipher, b"aad").is_some());
+        assert!(dv.decrypt_into_container(&keyring, b"aad").is_some());
         assert!(matches!(dv, DataValue::Container(_)));
 
         let entries = dv.as_container().unwrap();
@@ -1285,46 +1264,68 @@ mod tests {
     #[cfg(feature = "crypto")]
     #[test]
     fn test_encrypt_container_wrong_key_fails() {
-        use mtp_crypto::ChaCha20Poly1305;
-        let cipher_a = ChaCha20Poly1305::new([0xAB; 32]);
-        let cipher_b = ChaCha20Poly1305::new([0xCD; 32]);
+        use mtp_crypto::{EncryptionType, Keyring};
+        let keyring_a = Keyring::generate();
+        let keyring_b = Keyring::generate();
 
         let mut dv =
             DataValue::Container(vec![(DataTypeId(1), DataValue::Str("secret".to_string()))]);
 
-        assert!(dv.encrypt_container(&cipher_a, b"aad").is_some());
-        assert!(dv.decrypt_into_container(&cipher_b, b"aad").is_none());
+        assert!(
+            dv.encrypt_container(
+                EncryptionType::MlKemChaCha20Poly1305,
+                &keyring_a.public_key_bundle(),
+                b"aad"
+            )
+            .is_some()
+        );
+        assert!(dv.decrypt_into_container(&keyring_b, b"aad").is_none());
     }
 
     #[cfg(feature = "crypto")]
     #[test]
     fn test_encrypt_container_wrong_aad_fails() {
-        use mtp_crypto::ChaCha20Poly1305;
-        let cipher = ChaCha20Poly1305::new([0xAB; 32]);
+        use mtp_crypto::{EncryptionType, Keyring};
+        let keyring = Keyring::generate();
 
         let mut dv =
             DataValue::Container(vec![(DataTypeId(1), DataValue::Str("secret".to_string()))]);
 
-        assert!(dv.encrypt_container(&cipher, b"correct-aad").is_some());
-        assert!(dv.decrypt_into_container(&cipher, b"wrong-aad").is_none());
+        assert!(
+            dv.encrypt_container(
+                EncryptionType::MlKemChaCha20Poly1305,
+                &keyring.public_key_bundle(),
+                b"correct-aad"
+            )
+            .is_some()
+        );
+        assert!(dv.decrypt_into_container(&keyring, b"wrong-aad").is_none());
     }
 
     #[cfg(feature = "crypto")]
     #[test]
     fn test_encrypt_non_container_fails() {
-        let cipher = mtp_crypto::ChaCha20Poly1305::new([0xAB; 32]);
+        use mtp_crypto::{EncryptionType, Keyring};
+        let keyring = Keyring::generate();
 
         let mut dv = DataValue::Str("not a container".to_string());
-        assert!(dv.encrypt_container(&cipher, b"aad").is_none());
+        assert!(
+            dv.encrypt_container(
+                EncryptionType::MlKemChaCha20Poly1305,
+                &keyring.public_key_bundle(),
+                b"aad"
+            )
+            .is_none()
+        );
     }
 
     #[cfg(feature = "crypto")]
     #[test]
     fn test_sign_verify_container_roundtrip() {
-        use mtp_crypto::{ChaCha20Poly1305, Ed25519Signer, SigAlgorithm};
+        use mtp_crypto::{Ed25519Signer, EncryptionType, Keyring, SigAlgorithm};
 
+        let keyring = Keyring::generate();
         let (signer, sk, _pk) = Ed25519Signer::generate();
-        let cipher = ChaCha20Poly1305::new([0xAB; 32]);
 
         let mut dv = DataValue::Container(vec![(
             DataTypeId(1),
@@ -1332,13 +1333,19 @@ mod tests {
         )]);
 
         assert!(
-            dv.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, &cipher, b"aad")
-                .is_some()
+            dv.sign_and_encrypt_container(
+                SigAlgorithm::ED25519,
+                &signer,
+                EncryptionType::MlKemChaCha20Poly1305,
+                &keyring.public_key_bundle(),
+                b"aad"
+            )
+            .is_some()
         );
         assert!(matches!(dv, DataValue::SignedEncryptedContainer(_)));
 
         assert!(
-            dv.decrypt_signed_encrypted_container(&cipher, b"aad")
+            dv.decrypt_signed_encrypted_container(&keyring, b"aad")
                 .is_some()
         );
         assert!(matches!(dv, DataValue::SignedContainer(_)));

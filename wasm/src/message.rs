@@ -1,13 +1,10 @@
 use wasm_bindgen::prelude::*;
 
 use mtp_codec::{
-    CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue,
+    CommunicationType, CommunicationTypeId, CommunicationValue, DataType, DataTypeId, DataValue,
 };
 use mtp_type_map::communication_type_name;
-use mtp_crypto::{
-    ChaCha20Poly1305, Ed25519Signer, Keyring, SigAlgorithm,
-    derive_encryption_key,
-};
+use mtp_crypto::{Ed25519Signer, EncryptionType, Keyring, SigAlgorithm};
 
 use crate::error::js_error;
 
@@ -18,7 +15,7 @@ pub fn build_ping_frame(
     description: &str,
     timestamp: u64,
     data: &[u8],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, JsValue> {
     let mut msg = CommunicationValue::new(CommunicationType::Ping)
         .add_typed_default(DataType::Description, DataValue::Str(description.to_string()))
         .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(timestamp as u128))
@@ -29,6 +26,7 @@ pub fn build_ping_frame(
     }
 
     msg.to_bytes()
+        .map_err(|e| js_error(&format!("encode failed: {}", e)))
 }
 
 /// Build a demo Ping frame with encrypted and signed containers
@@ -38,14 +36,10 @@ pub fn build_demo_message(client_id: u64, keyring_bytes: &[u8]) -> Result<Vec<u8
     let keyring = Keyring::from_bytes(keyring_bytes)
         .map_err(|e| js_error(&format!("invalid keyring: {}", e)))?;
 
-    let enc_key = derive_encryption_key(
-        b"MTP-demo-shared-secret",
-        b"MTP-demo-salt",
-        b"encrypted-container-demo",
-    )
-    .map_err(|e| js_error(&format!("key derivation failed: {}", e)))?;
-
-    let cipher = ChaCha20Poly1305::new(enc_key);
+    // Demo encrypts to its own KEM public key (encrypt-to-self) so the roundtrip
+    // is self-contained; a real client would encrypt to the server's bundle.
+    let recipient = keyring.public_key_bundle();
+    let enc_type = EncryptionType::MlKemChaCha20Poly1305;
     let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)
         .map_err(|e| js_error(&format!("signer creation failed: {}", e)))?;
 
@@ -55,7 +49,7 @@ pub fn build_demo_message(client_id: u64, keyring_bytes: &[u8]) -> Result<Vec<u8
         (DataTypeId(2), DataValue::UnsignedNumber(42)),
     ]);
     let mut dv_enc = inner_enc;
-    dv_enc.encrypt_container(&cipher, b"demo-aad")
+    dv_enc.encrypt_container(enc_type, &recipient, b"demo-aad")
         .ok_or_else(|| js_error("encryption failed"))?;
 
     // Signed container
@@ -73,7 +67,7 @@ pub fn build_demo_message(client_id: u64, keyring_bytes: &[u8]) -> Result<Vec<u8
         (DataTypeId(2), DataValue::UnsignedNumber(7)),
     ]);
     let mut dv_sec = inner_sec;
-    dv_sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, &cipher, b"demo-aad")
+    dv_sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, enc_type, &recipient, b"demo-aad")
         .ok_or_else(|| js_error("sign+encrypt failed"))?;
 
     let timestamp = js_sys::Date::now() as u64;
@@ -84,7 +78,8 @@ pub fn build_demo_message(client_id: u64, keyring_bytes: &[u8]) -> Result<Vec<u8
         .add_typed_default(DataType::Version, DataValue::Str("demo-wasm".into()))
         .with_sender(client_id);
 
-    Ok(msg.to_bytes())
+    msg.to_bytes()
+        .map_err(|e| js_error(&format!("encode failed: {}", e)))
 }
 
 /// Parse an auth response frame into a JS object.
@@ -161,7 +156,8 @@ pub fn build_request_frame(comm_type: &str, id: u32, json_data: &str) -> Result<
     let frame = CommunicationValue::new(comm_type_enum)
         .with_id(id)
         .add_data(DataTypeId(32), DataValue::Str(json_data.to_string()))
-        .to_bytes();
+        .to_bytes()
+        .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
 
     Ok(frame)
 }
@@ -214,7 +210,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn build_ping_frame_roundtrip() {
-        let bytes = build_ping_frame(42, "test-ping", 1234567890, &[]);
+        let bytes = build_ping_frame(42, "test-ping", 1234567890, &[]).expect("encode failed");
         let cv = CommunicationValue::from_bytes(&bytes).expect("decode failed");
 
         assert_eq!(cv.get_type(), CommunicationTypeId(19)); // Ping
@@ -226,7 +222,7 @@ mod tests {
     #[wasm_bindgen_test]
     fn build_ping_frame_with_data() {
         let payload = b"attachment-data";
-        let bytes = build_ping_frame(99, "with-data", 555, payload);
+        let bytes = build_ping_frame(99, "with-data", 555, payload).expect("encode failed");
         let cv = CommunicationValue::from_bytes(&bytes).expect("decode failed");
 
         assert_eq!(cv.get_type(), CommunicationTypeId(19));
@@ -238,22 +234,16 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn build_ping_frame_client_id_zero() {
-        let bytes = build_ping_frame(0, "zero-id", 0, &[]);
+        let bytes = build_ping_frame(0, "zero-id", 0, &[]).expect("encode failed");
         let cv = CommunicationValue::from_bytes(&bytes).expect("decode failed");
         assert_eq!(cv.get_sender(), 0);
     }
 
     #[wasm_bindgen_test]
     fn build_demo_message_roundtrip() {
-        let (_signer, sk, pk) = Ed25519Signer::generate();
-        let keyring = Keyring::new(
-            mtp_crypto::KemPublicKey::new(vec![]),
-            mtp_crypto::KemPrivateKey::new(vec![]),
-            mtp_crypto::SignaturePqPublicKey::new(vec![]),
-            mtp_crypto::SignaturePqPrivateKey::new(vec![]),
-            pk,
-            sk,
-        );
+        // A full keyring is required: the demo now KEM-encrypts to its own
+        // public key, so the KEM keypair must be real.
+        let keyring = Keyring::generate();
         let keyring_bytes = keyring.to_bytes();
 
         let result = build_demo_message(7, &keyring_bytes);
@@ -282,7 +272,8 @@ mod tests {
             .add_typed_default(DataType::ClientNonce, DataValue::UnsignedNumber(999))
             .add_typed_default(DataType::Id, DataValue::UnsignedNumber(42))
             .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(12345))
-            .to_bytes();
+            .to_bytes()
+            .expect("encode failed");
 
         let result = parse_auth_response(&resp).expect("parse failed");
 
@@ -299,7 +290,8 @@ mod tests {
     fn parse_auth_response_rejected() {
         let resp = CommunicationValue::new(CommunicationType::IdentificationResponse)
             .add_typed_default(DataType::Connected, DataValue::BoolFalse)
-            .to_bytes();
+            .to_bytes()
+            .expect("encode failed");
 
         let result = parse_auth_response(&resp).expect("parse failed");
 
@@ -318,7 +310,8 @@ mod tests {
         let resp = CommunicationValue::new(CommunicationType::IdentificationResponse)
             .add_typed_default(DataType::Connected, DataValue::BoolTrue)
             .add_typed_default(DataType::Signature, DataValue::Bytes(sig_bytes.clone()))
-            .to_bytes();
+            .to_bytes()
+            .expect("encode failed");
 
         let result = parse_auth_response(&resp).expect("parse failed");
 

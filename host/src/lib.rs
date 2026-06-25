@@ -1,7 +1,5 @@
-#[cfg(feature = "crypto")]
-use mtp_codec::DataType;
 use mtp_codec::{
-    CommunicationValue, DataTypeId, DataValue, Version,
+    CommunicationValue, DataType, DataValue, TypeMap, Version,
     registry::{Registry, VersionedCodec},
 };
 use mtp_common::CommunicationError;
@@ -143,9 +141,11 @@ impl MTPHost {
             Ed25519Signer, PublicKeyBundle, SignatureScheme, verify_ed25519, verify_ml_dsa,
         };
 
+        let tm = TypeMap::latest();
+
         // 1. Receive client message first (no host greeting)
         let msg = receiver.receive().await.ok()?;
-        let version_str = match msg.get_data(DataTypeId(3)) {
+        let version_str = match msg.get_data(DataType::Version.to_id(&tm)) {
             DataValue::Str(s) => s.clone(),
             _ => {
                 sender.close();
@@ -155,7 +155,7 @@ impl MTPHost {
 
         let client_version = Version::parse(&version_str)?;
 
-        let client_nonce = match msg.get_data(DataTypeId(7)) {
+        let client_nonce = match msg.get_data(DataType::ClientNonce.to_id(&tm)) {
             DataValue::UnsignedNumber(n) => *n,
             _ => {
                 sender.close();
@@ -163,7 +163,7 @@ impl MTPHost {
             }
         };
 
-        let sig_bytes = match msg.get_data(DataTypeId(10)) {
+        let sig_bytes = match msg.get_data(DataType::Signature.to_id(&tm)) {
             DataValue::Bytes(b) => b.clone(),
             _ => {
                 sender.close();
@@ -171,14 +171,15 @@ impl MTPHost {
             }
         };
 
-        let pq_sig_bytes: Vec<u8> = match msg.get_data(DataTypeId(12)) {
+        let pq_sig_bytes: Vec<u8> = match msg.get_data(DataType::PqSignature.to_id(&tm)) {
             DataValue::Bytes(b) => b.clone(),
             _ => vec![],
         };
 
-        let (assigned_id, client_bundle) = if msg.get_type() == mtp_codec::CommunicationTypeId(15) {
+        let (assigned_id, client_bundle) =
+            if msg.get_type() == mtp_codec::CommunicationType::Identification.to_id(&tm) {
             // LOGIN
-            let cid = match msg.get_data(DataTypeId(6)) {
+            let cid = match msg.get_data(DataType::Id.to_id(&tm)) {
                 DataValue::UnsignedNumber(n) => *n as u64,
                 _ => {
                     sender.close();
@@ -238,9 +239,9 @@ impl MTPHost {
             /* ===== End Signature ===== */
 
             (cid, bundle)
-        } else if msg.get_type() == mtp_codec::CommunicationTypeId(17) {
+        } else if msg.get_type() == mtp_codec::CommunicationType::Register.to_id(&tm) {
             // REGISTER
-            let bundle = match msg.get_data(DataTypeId(9)) {
+            let bundle = match msg.get_data(DataType::PublicKeys.to_id(&tm)) {
                 DataValue::Bytes(b) => PublicKeyBundle::from_bytes(b).ok()?,
                 _ => {
                     sender.close();
@@ -359,7 +360,8 @@ impl MTPHost {
  * (reserved ID 3) mapping to `DataValue::Str("major.minor")`.
  */
 fn extract_version(msg: &CommunicationValue) -> Option<Version> {
-    let value = msg.get_data(DataTypeId(3));
+    let tm = TypeMap::latest();
+    let value = msg.get_data(DataType::Version.to_id(&tm));
     match value {
         DataValue::Str(s) => Version::parse(s.as_str()),
         _ => None,
@@ -378,7 +380,7 @@ mod tests {
             mtp_codec::CommunicationType::Identification,
             &tm,
         )
-        .add_data(DataTypeId(3), DataValue::Str("2.0".to_string()));
+        .add_data(DataType::Version.to_id(&tm), DataValue::Str("2.0".to_string()));
         let version = extract_version(&msg);
         assert_eq!(version, Some(Version(2, 0)));
     }
@@ -400,7 +402,7 @@ mod tests {
             mtp_codec::CommunicationType::Identification,
             &tm,
         )
-        .add_data(DataTypeId(3), DataValue::UnsignedNumber(42));
+        .add_data(DataType::Version.to_id(&tm), DataValue::UnsignedNumber(42));
         assert!(extract_version(&msg).is_none());
     }
 }

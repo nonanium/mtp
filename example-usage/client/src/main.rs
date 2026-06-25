@@ -31,9 +31,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: 0,
     };
 
+    let server_bundle = host_public_key.clone();
     let (conn, keyring) =
         auth::connect_or_register(config, host_public_key, "client_keys.json").await?;
-    messages::send_and_receive(&conn, &keyring).await?;
+    messages::send_and_receive(&conn, &keyring, &server_bundle).await?;
 
     println!("\nDone");
     Ok(())

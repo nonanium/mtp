@@ -83,7 +83,7 @@ impl Sender {
         data: &CommunicationValue,
         policy: &Policy,
     ) -> Result<(), CommunicationError> {
-        let bytes = data.to_bytes();
+        let bytes = data.to_bytes().map_err(|_| CommunicationError::Encode)?;
         if bytes.len() as u64 > policy.max_message_size
             || bytes.len() as u64 >= policy.close_frame_len as u64
         {

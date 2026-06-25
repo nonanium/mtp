@@ -17,6 +17,8 @@ pub use sign::SigAlgorithm;
 #[cfg(feature = "mlkem-tls")]
 pub mod kem;
 
+pub mod enc;
+
 pub mod helper;
 
 pub use aead::{AeadCipher, AeadDecrypt, AeadEncrypt};
@@ -50,6 +52,11 @@ pub use kdf::{derive_encryption_key, hkdf_expand, hkdf_extract};
 
 #[cfg(feature = "mlkem-tls")]
 pub use kem::{Encapsulated, HybridKem};
+
+pub use enc::EncryptionType;
+
+#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
+pub use enc::{decrypt_with, encrypt_for};
 
 #[cfg(all(feature = "mlkem-tls", feature = "chacha20poly1305", feature = "hkdf"))]
 pub use helper::{decrypt_multi, encrypt_multi, MultiEncryptedMessage, RecipientEntry};
@@ -140,7 +147,7 @@ mod tests {
 
         let (ed_signer, _, _) = Ed25519Signer::generate();
         let (ml_signer, _, _) = MlDsaSigner::generate();
-        let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg");
+        let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg").unwrap();
         dual
             .verify(
                 ed_signer.verifying_key(),
@@ -157,7 +164,7 @@ mod tests {
 
         let (ed_signer, _, _) = Ed25519Signer::generate();
         let (ml_signer, _, _) = MlDsaSigner::generate();
-        let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg");
+        let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg").unwrap();
         assert!(dual
             .verify(ed_signer.verifying_key(), ml_signer.verifying_key(), b"wrong")
             .is_err());
