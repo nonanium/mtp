@@ -176,7 +176,9 @@ impl MTPHost {
             _ => vec![],
         };
 
-        let (assigned_id, client_bundle) = if msg.get_type() == mtp_codec::CommunicationTypeId(15) {
+        let (assigned_id, client_bundle, response_type) = if msg.get_type()
+            == mtp_codec::CommunicationTypeId(15)
+        {
             // LOGIN
             let cid = match msg.get_data(DataTypeId(6)) {
                 DataValue::UnsignedNumber(n) => *n as u64,
@@ -237,7 +239,11 @@ impl MTPHost {
             }
             /* ===== End Signature ===== */
 
-            (cid, bundle)
+            (
+                cid,
+                bundle,
+                mtp_codec::CommunicationType::IdentificationResponse,
+            )
         } else if msg.get_type() == mtp_codec::CommunicationTypeId(17) {
             // REGISTER
             let bundle = match msg.get_data(DataTypeId(9)) {
@@ -284,7 +290,11 @@ impl MTPHost {
             /* ===== End Signature ===== */
 
             let new_id = (self.config.complete_register)(bundle.clone());
-            (new_id, bundle)
+            (
+                new_id,
+                bundle,
+                mtp_codec::CommunicationType::RegisterResponse,
+            )
         } else {
             sender.close();
             return None;
@@ -304,16 +314,15 @@ impl MTPHost {
         /* ===== Signature ===== */
         let host_sig = host_signer.sign(&host_sig_payload).ok()?;
 
-        let mut response =
-            CommunicationValue::new(mtp_codec::CommunicationType::IdentificationResponse)
-                .add_typed_default(DataType::Connected, DataValue::BoolTrue)
-                .add_typed_default(
-                    DataType::ClientNonce,
-                    DataValue::UnsignedNumber(client_nonce),
-                )
-                .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(new_nonce))
-                .add_typed_default(DataType::Signature, DataValue::Bytes(host_sig))
-                .add_typed_default(DataType::Id, DataValue::UnsignedNumber(assigned_id as u128));
+        let mut response = CommunicationValue::new(response_type)
+            .add_typed_default(DataType::Connected, DataValue::BoolTrue)
+            .add_typed_default(
+                DataType::ClientNonce,
+                DataValue::UnsignedNumber(client_nonce),
+            )
+            .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(new_nonce))
+            .add_typed_default(DataType::Signature, DataValue::Bytes(host_sig))
+            .add_typed_default(DataType::Id, DataValue::UnsignedNumber(assigned_id as u128));
 
         if !self
             .config
@@ -335,6 +344,7 @@ impl MTPHost {
         /* ===== End Signature ===== */
 
         sender.send(&response).await.ok()?;
+        sender.finish_stream().await.ok()?;
 
         // 3. Version negotiation
         let negotiated = self.registry.negotiate(&[client_version])?;

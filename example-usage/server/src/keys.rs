@@ -1,9 +1,11 @@
 use std::fs;
 
-use mtp::crypto::{Ed25519Signer, Keyring, MlDsaSigner};
 use mtp::crypto::kem::HybridKem;
+use mtp::crypto::{Ed25519Signer, Keyring, MlDsaSigner};
 
-pub fn load_or_generate_host_keys(path: &str) -> Result<(u64, Keyring), Box<dyn std::error::Error>> {
+pub fn load_or_generate_host_keys(
+    path: &str,
+) -> Result<(u64, Keyring), Box<dyn std::error::Error>> {
     if let Ok(data) = fs::read_to_string(path) {
         let json: serde_json::Value = serde_json::from_str(&data)?;
         let hid = json["host_id"].as_u64().unwrap_or(1);
@@ -29,10 +31,7 @@ pub fn load_or_generate_host_keys(path: &str) -> Result<(u64, Keyring), Box<dyn 
 pub fn export_host_public_keys(host_keyring: &Keyring) -> Result<(), Box<dyn std::error::Error>> {
     let public_key_bundle_hex = hex::encode(host_keyring.public_key_bundle().as_bytes());
 
-    fs::write(
-        "host_public_key_bundle.hex",
-        &public_key_bundle_hex,
-    )?;
+    fs::write("host_public_key_bundle.hex", &public_key_bundle_hex)?;
     fs::create_dir_all("web-client/public")?;
     fs::write(
         "web-client/public/host_public_key_bundle.hex",

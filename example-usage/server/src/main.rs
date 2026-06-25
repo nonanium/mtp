@@ -40,7 +40,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let clients_for_get = clients.clone();
     let get_existing_user = Box::new(move |id: u64| -> Option<mtp::crypto::PublicKeyBundle> {
-        clients_for_get.lock().unwrap().get(&id).cloned()
+        let result = clients_for_get.lock().unwrap().get(&id).cloned();
+        if result.is_some() {
+            println!("Auth lookup: client ID {id} found");
+        } else {
+            eprintln!("Auth lookup: unknown client ID {id}");
+        }
+        result
     });
 
     let clients_for_register = clients.clone();
@@ -52,7 +58,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let id = *nid;
         *nid += 1;
         db.insert(id, bundle);
-        std::fs::write(&clients_path, serde_json::to_string_pretty(&*db).unwrap()).ok();
+        match serde_json::to_string_pretty(&*db) {
+            Ok(json) => match std::fs::write(&clients_path, json) {
+                Ok(()) => {}
+                Err(e) => eprintln!("Failed to persist client database to {clients_path}: {e}"),
+            },
+            Err(e) => eprintln!("Failed to serialize client database after registering {id}: {e}"),
+        }
         println!("Registered new client with ID: {}", id);
         id
     });

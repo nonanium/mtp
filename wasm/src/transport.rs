@@ -5,6 +5,8 @@ use web_sys::{WebTransport, WebTransportHash, WebTransportOptions};
 
 use crate::error::js_error;
 
+const CLOSE_FRAME_LEN: u32 = u32::MAX;
+
 /// Given a `SendStream` (old API with `.writable` or new API where stream IS a WritableStream),
 /// return the object to call `.getWriter()` on.
 fn resolve_stream_writable(send_stream: &JsValue) -> Result<JsValue, JsValue> {
@@ -199,10 +201,17 @@ impl WasmTransport {
             }
 
             if buffer.len() >= 4 {
-                let frame_len =
-                    u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-                if 4 + frame_len <= buffer.len() {
-                    return Ok(buffer[4..4 + frame_len].to_vec());
+                let frame_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+                if frame_len == CLOSE_FRAME_LEN {
+                    return Err(js_error("connection closed before frame"));
+                }
+
+                let frame_len = frame_len as usize;
+                let Some(frame_end) = 4usize.checked_add(frame_len) else {
+                    return Err(js_error("invalid frame length"));
+                };
+                if frame_end <= buffer.len() {
+                    return Ok(buffer[4..frame_end].to_vec());
                 }
             }
         }
@@ -230,13 +239,7 @@ impl WasmTransport {
             let result = match read_fn.call0(&reader_val) {
                 Ok(p) => match JsFuture::from(p.unchecked_into::<js_sys::Promise>()).await {
                     Ok(v) => v,
-                    Err(e) => {
-                        let _ = on_error.call1(
-                            &JsValue::NULL,
-                            &JsValue::from_str(&format!("read stream failed: {:?}", e)),
-                        );
-                        break;
-                    }
+                    Err(_) => break,
                 },
                 Err(_) => break,
             };
@@ -302,29 +305,43 @@ impl WasmTransport {
 
             // Extract all complete frames from the buffer
             while buffer.len() >= 4 {
-                let frame_len =
-                    u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-                if 4 + frame_len > buffer.len() {
+                let frame_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+                if frame_len == CLOSE_FRAME_LEN {
+                    return Ok(());
+                }
+
+                let frame_len = frame_len as usize;
+                let Some(frame_end) = 4usize.checked_add(frame_len) else {
+                    return Err(js_error("invalid frame length"));
+                };
+                if frame_end > buffer.len() {
                     break;
                 }
-                let frame = buffer[4..4 + frame_len].to_vec();
+                let frame = buffer[4..frame_end].to_vec();
                 let arr = js_sys::Uint8Array::from(&frame[..]);
                 let _ = on_message.call1(&JsValue::NULL, &arr);
-                buffer.drain(..4 + frame_len);
+                buffer.drain(..frame_end);
             }
         }
 
         // Process any remaining complete frames after stream closes
         while buffer.len() >= 4 {
-            let frame_len =
-                u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-            if 4 + frame_len > buffer.len() {
+            let frame_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+            if frame_len == CLOSE_FRAME_LEN {
+                return Ok(());
+            }
+
+            let frame_len = frame_len as usize;
+            let Some(frame_end) = 4usize.checked_add(frame_len) else {
+                return Err(js_error("invalid frame length"));
+            };
+            if frame_end > buffer.len() {
                 break;
             }
-            let frame = buffer[4..4 + frame_len].to_vec();
+            let frame = buffer[4..frame_end].to_vec();
             let arr = js_sys::Uint8Array::from(&frame[..]);
             let _ = on_message.call1(&JsValue::NULL, &arr);
-            buffer.drain(..4 + frame_len);
+            buffer.drain(..frame_end);
         }
 
         Ok(())

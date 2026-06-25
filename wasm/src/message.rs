@@ -1,27 +1,23 @@
 use wasm_bindgen::prelude::*;
 
-use mtp_codec::{
-    CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue,
-};
+use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue};
+use mtp_crypto::{ChaCha20Poly1305, Ed25519Signer, Keyring, SigAlgorithm, derive_encryption_key};
 use mtp_type_map::communication_type_name;
-use mtp_crypto::{
-    ChaCha20Poly1305, Ed25519Signer, Keyring, SigAlgorithm,
-    derive_encryption_key,
-};
 
 use crate::error::js_error;
 
 /// Build a simple Ping frame with description, timestamp, and optional data.
 #[wasm_bindgen]
-pub fn build_ping_frame(
-    client_id: u64,
-    description: &str,
-    timestamp: u64,
-    data: &[u8],
-) -> Vec<u8> {
+pub fn build_ping_frame(client_id: u64, description: &str, timestamp: u64, data: &[u8]) -> Vec<u8> {
     let mut msg = CommunicationValue::new(CommunicationType::Ping)
-        .add_typed_default(DataType::Description, DataValue::Str(description.to_string()))
-        .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(timestamp as u128))
+        .add_typed_default(
+            DataType::Description,
+            DataValue::Str(description.to_string()),
+        )
+        .add_typed_default(
+            DataType::Timestamp,
+            DataValue::UnsignedNumber(timestamp as u128),
+        )
         .with_sender(client_id);
 
     if !data.is_empty() {
@@ -55,7 +51,8 @@ pub fn build_demo_message(client_id: u64, keyring_bytes: &[u8]) -> Result<Vec<u8
         (DataTypeId(2), DataValue::UnsignedNumber(42)),
     ]);
     let mut dv_enc = inner_enc;
-    dv_enc.encrypt_container(&cipher, b"demo-aad")
+    dv_enc
+        .encrypt_container(&cipher, b"demo-aad")
         .ok_or_else(|| js_error("encryption failed"))?;
 
     // Signed container
@@ -64,23 +61,34 @@ pub fn build_demo_message(client_id: u64, keyring_bytes: &[u8]) -> Result<Vec<u8
         (DataTypeId(2), DataValue::UnsignedNumber(99)),
     ]);
     let mut dv_sig = inner_sig;
-    dv_sig.sign_container(SigAlgorithm::ED25519, &signer)
+    dv_sig
+        .sign_container(SigAlgorithm::ED25519, &signer)
         .ok_or_else(|| js_error("signing failed"))?;
 
     // Signed + encrypted container
     let inner_sec = DataValue::Container(vec![
-        (DataTypeId(1), DataValue::Str("signed+encrypted payload".into())),
+        (
+            DataTypeId(1),
+            DataValue::Str("signed+encrypted payload".into()),
+        ),
         (DataTypeId(2), DataValue::UnsignedNumber(7)),
     ]);
     let mut dv_sec = inner_sec;
-    dv_sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, &cipher, b"demo-aad")
+    dv_sec
+        .sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, &cipher, b"demo-aad")
         .ok_or_else(|| js_error("sign+encrypt failed"))?;
 
     let timestamp = js_sys::Date::now() as u64;
 
     let msg = CommunicationValue::new(CommunicationType::Ping)
-        .add_typed_default(DataType::Description, DataValue::Str("MTP WASM Demo".into()))
-        .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(timestamp as u128))
+        .add_typed_default(
+            DataType::Description,
+            DataValue::Str("MTP WASM Demo".into()),
+        )
+        .add_typed_default(
+            DataType::Timestamp,
+            DataValue::UnsignedNumber(timestamp as u128),
+        )
         .add_typed_default(DataType::Version, DataValue::Str("demo-wasm".into()))
         .with_sender(client_id);
 
@@ -174,7 +182,11 @@ pub fn parse_response_frame(frame: &[u8]) -> Result<String, JsValue> {
 
     let obj = js_sys::Object::new();
 
-    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("_id"), &JsValue::from(comm.get_id()));
+    let _ = js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("_id"),
+        &JsValue::from(comm.get_id()),
+    );
 
     let type_name = communication_type_name(comm.get_type().0).unwrap_or("Unknown");
     let _ = js_sys::Reflect::set(
@@ -200,10 +212,19 @@ pub fn parse_response_frame(frame: &[u8]) -> Result<String, JsValue> {
         }
     }
 
-    let stringified = js_sys::JSON::stringify(&obj)
-        .map_err(|_| js_error("JSON stringify failed"))?;
-    stringified.as_string()
+    let stringified =
+        js_sys::JSON::stringify(&obj).map_err(|_| js_error("JSON stringify failed"))?;
+    stringified
+        .as_string()
         .ok_or_else(|| js_error("JSON stringify result not a string"))
+}
+
+/// Parse any MTP frame into the human-readable CommunicationValue display form.
+#[wasm_bindgen]
+pub fn format_frame(frame: &[u8]) -> Result<String, JsValue> {
+    let comm = CommunicationValue::from_bytes(frame)
+        .map_err(|e| js_error(&format!("parse failed: {}", e)))?;
+    Ok(comm.to_string())
 }
 
 #[cfg(test)]
@@ -219,8 +240,14 @@ mod tests {
 
         assert_eq!(cv.get_type(), CommunicationTypeId(19)); // Ping
         assert_eq!(cv.get_sender(), 42);
-        assert_eq!(cv.get_data(DataTypeId(4)), &DataValue::Str("test-ping".into()));
-        assert_eq!(cv.get_data(DataTypeId(5)), &DataValue::UnsignedNumber(1234567890));
+        assert_eq!(
+            cv.get_data(DataTypeId(4)),
+            &DataValue::Str("test-ping".into())
+        );
+        assert_eq!(
+            cv.get_data(DataTypeId(5)),
+            &DataValue::UnsignedNumber(1234567890)
+        );
     }
 
     #[wasm_bindgen_test]
@@ -231,9 +258,15 @@ mod tests {
 
         assert_eq!(cv.get_type(), CommunicationTypeId(19));
         assert_eq!(cv.get_sender(), 99);
-        assert_eq!(cv.get_data(DataTypeId(4)), &DataValue::Str("with-data".into()));
+        assert_eq!(
+            cv.get_data(DataTypeId(4)),
+            &DataValue::Str("with-data".into())
+        );
         assert_eq!(cv.get_data(DataTypeId(5)), &DataValue::UnsignedNumber(555));
-        assert_eq!(cv.get_data(DataTypeId(6)), &DataValue::Bytes(payload.to_vec()));
+        assert_eq!(
+            cv.get_data(DataTypeId(6)),
+            &DataValue::Bytes(payload.to_vec())
+        );
     }
 
     #[wasm_bindgen_test]
@@ -264,7 +297,10 @@ mod tests {
 
         assert_eq!(cv.get_type(), CommunicationTypeId(19)); // Ping
         assert_eq!(cv.get_sender(), 7);
-        assert_eq!(cv.get_data(DataTypeId(4)), &DataValue::Str("MTP WASM Demo".into()));
+        assert_eq!(
+            cv.get_data(DataTypeId(4)),
+            &DataValue::Str("MTP WASM Demo".into())
+        );
     }
 
     #[wasm_bindgen_test]
@@ -287,11 +323,13 @@ mod tests {
         let result = parse_auth_response(&resp).expect("parse failed");
 
         let connected = js_sys::Reflect::get(&result, &"connected".into())
-            .ok().and_then(|v| v.as_bool());
+            .ok()
+            .and_then(|v| v.as_bool());
         assert_eq!(connected, Some(true));
 
         let id = js_sys::Reflect::get(&result, &"assignedId".into())
-            .ok().and_then(|v| v.as_f64());
+            .ok()
+            .and_then(|v| v.as_f64());
         assert_eq!(id, Some(42.0));
     }
 
@@ -304,7 +342,8 @@ mod tests {
         let result = parse_auth_response(&resp).expect("parse failed");
 
         let connected = js_sys::Reflect::get(&result, &"connected".into())
-            .ok().and_then(|v| v.as_bool());
+            .ok()
+            .and_then(|v| v.as_bool());
         assert_eq!(connected, Some(false));
 
         // rejected should have no assignedId

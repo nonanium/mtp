@@ -1,5 +1,7 @@
 use mtp::codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue, TypeMap};
-use mtp::crypto::{ChaCha20Poly1305, CryptoError, SignatureScheme, SignaturePublicKey, verify_ed25519};
+use mtp::crypto::{
+    ChaCha20Poly1305, CryptoError, SignaturePublicKey, SignatureScheme, verify_ed25519,
+};
 
 struct Ed25519Verifier(SignaturePublicKey);
 
@@ -71,6 +73,7 @@ pub fn process_and_respond(
                 enc_status = format!("EncryptedPayload decrypted OK ({} entries)", entries.len());
             }
         } else {
+            eprintln!("  EncryptedPayload decryption failed");
             enc_status = String::from("EncryptedPayload: decryption FAILED");
         }
     }
@@ -83,13 +86,14 @@ pub fn process_and_respond(
             if dv.verify_into_container(&verifier).is_some() {
                 if let Some(entries) = dv.as_container() {
                     println!("  Verified SignedPayload: {:?}", entries);
-                    sig_status =
-                        format!("SignedPayload verified OK ({} entries)", entries.len());
+                    sig_status = format!("SignedPayload verified OK ({} entries)", entries.len());
                 }
             } else {
+                eprintln!("  SignedPayload verification failed");
                 sig_status = String::from("SignedPayload: verification FAILED");
             }
         } else {
+            eprintln!("  SignedPayload cannot be verified; no client public key available");
             sig_status = String::from("SignedPayload: no client public key available");
         }
     }
@@ -99,7 +103,9 @@ pub fn process_and_respond(
         if let Some(pk_bundle) = client_pk {
             let verifier = Ed25519Verifier(pk_bundle.sig_cl_public_key.clone());
             let mut dv = secure.clone();
-            if dv.decrypt_signed_encrypted_container(&cipher, b"demo-aad").is_some()
+            if dv
+                .decrypt_signed_encrypted_container(&cipher, b"demo-aad")
+                .is_some()
                 && dv.verify_into_container(&verifier).is_some()
             {
                 if let Some(entries) = dv.as_container() {
@@ -110,9 +116,11 @@ pub fn process_and_respond(
                     );
                 }
             } else {
+                eprintln!("  SecurePayload decryption/verification failed");
                 secure_status = String::from("SecurePayload: decryption/verification FAILED");
             }
         } else {
+            eprintln!("  SecurePayload cannot be verified; no client public key available");
             secure_status = String::from("SecurePayload: no client public key available");
         }
     }

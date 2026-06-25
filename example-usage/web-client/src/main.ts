@@ -6,6 +6,7 @@ import init, {
   ed25519_generate,
   keyring_from_ed25519,
   build_demo_message,
+  format_frame,
 } from "mtp-wasm";
 
 const STATUS = document.getElementById("status")!;
@@ -57,7 +58,9 @@ function hexToBytes(value: string): Uint8Array {
 }
 
 function saveKeys() {
-  if (!keyringBytes) return;
+  if (!keyringBytes) {
+    return;
+  }
 
   let hostPublicKey: number[] | undefined;
   try {
@@ -106,7 +109,7 @@ async function loadHostPublicKey() {
 
     HOST_PUBLIC_KEY.value = hostPublicKey;
     saveKeys();
-    log("Loaded host public key bundle from public file.");
+    log(`Loaded host public key bundle (${hostPublicKey.length / 2} bytes).`);
   } catch {
     // Manual paste still works when the server has not exported the file yet.
   }
@@ -138,11 +141,11 @@ function createClient(): WasmClient {
     (state: number) =>
       log(`[state] ${ConnectionState[state] ?? state}`, "state"),
     (data: Uint8Array) => {
-      const decoder = new TextDecoder();
-      log(
-        `[message] ${data.length} bytes: ${decoder.decode(data)}`,
-        "received",
-      );
+      try {
+        log(`Received: ${format_frame(data)}`, "received");
+      } catch (e) {
+        log(`[message parse error] ${e}`, "error");
+      }
     },
     (err: any) => log(`[error] ${err}`, "error"),
   );
@@ -181,7 +184,8 @@ async function connect() {
   await loadDevCertHash();
 
   const client = createClient();
-  const config = new ConnectionConfig(SERVER_URL.value.trim());
+  const serverUrl = SERVER_URL.value.trim();
+  const config = new ConnectionConfig(serverUrl);
   if (devCertHash) {
     log(`Pinning WebTransport certificate hash: sha-256:${devCertHash}`);
     config.server_certificate_hashes = [`sha-256:${devCertHash}`];
@@ -210,6 +214,7 @@ async function connect() {
 
     log("\nSending demo message...");
     const frame = build_demo_message(activeClientId, keyringBytes);
+    log(`Sending: ${format_frame(frame)}`, "state");
     await client.send(frame);
     log(`Sent ${frame.length} bytes`);
 
@@ -236,6 +241,10 @@ GENERATE_KEYPAIR.addEventListener("click", () => {
 CONNECT.addEventListener("click", () => {
   connect().catch((e) => {
     log(`Fatal error: ${e}`, "error");
+    log(
+      `[fatal context] clientId=${clientId?.toString() ?? "unregistered"}, server=${SERVER_URL.value.trim()}, hostPkChars=${HOST_PUBLIC_KEY.value.replace(/[^0-9a-fA-F]/g, "").length}, keyringBytes=${keyringBytes?.length ?? 0}, certHash=${devCertHash || "none"}`,
+      "error",
+    );
     console.error(e);
   });
 });

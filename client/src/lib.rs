@@ -4,6 +4,20 @@ use mtp_codec::{CommunicationValue, DataTypeId, DataValue, PROTOCOL_VERSION, Ver
 use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
 
+#[cfg(feature = "crypto")]
+fn unexpected_response_type_error(
+    context: &str,
+    expected_type: mtp_codec::CommunicationTypeId,
+    response: &CommunicationValue,
+) -> CommunicationError {
+    CommunicationError::AuthenticationFailed(format!(
+        "unexpected response type during {context}: expected {:?}, got {:?}; parsed {}",
+        expected_type,
+        response.get_type(),
+        response
+    ))
+}
+
 pub struct ClientConfig {
     pub url: String,
     pub server_cert: Option<Vec<u8>>,
@@ -123,6 +137,15 @@ impl MTPClient {
 
         // 2. Receive host response (single message)
         let response = receiver.receive().await?;
+
+        let expected_type = mtp_codec::CommunicationTypeId(16); // IdentificationResponse
+        if response.get_type() != expected_type {
+            return Err(unexpected_response_type_error(
+                "auth_connect",
+                expected_type,
+                &response,
+            ));
+        }
 
         let connected = response.get_data(DataTypeId(11));
         match connected {
@@ -263,6 +286,15 @@ impl MTPClient {
 
         // 2. Receive host response (single message)
         let response = receiver.receive().await?;
+
+        let expected_type = mtp_codec::CommunicationTypeId(18); // RegisterResponse
+        if response.get_type() != expected_type {
+            return Err(unexpected_response_type_error(
+                "auth_register",
+                expected_type,
+                &response,
+            ));
+        }
 
         let connected = response.get_data(DataTypeId(11));
         match connected {
