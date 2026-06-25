@@ -67,7 +67,10 @@ pub async fn host(
                 }
             };
 
-            let connection = match request.accept().await {
+            let connection = match request
+                .accept_with_headers([("sec-webtransport-http3-draft02", "1")])
+                .await
+            {
                 Ok(conn) => {
                     log::warn!("[transport bg task] connection accepted");
                     conn
