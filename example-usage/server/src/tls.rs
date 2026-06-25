@@ -14,7 +14,7 @@ pub fn load_or_generate_tls(
     let params = rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])?;
     let cert = params.self_signed(&key_pair)?;
 
-    let cert_str = cert26.pem();
+    let cert_str = cert.pem();
     let key_str = key_pair.serialize_pem();
 
     fs::write(cert_path, cert_str.as_bytes())?;
