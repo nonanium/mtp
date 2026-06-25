@@ -1,5 +1,5 @@
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{WebTransport, WebTransportHash, WebTransportOptions};
 
@@ -53,7 +53,8 @@ impl WasmTransport {
             }
             None => WebTransport::new(url)?,
         };
-        JsFuture::from(transport.ready()).await
+        JsFuture::from(transport.ready())
+            .await
             .map_err(|e| js_error(&format!("WebTransport ready failed: {:?}", e)))?;
         Ok(Self { inner: transport })
     }
@@ -90,7 +91,8 @@ impl WasmTransport {
             .map_err(|_| js_error("missing write"))?
             .dyn_into::<js_sys::Function>()
             .map_err(|_| js_error("write not a function"))?;
-        let write_promise = write_fn.call1(&writer_val, &chunk)
+        let write_promise = write_fn
+            .call1(&writer_val, &chunk)
             .map_err(|e| js_error(&format!("write failed: {:?}", e)))?;
         JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await?;
 
@@ -98,7 +100,8 @@ impl WasmTransport {
             .map_err(|_| js_error("missing close"))?
             .dyn_into::<js_sys::Function>()
             .map_err(|_| js_error("close not a function"))?;
-        let close_promise = close_fn.call0(&writer_val)
+        let close_promise = close_fn
+            .call0(&writer_val)
             .map_err(|e| js_error(&format!("close failed: {:?}", e)))?;
         JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await?;
 
@@ -114,27 +117,34 @@ impl WasmTransport {
             .map_err(|_| js_error("missing getReader"))?
             .dyn_into::<js_sys::Function>()
             .map_err(|_| js_error("getReader not a function"))?;
-        let reader_val = reader_fn.call0(&incoming)
+        let reader_val = reader_fn
+            .call0(&incoming)
             .map_err(|_| js_error("getReader call failed"))?;
 
         let read_fn = js_sys::Reflect::get(&reader_val, &JsValue::from_str("read"))
             .map_err(|_| js_error("missing read"))?
             .dyn_into::<js_sys::Function>()
             .map_err(|_| js_error("read not a function"))?;
-        let result_promise = read_fn.call0(&reader_val)
+        let result_promise = read_fn
+            .call0(&reader_val)
             .map_err(|_| js_error("read call failed"))?;
-        let result = JsFuture::from(result_promise.unchecked_into::<js_sys::Promise>()).await
+        let result = JsFuture::from(result_promise.unchecked_into::<js_sys::Promise>())
+            .await
             .map_err(|e| js_error(&format!("read failed: {:?}", e)))?;
 
         // Release the reader lock so receive_loop can create its own reader
-        if let Some(release_fn) = js_sys::Reflect::get(&reader_val, &JsValue::from_str("releaseLock"))
-            .ok().and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+        if let Some(release_fn) =
+            js_sys::Reflect::get(&reader_val, &JsValue::from_str("releaseLock"))
+                .ok()
+                .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
         {
             let _ = release_fn.call0(&reader_val);
         }
 
         let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
-            .ok().and_then(|v| v.as_bool()).unwrap_or(false);
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if done {
             return Err(js_error("stream ended before frame"));
         }
@@ -143,71 +153,64 @@ impl WasmTransport {
             .map_err(|_| js_error("missing value"))?;
 
         let readable_or_stream = resolve_stream_readable(&recv_stream)?;
-
-        let stream_reader_fn = js_sys::Reflect::get(&readable_or_stream, &JsValue::from_str("getReader"))
-            .map_err(|_| js_error("missing stream getReader"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("stream getReader not a function"))?;
-        let stream_reader = stream_reader_fn.call0(&readable_or_stream)
+        let stream_reader_fn =
+            js_sys::Reflect::get(&readable_or_stream, &JsValue::from_str("getReader"))
+                .map_err(|_| js_error("missing stream getReader"))?
+                .dyn_into::<js_sys::Function>()
+                .map_err(|_| js_error("stream getReader not a function"))?;
+        let stream_reader = stream_reader_fn
+            .call0(&readable_or_stream)
             .map_err(|_| js_error("stream getReader call failed"))?;
 
-        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        let mut buffer: Vec<u8> = Vec::new();
         loop {
-            let stream_read_fn = match js_sys::Reflect::get(&stream_reader, &JsValue::from_str("read"))
-                .ok().and_then(|f| f.dyn_into::<js_sys::Function>().ok())
-            {
-                Some(f) => f,
-                None => break,
-            };
+            let stream_read_fn =
+                match js_sys::Reflect::get(&stream_reader, &JsValue::from_str("read"))
+                    .ok()
+                    .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+                {
+                    Some(f) => f,
+                    None => break,
+                };
             let chunk_promise = match stream_read_fn.call0(&stream_reader) {
                 Ok(p) => p,
                 Err(_) => break,
             };
-            let chunk_result = match JsFuture::from(chunk_promise.unchecked_into::<js_sys::Promise>()).await {
-                Ok(v) => v,
-                Err(_) => break,
-            };
+            let chunk_result =
+                match JsFuture::from(chunk_promise.unchecked_into::<js_sys::Promise>()).await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
 
             let chunk_done = js_sys::Reflect::get(&chunk_result, &JsValue::from_str("done"))
-                .ok().and_then(|v| v.as_bool()).unwrap_or(true);
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             if chunk_done {
-                break;
+                return Err(js_error("stream closed before complete frame"));
             }
 
-            if let Ok(chunk_val) = js_sys::Reflect::get(&chunk_result, &JsValue::from_str("value")) {
+            if let Ok(chunk_val) = js_sys::Reflect::get(&chunk_result, &JsValue::from_str("value"))
+            {
                 let arr = js_sys::Uint8Array::new(&chunk_val).to_vec();
                 if !arr.is_empty() {
-                    chunks.push(arr);
+                    buffer.extend_from_slice(&arr);
+                }
+            }
+
+            if buffer.len() >= 4 {
+                let frame_len =
+                    u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+                if 4 + frame_len <= buffer.len() {
+                    return Ok(buffer[4..4 + frame_len].to_vec());
                 }
             }
         }
 
-        if chunks.is_empty() {
-            return Err(js_error("empty stream"));
-        }
-
-        let total: usize = chunks.iter().map(|c| c.len()).sum();
-        let mut buf = Vec::with_capacity(total);
-        for c in &chunks {
-            buf.extend_from_slice(c);
-        }
-
-        if buf.len() < 4 {
-            return Err(js_error("frame too short"));
-        }
-        let frame_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-        if 4 + frame_len > buf.len() {
-            return Err(js_error("frame truncated"));
-        }
-
-        Ok(buf[4..4 + frame_len].to_vec())
+        Err(js_error("stream ended before frame complete"))
     }
 
-    pub async fn receive_loop(
-        &self,
-        on_message: js_sys::Function,
-        on_error: js_sys::Function,
-    ) {
+    pub async fn receive_loop(&self, on_message: js_sys::Function, on_error: js_sys::Function) {
         let incoming = self.inner.incoming_unidirectional_streams();
 
         let reader_fn = match js_sys::Reflect::get(&incoming, &JsValue::from_str("getReader")) {
@@ -228,9 +231,10 @@ impl WasmTransport {
                 Ok(p) => match JsFuture::from(p.unchecked_into::<js_sys::Promise>()).await {
                     Ok(v) => v,
                     Err(e) => {
-                        let _ = on_error.call1(&JsValue::NULL, &JsValue::from_str(
-                            &format!("read stream failed: {:?}", e)
-                        ));
+                        let _ = on_error.call1(
+                            &JsValue::NULL,
+                            &JsValue::from_str(&format!("read stream failed: {:?}", e)),
+                        );
                         break;
                     }
                 },
@@ -238,71 +242,92 @@ impl WasmTransport {
             };
 
             let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
-                .ok().and_then(|v| v.as_bool()).unwrap_or(false);
-            if done { break; }
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if done {
+                break;
+            }
 
             let recv_stream = match js_sys::Reflect::get(&result, &JsValue::from_str("value")) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
 
-            let readable_or_stream = match resolve_stream_readable(&recv_stream) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+            let this = self.clone();
+            let on_msg = on_message.clone();
+            let on_err = on_error.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let _ = this.handle_stream(recv_stream, on_msg, on_err).await;
+            });
+        }
+    }
 
-            let stream_reader_fn = match js_sys::Reflect::get(&readable_or_stream, &JsValue::from_str("getReader")) {
-                Ok(f) => f.dyn_into::<js_sys::Function>().unwrap(),
-                Err(_) => continue,
-            };
-            let stream_reader = match stream_reader_fn.call0(&readable_or_stream) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+    async fn handle_stream(
+        &self,
+        recv_stream: JsValue,
+        on_message: js_sys::Function,
+        _on_error: js_sys::Function,
+    ) -> Result<(), JsValue> {
+        let readable_or_stream = resolve_stream_readable(&recv_stream)?;
+        let stream_reader_fn =
+            js_sys::Reflect::get(&readable_or_stream, &JsValue::from_str("getReader"))?
+                .dyn_into::<js_sys::Function>()?;
+        let stream_reader = stream_reader_fn.call0(&readable_or_stream)?;
 
-            let mut chunks: Vec<Vec<u8>> = Vec::new();
-            loop {
-                let stream_read_fn = match js_sys::Reflect::get(&stream_reader, &JsValue::from_str("read")) {
-                    Ok(f) => f.dyn_into::<js_sys::Function>().unwrap(),
-                    Err(_) => break,
-                };
-                let chunk_result = match stream_read_fn.call0(&stream_reader) {
-                    Ok(p) => match JsFuture::from(p.unchecked_into::<js_sys::Promise>()).await {
-                        Ok(v) => v,
-                        Err(_) => break,
-                    },
-                    Err(_) => break,
-                };
+        let mut buffer: Vec<u8> = Vec::new();
 
-                let chunk_done = js_sys::Reflect::get(&chunk_result, &JsValue::from_str("done"))
-                    .ok().and_then(|v| v.as_bool()).unwrap_or(true);
-                if chunk_done { break; }
+        loop {
+            let stream_read_fn = js_sys::Reflect::get(&stream_reader, &JsValue::from_str("read"))?
+                .dyn_into::<js_sys::Function>()?;
+            let chunk_promise = stream_read_fn.call0(&stream_reader)?;
+            let chunk_result =
+                JsFuture::from(chunk_promise.unchecked_into::<js_sys::Promise>()).await?;
 
-                if let Ok(chunk_val) = js_sys::Reflect::get(&chunk_result, &JsValue::from_str("value")) {
-                    let arr = js_sys::Uint8Array::new(&chunk_val).to_vec();
-                    if !arr.is_empty() { chunks.push(arr); }
+            let chunk_done = js_sys::Reflect::get(&chunk_result, &JsValue::from_str("done"))
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if chunk_done {
+                break;
+            }
+
+            if let Ok(chunk_val) = js_sys::Reflect::get(&chunk_result, &JsValue::from_str("value"))
+            {
+                let arr = js_sys::Uint8Array::new(&chunk_val).to_vec();
+                if !arr.is_empty() {
+                    buffer.extend_from_slice(&arr);
                 }
             }
 
-            if chunks.is_empty() { continue; }
-
-            let total: usize = chunks.iter().map(|c| c.len()).sum();
-            let mut buf = Vec::with_capacity(total);
-            for c in &chunks { buf.extend_from_slice(c); }
-
-            if buf.len() < 4 {
-                let _ = on_error.call1(&JsValue::NULL, &JsValue::from_str("frame too short"));
-                continue;
+            // Extract all complete frames from the buffer
+            while buffer.len() >= 4 {
+                let frame_len =
+                    u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+                if 4 + frame_len > buffer.len() {
+                    break;
+                }
+                let frame = buffer[4..4 + frame_len].to_vec();
+                let arr = js_sys::Uint8Array::from(&frame[..]);
+                let _ = on_message.call1(&JsValue::NULL, &arr);
+                buffer.drain(..4 + frame_len);
             }
-            let frame_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-            if 4 + frame_len > buf.len() {
-                let _ = on_error.call1(&JsValue::NULL, &JsValue::from_str("frame truncated"));
-                continue;
+        }
+
+        // Process any remaining complete frames after stream closes
+        while buffer.len() >= 4 {
+            let frame_len =
+                u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+            if 4 + frame_len > buffer.len() {
+                break;
             }
-            let frame = buf[4..4 + frame_len].to_vec();
+            let frame = buffer[4..4 + frame_len].to_vec();
             let arr = js_sys::Uint8Array::from(&frame[..]);
             let _ = on_message.call1(&JsValue::NULL, &arr);
+            buffer.drain(..4 + frame_len);
         }
+
+        Ok(())
     }
 
     pub fn close(&self) {
