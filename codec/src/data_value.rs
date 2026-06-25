@@ -309,11 +309,7 @@ impl DataValue {
      * Returns `None` if the value is not a `Container` or signing fails.
      */
     #[cfg(feature = "crypto")]
-    pub fn sign_container(
-        &mut self,
-        algorithm: u8,
-        signer: &impl SignatureScheme,
-    ) -> Option<()> {
+    pub fn sign_container(&mut self, algorithm: u8, signer: &impl SignatureScheme) -> Option<()> {
         let entries = self.as_container()?;
         let container_bytes = Self::encode_container(&entries);
 
@@ -334,10 +330,7 @@ impl DataValue {
      * blob is malformed.
      */
     #[cfg(feature = "crypto")]
-    pub fn verify_into_container(
-        &mut self,
-        verifier: &impl SignatureScheme,
-    ) -> Option<()> {
+    pub fn verify_into_container(&mut self, verifier: &impl SignatureScheme) -> Option<()> {
         let blob = self.as_signed_container()?;
         if blob.len() < 1 + 64 + 2 {
             return None;
@@ -380,7 +373,7 @@ impl DataValue {
 
     /*
      * Decrypt a `SignedEncryptedContainer` in-place, replacing it with a
-     * `SignedContainer`. Does NOT verify — call `verify_into_container` next.
+     * `SignedContainer`. Does NOT verify; call `verify_into_container` next.
      */
     #[cfg(feature = "crypto")]
     pub fn decrypt_signed_encrypted_container(
@@ -1061,9 +1054,7 @@ mod tests {
 
     #[test]
     fn test_null_in_container() {
-        container_roundtrip(vec![
-            (DataTypeId(1), DataValue::Null),
-        ]);
+        container_roundtrip(vec![(DataTypeId(1), DataValue::Null)]);
     }
 
     #[test]
@@ -1103,21 +1094,23 @@ mod tests {
     #[test]
     fn test_container_nested_roundtrip() {
         container_roundtrip(vec![
-            (DataTypeId(1), DataValue::Container(vec![
-                (DataTypeId(10), DataValue::BoolTrue),
-            ])),
-            (DataTypeId(2), DataValue::Array(vec![
-                DataValue::SignedNumber(1),
-                DataValue::SignedNumber(2),
-            ])),
+            (
+                DataTypeId(1),
+                DataValue::Container(vec![(DataTypeId(10), DataValue::BoolTrue)]),
+            ),
+            (
+                DataTypeId(2),
+                DataValue::Array(vec![DataValue::SignedNumber(1), DataValue::SignedNumber(2)]),
+            ),
         ]);
     }
 
     #[test]
     fn test_container_base64_roundtrip() {
-        let dv = DataValue::Container(vec![
-            (DataTypeId(7), DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])),
-        ]);
+        let dv = DataValue::Container(vec![(
+            DataTypeId(7),
+            DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        )]);
         let b64 = dv.to_base64();
         let decoded = DataValue::from_base64(&b64).expect("base64 roundtrip failed");
         assert_eq!(dv, decoded);
@@ -1128,11 +1121,17 @@ mod tests {
         assert_eq!(DataValue::BoolTrue.kind(), DataKind::Bool);
         assert_eq!(DataValue::Bool(false).kind(), DataKind::Bool);
         assert_eq!(DataValue::SignedNumber(0).kind(), DataKind::SignedNumber);
-        assert_eq!(DataValue::UnsignedNumber(0).kind(), DataKind::UnsignedNumber);
+        assert_eq!(
+            DataValue::UnsignedNumber(0).kind(),
+            DataKind::UnsignedNumber
+        );
         assert_eq!(DataValue::Float(0, 0).kind(), DataKind::Float);
         assert_eq!(DataValue::Str(String::new()).kind(), DataKind::Str);
         assert_eq!(DataValue::Bytes(vec![]).kind(), DataKind::Bytes);
-        assert_eq!(DataValue::Array(vec![]).kind(), DataKind::Array(Box::new(DataKind::Null)));
+        assert_eq!(
+            DataValue::Array(vec![]).kind(),
+            DataKind::Array(Box::new(DataKind::Null))
+        );
         assert_eq!(DataValue::Container(vec![]).kind(), DataKind::Container);
         assert_eq!(DataValue::Null.kind(), DataKind::Null);
     }
@@ -1147,10 +1146,22 @@ mod tests {
         ]);
 
         let map = dv.as_map().expect("should be a container");
-        assert_eq!(map.get(&DataTypeId(1)).and_then(|v| v.as_str()), Some("alice"));
-        assert_eq!(map.get(&DataTypeId(2)).and_then(|v| v.as_signed_number()), Some(42));
-        assert_eq!(map.get(&DataTypeId(3)).and_then(|v| v.as_bytes()), Some(vec![0x01, 0x02]));
-        assert_eq!(map.get(&DataTypeId(4)).and_then(|v| v.as_array()), Some(vec![DataValue::BoolTrue]));
+        assert_eq!(
+            map.get(&DataTypeId(1)).and_then(|v| v.as_str()),
+            Some("alice")
+        );
+        assert_eq!(
+            map.get(&DataTypeId(2)).and_then(|v| v.as_signed_number()),
+            Some(42)
+        );
+        assert_eq!(
+            map.get(&DataTypeId(3)).and_then(|v| v.as_bytes()),
+            Some(vec![0x01, 0x02])
+        );
+        assert_eq!(
+            map.get(&DataTypeId(4)).and_then(|v| v.as_array()),
+            Some(vec![DataValue::BoolTrue])
+        );
     }
 
     #[test]
@@ -1191,9 +1202,7 @@ mod tests {
 
     #[test]
     fn test_truncated_container_rejected() {
-        let dv = DataValue::Container(vec![
-            (DataTypeId(1), DataValue::Str("hello".to_string())),
-        ]);
+        let dv = DataValue::Container(vec![(DataTypeId(1), DataValue::Str("hello".to_string()))]);
         let bytes = dv.to_bytes();
         // Truncate to fewer than 2 bytes so neither container nor array can be read
         assert!(DataValue::from_bytes(&bytes[..1]).is_none());
@@ -1280,9 +1289,8 @@ mod tests {
         let cipher_a = ChaCha20Poly1305::new([0xAB; 32]);
         let cipher_b = ChaCha20Poly1305::new([0xCD; 32]);
 
-        let mut dv = DataValue::Container(vec![
-            (DataTypeId(1), DataValue::Str("secret".to_string())),
-        ]);
+        let mut dv =
+            DataValue::Container(vec![(DataTypeId(1), DataValue::Str("secret".to_string()))]);
 
         assert!(dv.encrypt_container(&cipher_a, b"aad").is_some());
         assert!(dv.decrypt_into_container(&cipher_b, b"aad").is_none());
@@ -1294,9 +1302,8 @@ mod tests {
         use mtp_crypto::ChaCha20Poly1305;
         let cipher = ChaCha20Poly1305::new([0xAB; 32]);
 
-        let mut dv = DataValue::Container(vec![
-            (DataTypeId(1), DataValue::Str("secret".to_string())),
-        ]);
+        let mut dv =
+            DataValue::Container(vec![(DataTypeId(1), DataValue::Str("secret".to_string()))]);
 
         assert!(dv.encrypt_container(&cipher, b"correct-aad").is_some());
         assert!(dv.decrypt_into_container(&cipher, b"wrong-aad").is_none());
@@ -1319,16 +1326,21 @@ mod tests {
         let (signer, sk, _pk) = Ed25519Signer::generate();
         let cipher = ChaCha20Poly1305::new([0xAB; 32]);
 
-        let mut dv = DataValue::Container(vec![
-            (DataTypeId(1), DataValue::Str("signed data".to_string())),
-        ]);
+        let mut dv = DataValue::Container(vec![(
+            DataTypeId(1),
+            DataValue::Str("signed data".to_string()),
+        )]);
 
-        assert!(dv
-            .sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, &cipher, b"aad")
-            .is_some());
+        assert!(
+            dv.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, &cipher, b"aad")
+                .is_some()
+        );
         assert!(matches!(dv, DataValue::SignedEncryptedContainer(_)));
 
-        assert!(dv.decrypt_signed_encrypted_container(&cipher, b"aad").is_some());
+        assert!(
+            dv.decrypt_signed_encrypted_container(&cipher, b"aad")
+                .is_some()
+        );
         assert!(matches!(dv, DataValue::SignedContainer(_)));
 
         let verifier = Ed25519Signer::new(&sk).unwrap();
@@ -1348,9 +1360,10 @@ mod tests {
         let (_, sk2, _) = Ed25519Signer::generate();
         let wrong_verifier = Ed25519Signer::new(&sk2).unwrap();
 
-        let mut dv = DataValue::Container(vec![
-            (DataTypeId(1), DataValue::Str("signed data".to_string())),
-        ]);
+        let mut dv = DataValue::Container(vec![(
+            DataTypeId(1),
+            DataValue::Str("signed data".to_string()),
+        )]);
 
         assert!(dv.sign_container(SigAlgorithm::ED25519, &signer).is_some());
         assert!(dv.verify_into_container(&wrong_verifier).is_none());

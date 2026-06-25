@@ -45,7 +45,7 @@ config.server_certificate_hashes = [           // optional, for certificate pinn
 
 ### TLS Certificate Handling
 
-By default — when `server_certificate_hashes` is not set — the browser uses its
+By default, when `server_certificate_hashes` is not set, the browser uses its
 **built-in root certificate store** to verify the server's TLS certificate,
 just like any other HTTPS/WebSocket connection. This works with publicly-trusted
 certificate authorities automatically.

@@ -7,4 +7,9 @@ export default defineConfig({
       'mtp-wasm': path.resolve(__dirname, '../../wasm/pkg'),
     },
   },
+  server: {
+    fs: {
+      allow: ['.', path.resolve(__dirname, '../../wasm/pkg')],
+    },
+  },
 });
