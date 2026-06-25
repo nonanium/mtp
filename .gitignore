@@ -2,3 +2,4 @@
 **Cargo.lock
 *.pem
 *.key
+example-usage/dev-cert/

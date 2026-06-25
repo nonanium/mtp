@@ -5,10 +5,34 @@ mod tls;
 
 use mtp::host::{HostConfig, MTPHost};
 use mtp::type_map::TypeMap;
+use std::path::Path;
+
+fn dev_cert_paths() -> (String, String) {
+    let cert = std::env::var("MTP_DEV_CERT").unwrap_or_else(|_| {
+        if Path::new("example-usage/dev-cert/cert.pem").exists() {
+            "example-usage/dev-cert/cert.pem".to_string()
+        } else {
+            "dev-cert/cert.pem".to_string()
+        }
+    });
+    let key = std::env::var("MTP_DEV_KEY").unwrap_or_else(|_| {
+        if Path::new("example-usage/dev-cert/key.pem").exists() {
+            "example-usage/dev-cert/key.pem".to_string()
+        } else {
+            "dev-cert/key.pem".to_string()
+        }
+    });
+    (cert, key)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (cert_pem, key_pem) = tls::load_or_generate_tls("server.pem", "server.key")?;
+    let (cert_path, key_path) = dev_cert_paths();
+    let (cert_pem, key_pem) = tls::load_or_generate_tls(&cert_path, &key_path)?;
+    let cert_hash = tls::certificate_sha256_hex(&cert_pem)?;
+    tls::export_webtransport_cert_hash(&cert_hash)?;
+    println!("WebTransport certificate sha256: {cert_hash}");
+
     let (host_id, host_keyring) = keys::load_or_generate_host_keys("host_keys.json")?;
     keys::export_host_public_keys(&host_keyring)?;
 

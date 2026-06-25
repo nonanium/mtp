@@ -43,12 +43,50 @@
           MTP_TYPE_MAPS = "${toString ./example-usage/type-maps.yaml}";
 
           shellHook = ''
+            cert_dir="$PWD/example-usage/dev-cert"
+            public_dir="$PWD/example-usage/web-client/public"
+            cert_key="$cert_dir/key.pem"
+            cert_pem="$cert_dir/cert.pem"
+            cert_hash="$cert_dir/sha256.txt"
+
+            mkdir -p "$cert_dir"
+            mkdir -p "$public_dir"
+
+            if [ ! -f "$cert_key" ] || [ ! -f "$cert_pem" ]; then
+              openssl ecparam -name prime256v1 -genkey -noout -out "$cert_key"
+              openssl req -new -x509 \
+                -sha256 \
+                -key "$cert_key" \
+                -out "$cert_pem" \
+                -days 13 \
+                -subj "/CN=localhost" \
+                -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+                -addext "basicConstraints=critical,CA:FALSE" \
+                -addext "keyUsage=critical,digitalSignature" \
+                -addext "extendedKeyUsage=serverAuth"
+              cert_status="generated"
+            else
+              cert_status="cached"
+            fi
+
+            openssl x509 -in "$cert_pem" -outform der \
+              | openssl dgst -sha256 -binary \
+              | od -An -tx1 -v \
+              | tr -d ' \n' > "$cert_hash"
+            cp "$cert_hash" "$public_dir/mtp_dev_cert_hash.txt"
+
+            export MTP_DEV_CERT="$cert_pem"
+            export MTP_DEV_KEY="$cert_key"
+            export MTP_DEV_CERT_HASH="$(cat "$cert_hash")"
+
             echo "MTP dev shell"
             echo "  rustc  : $(rustc --version)"
             echo "  cargo  : $(cargo --version)"
             echo "  wasm-pack : $(wasm-pack --version 2>/dev/null || echo 'not found')"
             echo "  targets: $(rustc --print target-list | grep wasm32 | tr '\n' ' ')"
             echo "  MTP_TYPE_MAPS = $MTP_TYPE_MAPS"
+            echo "  dev cert: $MTP_DEV_CERT ($cert_status)"
+            echo "  cert sha256: $MTP_DEV_CERT_HASH"
           '';
         };
 

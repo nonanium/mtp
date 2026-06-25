@@ -5,8 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MTP Web Client</title>
   <style>
-    body { font-family: monospace; background: #111; color: #0f0; padding: 2rem; }
-    #status { white-space: pre-wrap; }
+    body { background: #111; color: #eee; font-family: "Public Sans", sans-serif; }
+    label, input, textarea { display: block; margin-bottom: 0.5rem; }
+    input, textarea, button { font-family: "Public Sans", sans-serif; }
+    input, textarea { background: #222; color: #eee; }
+    #status, #key-status { white-space: pre-wrap; }
     .state { color: #ff0; }
     .received { color: #0ff; }
     .error { color: #f00; }
@@ -14,7 +17,23 @@
 </head>
 <body>
   <h1>MTP WebTransport Client</h1>
-  <div id="status">Initializing...</div>
+  <label for="server-url">Server URL</label>
+  <input id="server-url" value="https://127.0.0.1:8080" />
+
+  <label for="host-public-key">Host public key bundle hex</label>
+  <textarea id="host-public-key" placeholder="Paste PublicKeyBundle bytes as hex"></textarea>
+
+  <label for="client-public-key">Generated client public key bundle hex</label>
+  <textarea id="client-public-key" readonly></textarea>
+
+  <div>
+    <button id="generate-keypair" type="button">Generate keypair</button>
+    <button id="connect" type="button" disabled>Connect</button>
+    <button id="clear-keys" type="button">Clear saved keys</button>
+  </div>
+
+  <div id="key-status">Initializing...</div>
+  <div id="status"></div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

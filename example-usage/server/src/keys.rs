@@ -27,6 +27,17 @@ pub fn load_or_generate_host_keys(path: &str) -> Result<(u64, Keyring), Box<dyn 
 }
 
 pub fn export_host_public_keys(host_keyring: &Keyring) -> Result<(), Box<dyn std::error::Error>> {
+    let public_key_bundle_hex = hex::encode(host_keyring.public_key_bundle().as_bytes());
+
+    fs::write(
+        "host_public_key_bundle.hex",
+        &public_key_bundle_hex,
+    )?;
+    fs::create_dir_all("web-client/public")?;
+    fs::write(
+        "web-client/public/host_public_key_bundle.hex",
+        &public_key_bundle_hex,
+    )?;
     fs::write(
         "host_enc_kem_pk.bin",
         host_keyring.kem_public_key.as_bytes(),

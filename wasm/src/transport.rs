@@ -200,7 +200,7 @@ impl WasmTransport {
 
             if buffer.len() >= 4 {
                 let frame_len =
-                    u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+                    u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
                 if 4 + frame_len <= buffer.len() {
                     return Ok(buffer[4..4 + frame_len].to_vec());
                 }
@@ -303,7 +303,7 @@ impl WasmTransport {
             // Extract all complete frames from the buffer
             while buffer.len() >= 4 {
                 let frame_len =
-                    u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+                    u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
                 if 4 + frame_len > buffer.len() {
                     break;
                 }
@@ -317,7 +317,7 @@ impl WasmTransport {
         // Process any remaining complete frames after stream closes
         while buffer.len() >= 4 {
             let frame_len =
-                u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+                u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
             if 4 + frame_len > buffer.len() {
                 break;
             }

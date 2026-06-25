@@ -124,12 +124,14 @@ impl WasmClient {
     pub async fn auth_connect(
         &mut self,
         config: &ConnectionConfig,
-        _host_public_key_bytes: &[u8],
+        host_public_key_bytes: &[u8],
         keyring_bytes: &[u8],
         client_id: u64,
     ) -> Result<u64, JsValue> {
         self.set_state(ConnectionState::Connecting);
 
+        let _host_pk = mtp_crypto::PublicKeyBundle::from_bytes(host_public_key_bytes)
+            .map_err(|e| js_error(&format!("invalid host public key: {}", e)))?;
         let keyring = mtp_crypto::Keyring::from_bytes(keyring_bytes)
             .map_err(|e| js_error(&format!("invalid keyring: {}", e)))?;
 
