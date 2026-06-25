@@ -1,3 +1,8 @@
+// try_new returns Result<Self, ()> deliberately: the only failure mode is "id
+// is in the reserved range", which carries no extra information worth an error
+// type. The unit error is the intended API.
+#![allow(clippy::result_unit_err)]
+
 pub const INTERNAL_COMM_RESERVED: std::ops::Range<u16> = 0..32;
 pub const INTERNAL_DATA_RESERVED: std::ops::Range<u16> = 0..32;
 

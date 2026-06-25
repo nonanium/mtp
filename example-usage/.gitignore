@@ -3,5 +3,9 @@ host_keys.json
 host_sig_pk.bin
 host_sig_pq_pk.bin
 host_enc_kem_pk.bin
+host_public_key_bundle.hex
 clients.json
 web-client/node_modules
+dev-cert/
+web-client/public/host_public_key_bundle.hex
+web-client/public/mtp_dev_cert_hash.txt

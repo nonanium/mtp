@@ -1,10 +1,8 @@
 use wasm_bindgen::prelude::*;
 
-use mtp_codec::{
-    CommunicationType, CommunicationTypeId, CommunicationValue, DataType, DataTypeId, DataValue,
-};
+use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue};
+use mtp_crypto::{Ed25519Signer, EncryptionType, Keyring, PublicKeyBundle, SigAlgorithm};
 use mtp_type_map::communication_type_name;
-use mtp_crypto::{Ed25519Signer, EncryptionType, Keyring, SigAlgorithm};
 
 use crate::error::js_error;
 
@@ -17,8 +15,14 @@ pub fn build_ping_frame(
     data: &[u8],
 ) -> Result<Vec<u8>, JsValue> {
     let mut msg = CommunicationValue::new(CommunicationType::Ping)
-        .add_typed_default(DataType::Description, DataValue::Str(description.to_string()))
-        .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(timestamp as u128))
+        .add_typed_default(
+            DataType::Description,
+            DataValue::Str(description.to_string()),
+        )
+        .add_typed_default(
+            DataType::Timestamp,
+            DataValue::UnsignedNumber(timestamp as u128),
+        )
         .with_sender(client_id);
 
     if !data.is_empty() {
@@ -32,13 +36,18 @@ pub fn build_ping_frame(
 /// Build a demo Ping frame with encrypted and signed containers
 /// (mirrors the Rust client example but uses only reserved data types).
 #[wasm_bindgen]
-pub fn build_demo_message(client_id: u64, keyring_bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+pub fn build_demo_message(
+    client_id: u64,
+    keyring_bytes: &[u8],
+    host_bundle_bytes: &[u8],
+) -> Result<Vec<u8>, JsValue> {
     let keyring = Keyring::from_bytes(keyring_bytes)
         .map_err(|e| js_error(&format!("invalid keyring: {}", e)))?;
 
-    // Demo encrypts to its own KEM public key (encrypt-to-self) so the roundtrip
-    // is self-contained; a real client would encrypt to the server's bundle.
-    let recipient = keyring.public_key_bundle();
+    // Encrypt to the server's KEM public key; the server decrypts with its keyring.
+    // (The client keyring only needs the Ed25519 signing key for this demo.)
+    let recipient = PublicKeyBundle::from_bytes(host_bundle_bytes)
+        .map_err(|e| js_error(&format!("invalid host bundle: {}", e)))?;
     let enc_type = EncryptionType::MlKemChaCha20Poly1305;
     let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)
         .map_err(|e| js_error(&format!("signer creation failed: {}", e)))?;
@@ -49,7 +58,8 @@ pub fn build_demo_message(client_id: u64, keyring_bytes: &[u8]) -> Result<Vec<u8
         (DataTypeId(2), DataValue::UnsignedNumber(42)),
     ]);
     let mut dv_enc = inner_enc;
-    dv_enc.encrypt_container(enc_type, &recipient, b"demo-aad")
+    dv_enc
+        .encrypt_container(enc_type, &recipient, b"demo-aad")
         .ok_or_else(|| js_error("encryption failed"))?;
 
     // Signed container
@@ -58,23 +68,40 @@ pub fn build_demo_message(client_id: u64, keyring_bytes: &[u8]) -> Result<Vec<u8
         (DataTypeId(2), DataValue::UnsignedNumber(99)),
     ]);
     let mut dv_sig = inner_sig;
-    dv_sig.sign_container(SigAlgorithm::ED25519, &signer)
+    dv_sig
+        .sign_container(SigAlgorithm::ED25519, &signer)
         .ok_or_else(|| js_error("signing failed"))?;
 
     // Signed + encrypted container
     let inner_sec = DataValue::Container(vec![
-        (DataTypeId(1), DataValue::Str("signed+encrypted payload".into())),
+        (
+            DataTypeId(1),
+            DataValue::Str("signed+encrypted payload".into()),
+        ),
         (DataTypeId(2), DataValue::UnsignedNumber(7)),
     ]);
     let mut dv_sec = inner_sec;
-    dv_sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, enc_type, &recipient, b"demo-aad")
+    dv_sec
+        .sign_and_encrypt_container(
+            SigAlgorithm::ED25519,
+            &signer,
+            enc_type,
+            &recipient,
+            b"demo-aad",
+        )
         .ok_or_else(|| js_error("sign+encrypt failed"))?;
 
     let timestamp = js_sys::Date::now() as u64;
 
     let msg = CommunicationValue::new(CommunicationType::Ping)
-        .add_typed_default(DataType::Description, DataValue::Str("MTP WASM Demo".into()))
-        .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(timestamp as u128))
+        .add_typed_default(
+            DataType::Description,
+            DataValue::Str("MTP WASM Demo".into()),
+        )
+        .add_typed_default(
+            DataType::Timestamp,
+            DataValue::UnsignedNumber(timestamp as u128),
+        )
         .add_typed_default(DataType::Version, DataValue::Str("demo-wasm".into()))
         .with_sender(client_id);
 
@@ -170,7 +197,11 @@ pub fn parse_response_frame(frame: &[u8]) -> Result<String, JsValue> {
 
     let obj = js_sys::Object::new();
 
-    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("_id"), &JsValue::from(comm.get_id()));
+    let _ = js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("_id"),
+        &JsValue::from(comm.get_id()),
+    );
 
     let type_name = communication_type_name(comm.get_type().0).unwrap_or("Unknown");
     let _ = js_sys::Reflect::set(
@@ -196,10 +227,19 @@ pub fn parse_response_frame(frame: &[u8]) -> Result<String, JsValue> {
         }
     }
 
-    let stringified = js_sys::JSON::stringify(&obj)
-        .map_err(|_| js_error("JSON stringify failed"))?;
-    stringified.as_string()
+    let stringified =
+        js_sys::JSON::stringify(&obj).map_err(|_| js_error("JSON stringify failed"))?;
+    stringified
+        .as_string()
         .ok_or_else(|| js_error("JSON stringify result not a string"))
+}
+
+/// Parse any MTP frame into the human-readable CommunicationValue display form.
+#[wasm_bindgen]
+pub fn format_frame(frame: &[u8]) -> Result<String, JsValue> {
+    let comm = CommunicationValue::from_bytes(frame)
+        .map_err(|e| js_error(&format!("parse failed: {}", e)))?;
+    Ok(comm.to_string())
 }
 
 #[cfg(test)]
@@ -215,8 +255,14 @@ mod tests {
 
         assert_eq!(cv.get_type(), CommunicationTypeId(19)); // Ping
         assert_eq!(cv.get_sender(), 42);
-        assert_eq!(cv.get_data(DataTypeId(4)), &DataValue::Str("test-ping".into()));
-        assert_eq!(cv.get_data(DataTypeId(5)), &DataValue::UnsignedNumber(1234567890));
+        assert_eq!(
+            cv.get_data(DataTypeId(4)),
+            &DataValue::Str("test-ping".into())
+        );
+        assert_eq!(
+            cv.get_data(DataTypeId(5)),
+            &DataValue::UnsignedNumber(1234567890)
+        );
     }
 
     #[wasm_bindgen_test]
@@ -227,9 +273,15 @@ mod tests {
 
         assert_eq!(cv.get_type(), CommunicationTypeId(19));
         assert_eq!(cv.get_sender(), 99);
-        assert_eq!(cv.get_data(DataTypeId(4)), &DataValue::Str("with-data".into()));
+        assert_eq!(
+            cv.get_data(DataTypeId(4)),
+            &DataValue::Str("with-data".into())
+        );
         assert_eq!(cv.get_data(DataTypeId(5)), &DataValue::UnsignedNumber(555));
-        assert_eq!(cv.get_data(DataTypeId(6)), &DataValue::Bytes(payload.to_vec()));
+        assert_eq!(
+            cv.get_data(DataTypeId(6)),
+            &DataValue::Bytes(payload.to_vec())
+        );
     }
 
     #[wasm_bindgen_test]
@@ -241,12 +293,13 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn build_demo_message_roundtrip() {
-        // A full keyring is required: the demo now KEM-encrypts to its own
-        // public key, so the KEM keypair must be real.
+        // The demo KEM-encrypts to the host's bundle, so a real host keypair is
+        // required; the client keyring only needs its Ed25519 signing key.
         let keyring = Keyring::generate();
         let keyring_bytes = keyring.to_bytes();
+        let host_bundle = Keyring::generate().public_key_bundle().as_bytes();
 
-        let result = build_demo_message(7, &keyring_bytes);
+        let result = build_demo_message(7, &keyring_bytes, &host_bundle);
         assert!(result.is_ok());
 
         let bytes = result.unwrap();
@@ -254,12 +307,16 @@ mod tests {
 
         assert_eq!(cv.get_type(), CommunicationTypeId(19)); // Ping
         assert_eq!(cv.get_sender(), 7);
-        assert_eq!(cv.get_data(DataTypeId(4)), &DataValue::Str("MTP WASM Demo".into()));
+        assert_eq!(
+            cv.get_data(DataTypeId(4)),
+            &DataValue::Str("MTP WASM Demo".into())
+        );
     }
 
     #[wasm_bindgen_test]
     fn build_demo_message_invalid_keyring() {
-        let result = build_demo_message(1, b"not-a-valid-keyring");
+        let host_bundle = Keyring::generate().public_key_bundle().as_bytes();
+        let result = build_demo_message(1, b"not-a-valid-keyring", &host_bundle);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.as_string().unwrap().contains("invalid keyring"));
@@ -278,11 +335,13 @@ mod tests {
         let result = parse_auth_response(&resp).expect("parse failed");
 
         let connected = js_sys::Reflect::get(&result, &"connected".into())
-            .ok().and_then(|v| v.as_bool());
+            .ok()
+            .and_then(|v| v.as_bool());
         assert_eq!(connected, Some(true));
 
         let id = js_sys::Reflect::get(&result, &"assignedId".into())
-            .ok().and_then(|v| v.as_f64());
+            .ok()
+            .and_then(|v| v.as_f64());
         assert_eq!(id, Some(42.0));
     }
 
@@ -296,7 +355,8 @@ mod tests {
         let result = parse_auth_response(&resp).expect("parse failed");
 
         let connected = js_sys::Reflect::get(&result, &"connected".into())
-            .ok().and_then(|v| v.as_bool());
+            .ok()
+            .and_then(|v| v.as_bool());
         assert_eq!(connected, Some(false));
 
         // rejected should have no assignedId

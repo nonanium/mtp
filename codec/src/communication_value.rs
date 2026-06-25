@@ -324,8 +324,7 @@ impl CommunicationValue {
         #[cfg(feature = "crypto")]
         let frame_signature = if is_signed {
             let alg = cursor.read_u8().map_err(|_| CodecError::InvalidEncoding)?;
-            let sig_len =
-                SigAlgorithm::length(alg).ok_or(CodecError::InvalidEncoding)?;
+            let sig_len = SigAlgorithm::length(alg).ok_or(CodecError::InvalidEncoding)?;
             let mut sig = vec![0u8; sig_len];
             cursor
                 .read_exact(&mut sig)
@@ -389,11 +388,7 @@ impl CommunicationValue {
      * signature before the data payload.
      */
     #[cfg(feature = "crypto")]
-    pub fn sign_frame(
-        &mut self,
-        algorithm: u8,
-        signer: &impl SignatureScheme,
-    ) -> Option<()> {
+    pub fn sign_frame(&mut self, algorithm: u8, signer: &impl SignatureScheme) -> Option<()> {
         let signed_payload = self.build_signed_payload().ok()?;
         let sig = signer.sign(&signed_payload).ok()?;
         self.frame_signature = Some((algorithm, sig));

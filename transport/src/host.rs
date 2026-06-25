@@ -26,6 +26,22 @@ impl Host {
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.local_addr
     }
+
+    /// Stop accepting new connections. Already-accepted connections run on their
+    /// own spawned tasks and are not affected.
+    pub fn shutdown(&mut self) {
+        self._task.abort();
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        // The accept loop runs forever on its own task; dropping the Host
+        // JoinHandle would only detach it. Abort it so dropping the Host
+        // actually stops accepting new connections. Per-connection handler
+        // tasks are spawned independently and keep running.
+        self._task.abort();
+    }
 }
 
 pub async fn host(

@@ -27,7 +27,10 @@ pub fn build_demo_message(
     dv_sig.sign_container(SigAlgorithm::ED25519, &signer);
 
     let inner_sec = DataValue::Container(vec![
-        (DataTypeId(1), DataValue::Str("signed+encrypted payload".into())),
+        (
+            DataTypeId(1),
+            DataValue::Str("signed+encrypted payload".into()),
+        ),
         (DataTypeId(2), DataValue::UnsignedNumber(7)),
     ]);
     let mut dv_sec = inner_sec;
@@ -38,13 +41,22 @@ pub fn build_demo_message(
         .unwrap()
         .as_secs();
 
-    CommunicationValue::new(CommunicationType::Ping)
-        .add_typed_default(DataType::Description, DataValue::Str("MTP Data Type Demo".into()))
-        .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(timestamp as u128))
+    let msg = CommunicationValue::new(CommunicationType::Ping)
+        .add_typed_default(
+            DataType::Description,
+            DataValue::Str("MTP Data Type Demo".into()),
+        )
+        .add_typed_default(
+            DataType::Timestamp,
+            DataValue::UnsignedNumber(timestamp as u128),
+        )
         .add_typed_default(DataType::Data, DataValue::Str("Hello, MTP!".into()))
         .add_typed_default(DataType::Flags, DataValue::BoolTrue)
         .add_typed_default(DataType::Value, DataValue::Float(2, 12345))
-        .add_typed_default(DataType::BinaryData, DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42]))
+        .add_typed_default(
+            DataType::BinaryData,
+            DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42]),
+        )
         .add_typed_default(
             DataType::Items,
             DataValue::Array(vec![
@@ -56,7 +68,8 @@ pub fn build_demo_message(
         .add_typed_default(DataType::EncryptedPayload, dv_enc)
         .add_typed_default(DataType::SignedPayload, dv_sig)
         .add_typed_default(DataType::SecurePayload, dv_sec)
-        .with_sender(client_id)
+        .with_sender(client_id);
+    msg
 }
 
 pub async fn send_and_receive(
@@ -69,7 +82,9 @@ pub async fn send_and_receive(
     conn.sender.send(&msg).await?;
 
     match conn.receiver.receive().await {
-        Ok(resp) => println!("Received: {resp}"),
+        Ok(resp) => {
+            println!("Received: {resp}");
+        }
         Err(e) => eprintln!("Receive error: {e}"),
     }
 

@@ -172,7 +172,9 @@ impl MlDsaSigner {
 impl SignatureScheme for MlDsaSigner {
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         use ml_dsa::Signer;
-        let signature = self.secret.try_sign(msg)
+        let signature = self
+            .secret
+            .try_sign(msg)
             .map_err(|_| CryptoError::SigningFailed)?;
         Ok(signature.encode().to_vec())
     }
@@ -181,7 +183,8 @@ impl SignatureScheme for MlDsaSigner {
         use ml_dsa::Verifier;
         let sig = ml_dsa::Signature::<ml_dsa::MlDsa65>::try_from(signature)
             .map_err(|_| CryptoError::InvalidSignature)?;
-        self.public.verify(msg, &sig)
+        self.public
+            .verify(msg, &sig)
             .map_err(|_| CryptoError::VerificationFailed)
     }
 }

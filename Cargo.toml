@@ -9,6 +9,24 @@ members = [
     "client",
     "wasm",
 ]
+# `wasm` is a wasm32-only crate: it relies on web-sys unstable APIs
+# (`--cfg=web_sys_unstable_apis`, set in wasm/.cargo/config.toml) and the
+# wasm32 target. Cargo only reads .cargo/config.toml from the invocation
+# directory and its ancestors, so building it for the host target from the
+# workspace root fails. Exclude it from the default set so a bare
+# `cargo build`/`test`/`clippy` at the root matches CI, which always uses
+# `--exclude mtp-wasm`. Build it explicitly with:
+#   cargo build -p mtp-wasm --target wasm32-unknown-unknown
+default-members = [
+    ".",
+    "common",
+    "crypto",
+    "type-map",
+    "codec",
+    "transport",
+    "host",
+    "client",
+]
 resolver = "3"
 
 # =============================================================================

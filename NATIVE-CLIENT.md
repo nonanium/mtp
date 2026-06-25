@@ -151,12 +151,12 @@ A `Keyring` bundles all secret and public key material for one identity:
 
 ```rust
 pub struct Keyring {
-    pub kem_secret_key: KemPrivateKey,
     pub kem_public_key: KemPublicKey,
-    pub sig_cl_secret_key: SignaturePrivateKey,   // Ed25519
-    pub sig_cl_public_key: SignaturePublicKey,    // Ed25519
-    pub sig_pq_secret_key: SignaturePqPrivateKey, // ML-DSA-65
+    pub kem_secret_key: KemPrivateKey,
     pub sig_pq_public_key: SignaturePqPublicKey,  // ML-DSA-65
+    pub sig_pq_secret_key: SignaturePqPrivateKey,
+    pub sig_cl_public_key: SignaturePublicKey,    // Ed25519
+    pub sig_cl_secret_key: SignaturePrivateKey,
 }
 ```
 
@@ -238,19 +238,24 @@ force-closes the QUIC connection if the peer has not already done so.
 ## Crypto Containers
 
 With the `crypto` feature, `DataValue` supports encrypted, signed, and
-signed+encrypted containers:
+signed+encrypted containers. Encryption uses ML-KEM to encapsulate to a
+recipient's KEM public key (from their `PublicKeyBundle`); only the holder of
+the matching `Keyring` can decrypt. Signing uses the sender's Ed25519 key.
 
 ```rust
-use mtp::crypto::{ChaCha20Poly1305, Ed25519Signer, SigAlgorithm};
+use mtp::crypto::{EncryptionType, Ed25519Signer, SigAlgorithm};
 
-let cipher = ChaCha20Poly1305::new(derive_encryption_key(...));
+let enc_type = EncryptionType::MlKemChaCha20Poly1305;
 let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)?;
+
+// `recipient` is the PublicKeyBundle of whoever should be able to decrypt
+// (e.g. the host's bundle, obtained out of band).
 
 // Encrypted container
 let mut enc = DataValue::Container(vec![
     (DataTypeId(1), DataValue::Str("secret".into())),
 ]);
-enc.encrypt_container(&cipher, b"aad");
+enc.encrypt_container(enc_type, &recipient, b"aad");
 
 // Signed container
 let mut sig = DataValue::Container(vec![
@@ -262,11 +267,18 @@ sig.sign_container(SigAlgorithm::ED25519, &signer);
 let mut sec = DataValue::Container(vec![
     (DataTypeId(1), DataValue::Str("both".into())),
 ]);
-sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, &cipher, b"aad");
+sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, enc_type, &recipient, b"aad");
 ```
 
-On the receiving side, use the corresponding `decrypt_into_container`,
-`verify_into_container`, or `decrypt_signed_encrypted_container` methods.
+On the receiving side, the recipient decrypts with its own `Keyring` (each blob
+is self-describing — its leading byte selects the algorithm and the matching KEM
+key from the keyring):
+
+```rust
+enc.decrypt_into_container(&keyring, b"aad");                // -> Container
+sig.verify_into_container(&verifier);                        // verifier: impl SignatureScheme
+sec.decrypt_signed_encrypted_container(&keyring, b"aad");    // -> SignedContainer, then verify_into_container
+```
 
 ## Policy Configuration
 
@@ -321,5 +333,3 @@ version and expects the host to negotiate a compatible version.
 | `AuthenticationFailed`  | Nonce mismatch or invalid host signature   |
 | `ConnectionError`       | QUIC connection failure                    |
 | `UseAfterClosed`        | Attempted send/receive after close         |
-
-

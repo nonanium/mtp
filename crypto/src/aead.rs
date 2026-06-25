@@ -33,9 +33,9 @@ impl ChaCha20Poly1305 {
 #[cfg(feature = "chacha20poly1305")]
 impl AeadEncrypt for ChaCha20Poly1305 {
     fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 
         let key = chacha20poly1305::Key::from_slice(&self.key);
         let cipher = XChaCha20Poly1305::new(key);
@@ -63,9 +63,9 @@ impl AeadEncrypt for ChaCha20Poly1305 {
 #[cfg(feature = "chacha20poly1305")]
 impl AeadDecrypt for ChaCha20Poly1305 {
     fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 
         if ciphertext.len() < 24 {
             return Err(CryptoError::InvalidNonceLength);
@@ -76,10 +76,7 @@ impl AeadDecrypt for ChaCha20Poly1305 {
         let cipher = XChaCha20Poly1305::new(key);
         let nonce_ref = XNonce::from_slice(nonce);
 
-        let payload = Payload {
-            msg: ct,
-            aad,
-        };
+        let payload = Payload { msg: ct, aad };
 
         cipher
             .decrypt(nonce_ref, payload)
@@ -109,9 +106,9 @@ impl Aes256Gcm {
 #[cfg(feature = "aes-gcm")]
 impl AeadEncrypt for Aes256Gcm {
     fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        use aes_gcm::aead::{Aead, KeyInit, Payload};
         use aes_gcm::Aes256Gcm as AesGcmInner;
         use aes_gcm::Nonce;
+        use aes_gcm::aead::{Aead, KeyInit, Payload};
 
         let key = aes_gcm::Key::<AesGcmInner>::from_slice(&self.key);
         let cipher = AesGcmInner::new(key);
@@ -139,9 +136,9 @@ impl AeadEncrypt for Aes256Gcm {
 #[cfg(feature = "aes-gcm")]
 impl AeadDecrypt for Aes256Gcm {
     fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        use aes_gcm::aead::{Aead, KeyInit, Payload};
         use aes_gcm::Aes256Gcm as AesGcmInner;
         use aes_gcm::Nonce;
+        use aes_gcm::aead::{Aead, KeyInit, Payload};
 
         if ciphertext.len() < 12 {
             return Err(CryptoError::InvalidNonceLength);
@@ -152,10 +149,7 @@ impl AeadDecrypt for Aes256Gcm {
         let cipher = AesGcmInner::new(key);
         let nonce_ref = Nonce::from_slice(nonce);
 
-        let payload = Payload {
-            msg: ct,
-            aad,
-        };
+        let payload = Payload { msg: ct, aad };
 
         cipher
             .decrypt(nonce_ref, payload)

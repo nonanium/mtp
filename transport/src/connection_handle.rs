@@ -53,7 +53,7 @@ impl ConnectionHandle {
         if self.is_closed() {
             return rx.borrow().clone();
         }
-        let _ = rx.changed().await.ok()?;
+        rx.changed().await.ok()?;
         rx.borrow().clone()
     }
 }

@@ -196,5 +196,3 @@ pub fn decrypt_multi(
     }
     Err(CryptoError::DecryptionFailed)
 }
-
-

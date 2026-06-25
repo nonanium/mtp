@@ -5,10 +5,34 @@ mod tls;
 
 use mtp::host::{HostConfig, MTPHost};
 use mtp::type_map::TypeMap;
+use std::path::Path;
+
+fn dev_cert_paths() -> (String, String) {
+    let cert = std::env::var("MTP_DEV_CERT").unwrap_or_else(|_| {
+        if Path::new("example-usage/dev-cert/cert.pem").exists() {
+            "example-usage/dev-cert/cert.pem".to_string()
+        } else {
+            "dev-cert/cert.pem".to_string()
+        }
+    });
+    let key = std::env::var("MTP_DEV_KEY").unwrap_or_else(|_| {
+        if Path::new("example-usage/dev-cert/key.pem").exists() {
+            "example-usage/dev-cert/key.pem".to_string()
+        } else {
+            "dev-cert/key.pem".to_string()
+        }
+    });
+    (cert, key)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (cert_pem, key_pem) = tls::load_or_generate_tls("server.pem", "server.key")?;
+    let (cert_path, key_path) = dev_cert_paths();
+    let (cert_pem, key_pem) = tls::load_or_generate_tls(&cert_path, &key_path)?;
+    let cert_hash = tls::certificate_sha256_hex(&cert_pem)?;
+    tls::export_webtransport_cert_hash(&cert_hash)?;
+    println!("WebTransport certificate sha256: {cert_hash}");
+
     let (host_id, host_keyring) = keys::load_or_generate_host_keys("host_keys.json")?;
     keys::export_host_public_keys(&host_keyring)?;
 
@@ -21,7 +45,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let clients_for_get = clients.clone();
     let get_existing_user = Box::new(move |id: u64| -> Option<mtp::crypto::PublicKeyBundle> {
-        clients_for_get.lock().unwrap().get(&id).cloned()
+        let result = clients_for_get.lock().unwrap().get(&id).cloned();
+        if result.is_some() {
+            println!("Auth lookup: client ID {id} found");
+        } else {
+            eprintln!("Auth lookup: unknown client ID {id}");
+        }
+        result
     });
 
     let clients_for_register = clients.clone();
@@ -33,7 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let id = *nid;
         *nid += 1;
         db.insert(id, bundle);
-        std::fs::write(&clients_path, serde_json::to_string_pretty(&*db).unwrap()).ok();
+        match serde_json::to_string_pretty(&*db) {
+            Ok(json) => match std::fs::write(&clients_path, json) {
+                Ok(()) => {}
+                Err(e) => eprintln!("Failed to persist client database to {clients_path}: {e}"),
+            },
+            Err(e) => eprintln!("Failed to serialize client database after registering {id}: {e}"),
+        }
         println!("Registered new client with ID: {}", id);
         id
     });

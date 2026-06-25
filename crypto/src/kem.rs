@@ -12,8 +12,7 @@ pub struct HybridKem;
 #[cfg(feature = "mlkem-tls")]
 impl HybridKem {
     pub fn generate_keypair() -> (KemPrivateKey, KemPublicKey) {
-        let (ek, dk) =
-            mlkem_tls::X25519MlKem768::keygen(&mut rand_core::OsRng);
+        let (ek, dk) = mlkem_tls::X25519MlKem768::keygen(&mut rand_core::OsRng);
         (
             KemPrivateKey::new(dk.as_bytes().to_vec()),
             KemPublicKey::new(ek.as_bytes().to_vec()),
@@ -23,8 +22,7 @@ impl HybridKem {
     pub fn encapsulate(recipient_pk: &KemPublicKey) -> Result<Encapsulated, CryptoError> {
         let ek = mlkem_tls::EncapsKey768::try_from(recipient_pk.as_bytes())
             .map_err(|_| CryptoError::KemEncapsulationFailed)?;
-        let (ct, ss) =
-            mlkem_tls::X25519MlKem768::encapsulate(&ek, &mut rand_core::OsRng);
+        let (ct, ss) = mlkem_tls::X25519MlKem768::encapsulate(&ek, &mut rand_core::OsRng);
         Ok(Encapsulated {
             ciphertext: ct.as_bytes().to_vec(),
             shared_secret: ss.as_bytes().to_vec(),

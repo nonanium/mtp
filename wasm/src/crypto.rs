@@ -1,9 +1,9 @@
 use wasm_bindgen::prelude::*;
 
 use mtp_crypto::{
-    AeadDecrypt, AeadEncrypt, Ed25519Signer, KemPrivateKey, KemPublicKey, Keyring,
-    PublicKeyBundle, SignaturePqPrivateKey, SignaturePqPublicKey, SignaturePrivateKey,
-    SignaturePublicKey, SignatureScheme, ChaCha20Poly1305, sha256, sha256_double,
+    AeadDecrypt, AeadEncrypt, ChaCha20Poly1305, Ed25519Signer, KemPrivateKey, KemPublicKey,
+    Keyring, PublicKeyBundle, SignaturePqPrivateKey, SignaturePqPublicKey, SignaturePrivateKey,
+    SignaturePublicKey, SignatureScheme, sha256, sha256_double,
 };
 
 use crate::error::js_error;
@@ -28,8 +28,8 @@ impl WasmKeyring {
     /// Deserialise a keyring from bytes.
     #[wasm_bindgen]
     pub fn from_bytes(bytes: &[u8]) -> Result<WasmKeyring, JsValue> {
-        let inner =
-            Keyring::from_bytes(bytes).map_err(|e| js_error(&format!("Keyring::from_bytes: {}", e)))?;
+        let inner = Keyring::from_bytes(bytes)
+            .map_err(|e| js_error(&format!("Keyring::from_bytes: {}", e)))?;
         Ok(Self { inner })
     }
 
@@ -217,7 +217,11 @@ pub fn ed25519_generate() -> Result<JsValue, JsValue> {
 
 /// Standalone Ed25519 signature verification.
 #[wasm_bindgen]
-pub fn ed25519_verify(public_key: Vec<u8>, message: &[u8], signature: &[u8]) -> Result<(), JsValue> {
+pub fn ed25519_verify(
+    public_key: Vec<u8>,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), JsValue> {
     let pk = SignaturePublicKey::new(public_key);
     mtp_crypto::verify_ed25519(&pk, message, signature)
         .map_err(|e| js_error(&format!("verify_ed25519 failed: {}", e)))
@@ -245,7 +249,12 @@ pub fn wasm_sha256_double(data: &[u8]) -> Vec<u8> {
 
 /// HKDF-expand: derive `len` bytes from `ikm` with `salt` and `info`.
 #[wasm_bindgen]
-pub fn wasm_hkdf_expand(ikm: &[u8], salt: &[u8], info: &[u8], len: usize) -> Result<Vec<u8>, JsValue> {
+pub fn wasm_hkdf_expand(
+    ikm: &[u8],
+    salt: &[u8],
+    info: &[u8],
+    len: usize,
+) -> Result<Vec<u8>, JsValue> {
     mtp_crypto::hkdf_expand(ikm, salt, info, len)
         .map_err(|e| js_error(&format!("hkdf_expand failed: {}", e)))
 }
@@ -416,16 +425,18 @@ mod tests {
     fn sha256_empty() {
         let result = wasm_sha256(b"");
         // SHA-256 of empty string
-        let expected = hex::decode("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-            .expect("hex decode");
+        let expected =
+            hex::decode("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+                .expect("hex decode");
         assert_eq!(result, expected);
     }
 
     #[wasm_bindgen_test]
     fn sha256_hello() {
         let result = wasm_sha256(b"hello");
-        let expected = hex::decode("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
-            .expect("hex decode");
+        let expected =
+            hex::decode("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+                .expect("hex decode");
         assert_eq!(result, expected);
     }
 
@@ -443,8 +454,7 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn hkdf_expand_produces_correct_length() {
-        let result = wasm_hkdf_expand(b"ikm", b"salt", b"info", 32)
-            .expect("hkdf_expand failed");
+        let result = wasm_hkdf_expand(b"ikm", b"salt", b"info", 32).expect("hkdf_expand failed");
         assert_eq!(result.len(), 32);
     }
 
@@ -457,22 +467,21 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn derive_encryption_key_roundtrip() {
-        let key = wasm_derive_encryption_key(b"password", b"salt", b"context")
-            .expect("derive failed");
+        let key =
+            wasm_derive_encryption_key(b"password", b"salt", b"context").expect("derive failed");
         assert_eq!(key.len(), 32);
 
         // Deterministic: same inputs = same key
-        let key2 = wasm_derive_encryption_key(b"password", b"salt", b"context")
-            .expect("derive failed");
+        let key2 =
+            wasm_derive_encryption_key(b"password", b"salt", b"context").expect("derive failed");
         assert_eq!(key, key2);
     }
 
     #[wasm_bindgen_test]
     fn derive_encryption_key_different_inputs_different_key() {
-        let key = wasm_derive_encryption_key(b"pass1", b"salt", b"context")
-            .expect("derive failed");
-        let key2 = wasm_derive_encryption_key(b"pass2", b"salt", b"context")
-            .expect("derive failed");
+        let key = wasm_derive_encryption_key(b"pass1", b"salt", b"context").expect("derive failed");
+        let key2 =
+            wasm_derive_encryption_key(b"pass2", b"salt", b"context").expect("derive failed");
         assert_ne!(key, key2);
     }
 }

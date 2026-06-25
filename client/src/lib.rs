@@ -2,6 +2,20 @@ use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Versi
 use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
 
+#[cfg(feature = "crypto")]
+fn unexpected_response_type_error(
+    context: &str,
+    expected_type: mtp_codec::CommunicationTypeId,
+    response: &CommunicationValue,
+) -> CommunicationError {
+    CommunicationError::AuthenticationFailed(format!(
+        "unexpected response type during {context}: expected {:?}, got {:?}; parsed {}",
+        expected_type,
+        response.get_type(),
+        response
+    ))
+}
+
 pub struct ClientConfig {
     pub url: String,
     pub server_cert: Option<Vec<u8>>,
@@ -124,6 +138,15 @@ impl MTPClient {
 
         let tm = mtp_codec::TypeMap::latest();
 
+        let expected_type = mtp_codec::CommunicationType::IdentificationResponse.to_id(&tm);
+        if response.get_type() != expected_type {
+            return Err(unexpected_response_type_error(
+                "auth_connect",
+                expected_type,
+                &response,
+            ));
+        }
+
         let connected = response.get_data(DataType::Connected.to_id(&tm));
         match connected {
             DataValue::BoolTrue => {}
@@ -150,7 +173,7 @@ impl MTPClient {
         }
 
         let host_new_nonce = match response.get_data(DataType::Timestamp.to_id(&tm)) {
-            DataValue::UnsignedNumber(n) => *n as u128,
+            DataValue::UnsignedNumber(n) => *n,
             _ => {
                 return Err(CommunicationError::AuthenticationFailed(
                     "Missing new nonce".into(),
@@ -266,6 +289,15 @@ impl MTPClient {
 
         let tm = mtp_codec::TypeMap::latest();
 
+        let expected_type = mtp_codec::CommunicationType::RegisterResponse.to_id(&tm);
+        if response.get_type() != expected_type {
+            return Err(unexpected_response_type_error(
+                "auth_register",
+                expected_type,
+                &response,
+            ));
+        }
+
         let connected = response.get_data(DataType::Connected.to_id(&tm));
         match connected {
             DataValue::BoolTrue => {}
@@ -282,7 +314,7 @@ impl MTPClient {
         }
 
         let assigned_id = match response.get_data(DataType::Id.to_id(&tm)) {
-            DataValue::UnsignedNumber(n) => *n as u128,
+            DataValue::UnsignedNumber(n) => *n,
             _ => {
                 return Err(CommunicationError::AuthenticationFailed(
                     "Missing assigned ID".into(),
@@ -301,7 +333,7 @@ impl MTPClient {
         }
 
         let host_new_nonce = match response.get_data(DataType::Timestamp.to_id(&tm)) {
-            DataValue::UnsignedNumber(n) => *n as u128,
+            DataValue::UnsignedNumber(n) => *n,
             _ => {
                 return Err(CommunicationError::AuthenticationFailed(
                     "Missing new nonce".into(),

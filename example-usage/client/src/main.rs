@@ -2,13 +2,29 @@ mod auth;
 mod messages;
 
 use std::fs;
+use std::path::Path;
 
 use mtp::client::ClientConfig;
 use mtp::crypto::{KemPublicKey, PublicKeyBundle, SignaturePqPublicKey, SignaturePublicKey};
 
+fn dev_cert_path() -> String {
+    std::env::var("MTP_DEV_CERT").unwrap_or_else(|_| {
+        if Path::new("example-usage/dev-cert/cert.pem").exists() {
+            "example-usage/dev-cert/cert.pem".to_string()
+        } else {
+            "dev-cert/cert.pem".to_string()
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cert_pem = fs::read("server.pem").expect("Missing server.pem: run server first");
+    let cert_path = dev_cert_path();
+    let cert_pem = fs::read(&cert_path).unwrap_or_else(|e| {
+        panic!(
+            "Missing TLS certificate at {cert_path}: enter the Nix shell first or run the server to generate it: {e}"
+        )
+    });
     let host_public_key = PublicKeyBundle::new(
         KemPublicKey::new(
             fs::read("host_enc_kem_pk.bin")

@@ -36,16 +36,16 @@ pub use aead::ChaCha20Poly1305;
 pub use aead::Aes256Gcm;
 
 #[cfg(feature = "ed25519-dalek")]
-pub use sign::{verify_ed25519, Ed25519Signer, SignatureScheme};
+pub use sign::{Ed25519Signer, SignatureScheme, verify_ed25519};
 
 #[cfg(feature = "ml-dsa")]
-pub use sign::{verify_ml_dsa, MlDsaSigner};
+pub use sign::{MlDsaSigner, verify_ml_dsa};
 
 #[cfg(all(feature = "ed25519-dalek", feature = "ml-dsa"))]
-pub use sign::{sign_dual, DualSignature};
+pub use sign::{DualSignature, sign_dual};
 
 #[cfg(feature = "sha2")]
-pub use hash::{sha256, sha256_double, Sha256Hasher};
+pub use hash::{Sha256Hasher, sha256, sha256_double};
 
 #[cfg(feature = "hkdf")]
 pub use kdf::{derive_encryption_key, hkdf_expand, hkdf_extract};
@@ -59,7 +59,7 @@ pub use enc::EncryptionType;
 pub use enc::{decrypt_with, encrypt_for};
 
 #[cfg(all(feature = "mlkem-tls", feature = "chacha20poly1305", feature = "hkdf"))]
-pub use helper::{decrypt_multi, encrypt_multi, MultiEncryptedMessage, RecipientEntry};
+pub use helper::{MultiEncryptedMessage, RecipientEntry, decrypt_multi, encrypt_multi};
 
 /* ================================ TESTS ================================ */
 #[cfg(test)]
@@ -148,12 +148,7 @@ mod tests {
         let (ed_signer, _, _) = Ed25519Signer::generate();
         let (ml_signer, _, _) = MlDsaSigner::generate();
         let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg").unwrap();
-        dual
-            .verify(
-                ed_signer.verifying_key(),
-                ml_signer.verifying_key(),
-                b"msg",
-            )
+        dual.verify(ed_signer.verifying_key(), ml_signer.verifying_key(), b"msg")
             .unwrap();
     }
 
@@ -165,9 +160,14 @@ mod tests {
         let (ed_signer, _, _) = Ed25519Signer::generate();
         let (ml_signer, _, _) = MlDsaSigner::generate();
         let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg").unwrap();
-        assert!(dual
-            .verify(ed_signer.verifying_key(), ml_signer.verifying_key(), b"wrong")
-            .is_err());
+        assert!(
+            dual.verify(
+                ed_signer.verifying_key(),
+                ml_signer.verifying_key(),
+                b"wrong"
+            )
+            .is_err()
+        );
     }
 
     #[cfg(feature = "hkdf")]
@@ -255,9 +255,18 @@ mod tests {
         let kr = Keyring::generate();
         let bytes = kr.to_bytes();
         let loaded = Keyring::from_bytes(&bytes).unwrap();
-        assert_eq!(kr.kem_public_key.as_bytes(), loaded.kem_public_key.as_bytes());
-        assert_eq!(kr.sig_pq_public_key.as_bytes(), loaded.sig_pq_public_key.as_bytes());
-        assert_eq!(kr.sig_cl_public_key.as_bytes(), loaded.sig_cl_public_key.as_bytes());
+        assert_eq!(
+            kr.kem_public_key.as_bytes(),
+            loaded.kem_public_key.as_bytes()
+        );
+        assert_eq!(
+            kr.sig_pq_public_key.as_bytes(),
+            loaded.sig_pq_public_key.as_bytes()
+        );
+        assert_eq!(
+            kr.sig_cl_public_key.as_bytes(),
+            loaded.sig_cl_public_key.as_bytes()
+        );
     }
 
     #[cfg(all(feature = "mlkem-tls", feature = "ml-dsa", feature = "ed25519-dalek"))]
@@ -267,7 +276,10 @@ mod tests {
         let bundle = kr.public_key_bundle();
         let bytes = bundle.as_bytes();
         let loaded = PublicKeyBundle::from_bytes(&bytes).unwrap();
-        assert_eq!(bundle.kem_public_key.as_bytes(), loaded.kem_public_key.as_bytes());
+        assert_eq!(
+            bundle.kem_public_key.as_bytes(),
+            loaded.kem_public_key.as_bytes()
+        );
         assert_eq!(
             bundle.sig_pq_public_key.as_bytes(),
             loaded.sig_pq_public_key.as_bytes()
@@ -290,8 +302,8 @@ mod tests {
     #[cfg(all(feature = "mlkem-tls", feature = "chacha20poly1305", feature = "hkdf"))]
     #[test]
     fn encrypt_multi_roundtrip() {
+        use crate::helper::{decrypt_multi, encrypt_multi};
         use crate::keypair::Keyring;
-        use crate::helper::{encrypt_multi, decrypt_multi};
 
         let kr = Keyring::generate();
         let entities = vec![kr.public_key_bundle()];

@@ -251,9 +251,18 @@ mod communication_error_tests {
 
     #[test]
     fn test_communication_error_display() {
-        assert_eq!(format!("{}", CommunicationError::UseAfterClosed), "Use after Closed");
-        assert_eq!(format!("{}", CommunicationError::StreamClosed), "Stream Closed");
-        assert_eq!(format!("{}", CommunicationError::StreamError), "Stream Error");
+        assert_eq!(
+            format!("{}", CommunicationError::UseAfterClosed),
+            "Use after Closed"
+        );
+        assert_eq!(
+            format!("{}", CommunicationError::StreamClosed),
+            "Stream Closed"
+        );
+        assert_eq!(
+            format!("{}", CommunicationError::StreamError),
+            "Stream Error"
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
+# Default to the wasm32 target when running cargo from inside this crate dir.
+# The web_sys_unstable_apis cfg lives in the workspace-root .cargo/config.toml,
+# scoped to [target.wasm32-unknown-unknown], so it applies here too (the root
+# config is an ancestor) and to `-p mtp-wasm` builds invoked from the root.
 [build]
 target = "wasm32-unknown-unknown"
-
-[target.wasm32-unknown-unknown]
-rustflags = ["--cfg=web_sys_unstable_apis"]

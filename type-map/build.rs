@@ -220,7 +220,7 @@ fn generate(config: &Config, multi_version: bool) -> String {
     let (all_comm_names, all_data_names, sorted) = if multi_version {
         let mut all_comm_names: BTreeSet<&str> = BTreeSet::new();
         let mut all_data_names: BTreeSet<&str> = BTreeSet::new();
-        for (_version_key, tm) in &config.type_maps {
+        for tm in config.type_maps.values() {
             for name in tm.communication_types.keys() {
                 all_comm_names.insert(name.as_str());
             }

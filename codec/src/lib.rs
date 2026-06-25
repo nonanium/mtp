@@ -6,8 +6,8 @@ pub use data_value::{DataKind, DataValue};
 pub use mtp_common::CodecError;
 
 pub use mtp_type_map::{
-    communication_type_name, data_type_name, CommunicationType, CommunicationTypeId, DataType,
-    DataTypeId, TypeMap, Version, PROTOCOL_VERSION,
+    CommunicationType, CommunicationTypeId, DataType, DataTypeId, PROTOCOL_VERSION, TypeMap,
+    Version, communication_type_name, data_type_name,
 };
 
 pub(crate) fn rand_u32() -> u32 {

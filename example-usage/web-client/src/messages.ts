@@ -12,8 +12,12 @@ export function buildAuthResponse(
   return parse_auth_response(response);
 }
 
-export function buildDemoMessage(clientId: bigint, keyringBytes: Uint8Array): Uint8Array {
-  return build_demo_message(clientId, keyringBytes);
+export function buildDemoMessage(
+  clientId: bigint,
+  keyringBytes: Uint8Array,
+  hostBundle: Uint8Array,
+): Uint8Array {
+  return build_demo_message(clientId, keyringBytes, hostBundle);
 }
 
 export function buildPingFrame(

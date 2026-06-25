@@ -151,10 +151,17 @@ impl DataValue {
 
     const KIND_NULL: u8 = 0xFF;
 
+    /// Smallest possible encoded entry, used to cap pre-reservation when
+    /// decoding containers/arrays so a small frame cannot force a huge
+    /// allocation from an attacker-controlled count. A bool/null entry in a
+    /// container is 3 bytes (1 kind + 2 key); a bare value in an array is 1
+    /// byte, so 1 is the safe lower bound shared by both.
+    const MIN_ENTRY_BYTES: usize = 1;
+
     pub fn container_from_map(map: &BTreeMap<DataTypeId, DataValue>) -> DataValue {
         let mut container = Vec::new();
         for (key, value) in map {
-            container.push((key.clone(), value.clone()));
+            container.push((*key, value.clone()));
         }
         DataValue::Container(container)
     }
@@ -407,7 +414,7 @@ impl DataValue {
             DataValue::Container(c) => {
                 let mut out = BTreeMap::new();
                 for (k, v) in c {
-                    out.insert(k.clone(), v.clone());
+                    out.insert(*k, v.clone());
                 }
                 Some(out)
             }
@@ -452,7 +459,7 @@ impl DataValue {
             .map_err(|_| CodecError::InvalidEncoding)?;
 
         for (key, value) in entries {
-            Self::write_container_entry(&mut out, key.clone(), value)?;
+            Self::write_container_entry(&mut out, *key, value)?;
         }
         Ok(out)
     }
@@ -520,14 +527,11 @@ impl DataValue {
         match value {
             DataValue::BoolTrue => Ok(()),
             DataValue::BoolFalse => Ok(()),
+            #[allow(clippy::if_same_then_else)]
             DataValue::Bool(v) => {
                 // Kept intentionally: the kind marker already encodes the boolean,
                 // so both arms carry no payload. Retained for clear compatibility.
-                if *v {
-                    Ok(())
-                } else {
-                    Ok(())
-                }
+                if *v { Ok(()) } else { Ok(()) }
             }
             DataValue::SignedNumber(n) => {
                 buf.write_i128::<BigEndian>(*n)
@@ -607,7 +611,11 @@ impl DataValue {
 
     fn try_read_container(cursor: &mut Cursor<&[u8]>) -> Option<Self> {
         let count = cursor.read_u16::<BigEndian>().ok()? as usize;
-        let mut entries = Vec::with_capacity(count);
+        let remaining = cursor
+            .get_ref()
+            .len()
+            .saturating_sub(cursor.position() as usize);
+        let mut entries = Vec::with_capacity(count.min(remaining / Self::MIN_ENTRY_BYTES));
 
         for _ in 0..count {
             let kind = cursor.read_u8().ok()?;
@@ -653,7 +661,11 @@ impl DataValue {
 
     fn read_array(cursor: &mut Cursor<&[u8]>) -> Option<Self> {
         let count = cursor.read_u16::<BigEndian>().ok()? as usize;
-        let mut out = Vec::with_capacity(count);
+        let remaining = cursor
+            .get_ref()
+            .len()
+            .saturating_sub(cursor.position() as usize);
+        let mut out = Vec::with_capacity(count.min(remaining / Self::MIN_ENTRY_BYTES));
 
         for _ in 0..count {
             let kind = cursor.read_u8().ok()?;
@@ -1183,6 +1195,22 @@ mod tests {
         // Truncate to fewer than 2 bytes so neither container nor array can be read
         assert!(DataValue::from_bytes(&bytes[..1]).is_none());
         assert!(DataValue::from_bytes(&bytes[..0]).is_none());
+    }
+
+    #[test]
+    fn test_oversized_count_does_not_overallocate() {
+        // A frame declaring 65535 entries but carrying almost no payload must be
+        // rejected without pre-reserving a Vec for 65535 entries. The capacity is
+        // capped against remaining bytes, so these decode attempts allocate at
+        // most a handful of slots before failing.
+        // Container path: count = 0xFFFF, no entries follow.
+        assert!(DataValue::from_bytes(&[0xFF, 0xFF]).is_none());
+        // Container path with one stray byte after the count.
+        assert!(DataValue::from_bytes(&[0xFF, 0xFF, 0x01]).is_none());
+        // Array path: force the container parse to fail first, then the array
+        // parse also sees the oversized count. A leading kind byte that is not a
+        // valid container entry makes try_read_container bail to the array path.
+        assert!(DataValue::from_bytes(&[0xFF, 0xFF, 0x08, 0xFF, 0xFF]).is_none());
     }
 
     #[test]

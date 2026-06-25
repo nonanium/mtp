@@ -61,7 +61,7 @@ enum ReceivedFrame {
 
 pub struct Sender {
     send_guard: Mutex<()>,
-    stream_guard: Mutex<Option<wtransport::SendStream>>,
+    stream_guard: Arc<Mutex<Option<wtransport::SendStream>>>,
     handle: Arc<ConnectionHandle>,
     connection: Connection,
     policy: Arc<Policy>,
@@ -71,7 +71,7 @@ impl Sender {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>, policy: Arc<Policy>) -> Self {
         Self {
             send_guard: Mutex::new(()),
-            stream_guard: Mutex::new(None),
+            stream_guard: Arc::new(Mutex::new(None)),
             handle,
             connection,
             policy,
@@ -275,6 +275,18 @@ impl Sender {
         }
     }
 
+    pub async fn finish_stream(&self) -> Result<(), CommunicationError> {
+        let _send_lock = self.send_guard.lock().await;
+        let mut stream_opt = self.stream_guard.lock().await;
+        if let Some(mut stream) = stream_opt.take() {
+            timeout(self.policy.write_timeout, stream.finish())
+                .await
+                .map_err(|_| CommunicationError::StreamError)?
+                .map_err(|_| CommunicationError::StreamError)?;
+        }
+        Ok(())
+    }
+
     pub fn handle(&self) -> &Arc<ConnectionHandle> {
         &self.handle
     }
@@ -283,11 +295,20 @@ impl Sender {
         let connection = self.connection.clone();
         let handle = self.handle.clone();
         let policy = self.policy.clone();
+        let stream_guard = self.stream_guard.clone();
 
         tokio::spawn(async move {
             if connection.quic_connection().close_reason().is_some() || handle.is_closed() {
                 handle.close(Some(CommunicationError::StreamClosed));
                 return;
+            }
+
+            if let Some(mut stream) = stream_guard.lock().await.take() {
+                match timeout(policy.write_timeout, stream.finish()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => log::warn!("[Sender] persistent stream finish failed: {e}"),
+                    Err(_) => log::warn!("[Sender] persistent stream finish timed out"),
+                }
             }
 
             let _ = Self::send_close_frame(&connection, &policy).await;
@@ -321,6 +342,18 @@ pub struct Receiver {
     rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
     _accept_task: tokio::task::JoinHandle<()>,
     handle: Arc<ConnectionHandle>,
+}
+
+impl Drop for Receiver {
+    fn drop(&mut self) {
+        // The accept loop holds clones of the connection and the shared
+        // ConnectionHandle. Without this, dropping a Receiver without first
+        // closing the connection would leave that task running forever. Abort
+        // it directly rather than closing the shared handle, so a still-live
+        // Sender on the same connection is unaffected. abort() is a no-op if
+        // the task already finished (e.g. the connection was closed).
+        self._accept_task.abort();
+    }
 }
 
 impl Receiver {

@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-use mtp_transport::{Policy, host, connect};
+use mtp_transport::{Policy, connect, host};
 
 fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
     let key_pair = rcgen::KeyPair::generate().unwrap();
@@ -44,18 +44,18 @@ async fn test_send_receive_roundtrip() {
     let addr = h.local_addr();
 
     let url = format!("https://127.0.0.1:{}", addr.port());
-    let (client_tx, client_rx) =
-        connect(&url, Some(cert_pem), Policy::default()).await.unwrap();
+    let (client_tx, client_rx) = connect(&url, Some(cert_pem), Policy::default())
+        .await
+        .unwrap();
 
     // Accept on host side
     let (host_tx, host_rx) = h.next().await.unwrap();
 
     // Client sends a simple message
-    let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Ping)
-        .add_data(
-            mtp_codec::DataTypeId(6),
-            mtp_codec::DataValue::UnsignedNumber(42),
-        );
+    let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Ping).add_data(
+        mtp_codec::DataTypeId(6),
+        mtp_codec::DataValue::UnsignedNumber(42),
+    );
     client_tx.send(&msg).await.unwrap();
 
     // Host receives it
@@ -65,16 +65,18 @@ async fn test_send_receive_roundtrip() {
     assert_eq!(val, mtp_codec::DataValue::UnsignedNumber(42));
 
     // Host sends a response
-    let resp = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Pong)
-        .add_data(
-            mtp_codec::DataTypeId(6),
-            mtp_codec::DataValue::UnsignedNumber(99),
-        );
+    let resp = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Pong).add_data(
+        mtp_codec::DataTypeId(6),
+        mtp_codec::DataValue::UnsignedNumber(99),
+    );
     host_tx.send(&resp).await.unwrap();
 
     // Client receives it
     let client_received = client_rx.receive().await.unwrap();
-    assert_eq!(client_received.get_type(), mtp_codec::CommunicationTypeId(20)); // Pong
+    assert_eq!(
+        client_received.get_type(),
+        mtp_codec::CommunicationTypeId(20)
+    ); // Pong
     let client_val = client_received.get_data(mtp_codec::DataTypeId(6)).clone();
     assert_eq!(client_val, mtp_codec::DataValue::UnsignedNumber(99));
 
@@ -98,18 +100,18 @@ async fn test_concurrent_messages() {
     let addr = h.local_addr();
 
     let url = format!("https://127.0.0.1:{}", addr.port());
-    let (client_tx, _client_rx) =
-        connect(&url, Some(cert_pem), Policy::default()).await.unwrap();
+    let (client_tx, _client_rx) = connect(&url, Some(cert_pem), Policy::default())
+        .await
+        .unwrap();
 
     let (_host_tx, host_rx) = h.next().await.unwrap();
 
     // Send 5 messages in sequence
     for i in 0..5u128 {
-        let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Ping)
-            .add_data(
-                mtp_codec::DataTypeId(6),
-                mtp_codec::DataValue::UnsignedNumber(i),
-            );
+        let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Ping).add_data(
+            mtp_codec::DataTypeId(6),
+            mtp_codec::DataValue::UnsignedNumber(i),
+        );
         client_tx.send(&msg).await.unwrap();
     }
 
@@ -122,11 +124,10 @@ async fn test_concurrent_messages() {
 
     // Send 3 responses back
     for i in 0..3u128 {
-        let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Pong)
-            .add_data(
-                mtp_codec::DataTypeId(6),
-                mtp_codec::DataValue::UnsignedNumber(i * 10),
-            );
+        let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Pong).add_data(
+            mtp_codec::DataTypeId(6),
+            mtp_codec::DataValue::UnsignedNumber(i * 10),
+        );
         client_tx.send(&msg).await.unwrap();
     }
 
@@ -154,8 +155,9 @@ async fn test_close_detection() {
     let addr = h.local_addr();
 
     let url = format!("https://127.0.0.1:{}", addr.port());
-    let (client_tx, _client_rx) =
-        connect(&url, Some(cert_pem), Policy::default()).await.unwrap();
+    let (client_tx, _client_rx) = connect(&url, Some(cert_pem), Policy::default())
+        .await
+        .unwrap();
 
     let (_host_tx, host_rx) = h.next().await.unwrap();
 
@@ -171,4 +173,88 @@ async fn test_close_detection() {
     // Host should get an error or closed signal on next receive
     let result = host_rx.receive().await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_host_shutdown_stops_accepting() {
+    let (cert_pem, key_pem) = generate_self_signed_cert();
+    let mut h = host(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+        cert_pem.clone(),
+        key_pem,
+        Policy::default(),
+    )
+    .await
+    .unwrap();
+    let addr = h.local_addr();
+    let url = format!("https://127.0.0.1:{}", addr.port());
+
+    // A connection succeeds while the host is accepting.
+    let (_c_tx, _c_rx) = connect(&url, Some(cert_pem.clone()), Policy::default())
+        .await
+        .unwrap();
+    let _accepted = h.next().await.unwrap();
+
+    // After shutdown the accept task is aborted and its endpoint is dropped, so
+    // new connections no longer succeed. Guard with a timeout so a hung connect
+    // still fails the assertion rather than blocking the test.
+    h.shutdown();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        connect(&url, Some(cert_pem), Policy::default()),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(_) | Ok(Err(_))),
+        "connect should not succeed after host shutdown"
+    );
+}
+
+#[tokio::test]
+async fn test_drop_receiver_keeps_sender_alive() {
+    let (cert_pem, key_pem) = generate_self_signed_cert();
+    let mut h = host(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+        cert_pem.clone(),
+        key_pem,
+        Policy::default(),
+    )
+    .await
+    .unwrap();
+    let addr = h.local_addr();
+
+    let url = format!("https://127.0.0.1:{}", addr.port());
+    let (client_tx, client_rx) = connect(&url, Some(cert_pem), Policy::default())
+        .await
+        .unwrap();
+
+    let (host_tx, host_rx) = h.next().await.unwrap();
+
+    // Client sends a message the host receives.
+    let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Ping);
+    client_tx.send(&msg).await.unwrap();
+    let _ = host_rx.receive().await.unwrap();
+
+    // Dropping the host Receiver aborts only its accept task; the Sender shares
+    // the same connection and must keep working.
+    drop(host_rx);
+
+    let resp = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Pong).add_data(
+        mtp_codec::DataTypeId(6),
+        mtp_codec::DataValue::UnsignedNumber(7),
+    );
+    host_tx.send(&resp).await.unwrap();
+
+    let got = client_rx.receive().await.unwrap();
+    assert_eq!(got.get_type(), mtp_codec::CommunicationTypeId(20)); // Pong
+    assert_eq!(
+        got.get_data(mtp_codec::DataTypeId(6)).clone(),
+        mtp_codec::DataValue::UnsignedNumber(7)
+    );
+
+    client_tx.close();
+    host_tx.close();
 }

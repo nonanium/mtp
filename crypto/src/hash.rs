@@ -13,6 +13,12 @@ pub fn sha256_double(data: &[u8]) -> [u8; 32] {
 
 pub struct Sha256Hasher(sha2::Sha256);
 
+impl Default for Sha256Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sha256Hasher {
     pub fn new() -> Self {
         Self(sha2::Sha256::new())

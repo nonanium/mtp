@@ -37,7 +37,7 @@ if (!WasmClient.is_supported()) {
 const config = new ConnectionConfig("https://host.example.com:4433");
 config.client_id = 12345n;                    // optional, for re-authentication
 config.server_certificate_hashes = [           // optional, for certificate pinning
-  "sha256:abc123...",
+  "sha-256:abc123...",
 ];
 ```
 
@@ -55,11 +55,12 @@ providing its hash:
 
 ```typescript
 config.server_certificate_hashes = [
-  "sha256:abcd1234...",  // hex-encoded hash value
+  "sha-256:abcd1234...",  // hex-encoded hash value
 ];
 ```
 
-The hash format is `"<algorithm>:<hex-encoded-hash>"`. When hashes are
+The hash format is `"<algorithm>:<hex-encoded-hash>"`, where the only algorithm
+the browser's WebTransport API currently accepts is `sha-256`. When hashes are
 provided, the browser **only** trusts certificates matching one of the given
 hashes and ignores its root store for this connection.
 
@@ -172,13 +173,16 @@ binary payload. Useful for health checks and simple messaging.
 function build_demo_message(
   clientId: bigint,
   keyringBytes: Uint8Array,
+  hostBundleBytes: Uint8Array,
 ): Uint8Array;
 ```
 
 Constructs a `Ping` frame that demonstrates encrypted, signed, and
-signed+encrypted containers using a deterministic demo key. The paired host
-handler can decrypt and verify these containers if it knows the same shared
-secret.
+signed+encrypted containers. The containers are ML-KEM-encrypted to the host's
+`PublicKeyBundle` (`hostBundleBytes`, the same bytes passed to `auth_connect` /
+`auth_register`), so the host decrypts them with its own keyring; signatures use
+the client keyring's Ed25519 key. The client keyring only needs its Ed25519
+signing key for this demo.
 
 ### `parse_auth_response`
 
