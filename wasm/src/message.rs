@@ -1,8 +1,9 @@
 use wasm_bindgen::prelude::*;
 
 use mtp_codec::{
-    CommunicationType, CommunicationTypeId, CommunicationValue, DataType, DataTypeId, DataValue,
+    CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue,
 };
+use mtp_type_map::communication_type_name;
 use mtp_crypto::{
     ChaCha20Poly1305, Ed25519Signer, Keyring, SigAlgorithm,
     derive_encryption_key,
@@ -132,6 +133,77 @@ pub fn parse_auth_response(response: &[u8]) -> Result<JsValue, JsValue> {
     }
 
     Ok(obj.into())
+}
+
+/// Build a request frame with the given communication type name, request ID, and JSON data.
+///
+/// - `comm_type`: communication type name (e.g. "get_model", "rank_models") or PascalCase
+/// - `id`: request ID for response correlation
+/// - `json_data`: JSON-stringified request payload
+#[wasm_bindgen]
+pub fn build_request_frame(comm_type: &str, id: u32, json_data: &str) -> Result<Vec<u8>, JsValue> {
+    let comm_type_enum = CommunicationType::from_name(comm_type)
+        .or_else(|| {
+            let pascal = comm_type
+                .split('_')
+                .map(|s| {
+                    let mut c = s.chars();
+                    match c.next() {
+                        None => String::new(),
+                        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                    }
+                })
+                .collect::<String>();
+            CommunicationType::from_name(&pascal)
+        })
+        .ok_or_else(|| js_error(&format!("unknown communication type: {}", comm_type)))?;
+
+    let frame = CommunicationValue::new(comm_type_enum)
+        .with_id(id)
+        .add_data(DataTypeId(32), DataValue::Str(json_data.to_string()))
+        .to_bytes();
+
+    Ok(frame)
+}
+
+/// Parse a response frame into a JSON string containing `_id`, `_type`, and data fields.
+#[wasm_bindgen]
+pub fn parse_response_frame(frame: &[u8]) -> Result<String, JsValue> {
+    let comm = CommunicationValue::from_bytes(frame)
+        .map_err(|e| js_error(&format!("parse failed: {}", e)))?;
+
+    let obj = js_sys::Object::new();
+
+    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("_id"), &JsValue::from(comm.get_id()));
+
+    let type_name = communication_type_name(comm.get_type().0).unwrap_or("Unknown");
+    let _ = js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("_type"),
+        &JsValue::from_str(&type_name),
+    );
+
+    if let DataValue::Str(s) = comm.get_data(DataTypeId(32)) {
+        if let Ok(parsed) = js_sys::JSON::parse(s) {
+            let parsed_obj: &js_sys::Object = parsed.unchecked_ref();
+            let entries = js_sys::Object::entries(parsed_obj);
+            let len = entries.length();
+            for i in 0..len {
+                let entry = js_sys::Array::get(&entries, i);
+                if let Some(entry_arr) = entry.dyn_ref::<js_sys::Array>() {
+                    if let Some(key) = entry_arr.get(0).as_string() {
+                        let val = entry_arr.get(1);
+                        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str(&key), &val);
+                    }
+                }
+            }
+        }
+    }
+
+    let stringified = js_sys::JSON::stringify(&obj)
+        .map_err(|_| js_error("JSON stringify failed"))?;
+    stringified.as_string()
+        .ok_or_else(|| js_error("JSON stringify result not a string"))
 }
 
 #[cfg(test)]

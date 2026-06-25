@@ -5,6 +5,26 @@ use web_sys::{WebTransport, WebTransportHash, WebTransportOptions};
 
 use crate::error::js_error;
 
+/// Given a `SendStream` (old API with `.writable` or new API where stream IS a WritableStream),
+/// return the object to call `.getWriter()` on.
+fn resolve_stream_writable(send_stream: &JsValue) -> Result<JsValue, JsValue> {
+    let writable = js_sys::Reflect::get(send_stream, &JsValue::from_str("writable"));
+    match writable {
+        Ok(val) if !val.is_undefined() && !val.is_null() => Ok(val),
+        _ => Ok(send_stream.clone()),
+    }
+}
+
+/// Given a `ReceiveStream` (old API with `.readable` or new API where stream IS a ReadableStream),
+/// return the object to call `.getReader()` on.
+fn resolve_stream_readable(recv_stream: &JsValue) -> Result<JsValue, JsValue> {
+    let readable = js_sys::Reflect::get(recv_stream, &JsValue::from_str("readable"));
+    match readable {
+        Ok(val) if !val.is_undefined() && !val.is_null() => Ok(val),
+        _ => Ok(recv_stream.clone()),
+    }
+}
+
 #[derive(Clone)]
 pub struct WasmTransport {
     inner: WebTransport,
@@ -50,14 +70,13 @@ impl WasmTransport {
         let stream_promise = self.inner.create_unidirectional_stream();
         let stream = JsFuture::from(stream_promise).await?;
 
-        let writable = js_sys::Reflect::get(&stream, &JsValue::from_str("writable"))
-            .map_err(|_| js_error("missing writable"))?;
+        let writable_or_stream = resolve_stream_writable(&stream)?;
 
-        let writer_val = js_sys::Reflect::get(&writable, &JsValue::from_str("getWriter"))
+        let writer_val = js_sys::Reflect::get(&writable_or_stream, &JsValue::from_str("getWriter"))
             .map_err(|_| js_error("missing getWriter"))?
             .dyn_into::<js_sys::Function>()
             .map_err(|_| js_error("getWriter not a function"))?
-            .call0(&writable)
+            .call0(&writable_or_stream)
             .map_err(|_| js_error("getWriter call failed"))?;
 
         let len = frame.len() as u32;
@@ -123,14 +142,13 @@ impl WasmTransport {
         let recv_stream = js_sys::Reflect::get(&result, &JsValue::from_str("value"))
             .map_err(|_| js_error("missing value"))?;
 
-        let readable = js_sys::Reflect::get(&recv_stream, &JsValue::from_str("readable"))
-            .map_err(|_| js_error("missing readable"))?;
+        let readable_or_stream = resolve_stream_readable(&recv_stream)?;
 
-        let stream_reader_fn = js_sys::Reflect::get(&readable, &JsValue::from_str("getReader"))
+        let stream_reader_fn = js_sys::Reflect::get(&readable_or_stream, &JsValue::from_str("getReader"))
             .map_err(|_| js_error("missing stream getReader"))?
             .dyn_into::<js_sys::Function>()
             .map_err(|_| js_error("stream getReader not a function"))?;
-        let stream_reader = stream_reader_fn.call0(&readable)
+        let stream_reader = stream_reader_fn.call0(&readable_or_stream)
             .map_err(|_| js_error("stream getReader call failed"))?;
 
         let mut chunks: Vec<Vec<u8>> = Vec::new();
@@ -228,16 +246,16 @@ impl WasmTransport {
                 Err(_) => continue,
             };
 
-            let readable = match js_sys::Reflect::get(&recv_stream, &JsValue::from_str("readable")) {
+            let readable_or_stream = match resolve_stream_readable(&recv_stream) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
 
-            let stream_reader_fn = match js_sys::Reflect::get(&readable, &JsValue::from_str("getReader")) {
+            let stream_reader_fn = match js_sys::Reflect::get(&readable_or_stream, &JsValue::from_str("getReader")) {
                 Ok(f) => f.dyn_into::<js_sys::Function>().unwrap(),
                 Err(_) => continue,
             };
-            let stream_reader = match stream_reader_fn.call0(&readable) {
+            let stream_reader = match stream_reader_fn.call0(&readable_or_stream) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
