@@ -84,7 +84,13 @@ impl MTPHost {
      * incompatible.
      */
     pub async fn accept(&mut self) -> Option<MTPConnection> {
-        let (sender, receiver) = self.transport.next().await?;
+        let (sender, receiver) = match self.transport.next().await {
+            Some(pair) => pair,
+            None => {
+                log::warn!("accept: transport.next() returned None (listener closed)");
+                return None;
+            }
+        };
 
         #[cfg(feature = "crypto")]
         if self.config.require_authentication {
@@ -92,7 +98,13 @@ impl MTPHost {
         }
 
         // Read the first message (always encoded with reserved types).
-        let first_msg = receiver.receive().await.ok()?;
+        let first_msg = match receiver.receive().await {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("accept: receive failed: {e:?}");
+                return None;
+            }
+        };
 
         /*
          * Extract the client's version from the first message.
@@ -101,9 +113,24 @@ impl MTPHost {
          *
          * Then negotiate the version for single-version clients
          */
-        let client_version = extract_version(&first_msg)?;
+        let client_version = match extract_version(&first_msg) {
+            Some(v) => v,
+            None => {
+                log::warn!(
+                    "accept: extract_version failed on msg type {:?}",
+                    first_msg.get_type()
+                );
+                return None;
+            }
+        };
 
-        let negotiated = self.registry.negotiate(&[client_version])?;
+        let negotiated = match self.registry.negotiate(&[client_version.clone()]) {
+            Some(v) => v,
+            None => {
+                log::warn!("accept: negotiate failed for client version {client_version:?}");
+                return None;
+            }
+        };
 
         let codec = VersionedCodec::new(self.registry.clone());
 
