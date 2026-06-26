@@ -1,8 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-use mtp_codec::{CommunicationType, DataType};
+use mtp_codec::{CommunicationType, DataType, TypeMap};
 use mtp_transport::{Policy, connect, host};
-use mtp_type_map::TypeMap;
 
 fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
     let key_pair = rcgen::KeyPair::generate().unwrap();
@@ -81,7 +80,9 @@ async fn test_send_receive_roundtrip() {
         client_received.get_type(),
         CommunicationType::Pong.to_id(&tm)
     );
-    let client_val = client_received.get_data(DataType::PqSignature.to_id(&tm)).clone();
+    let client_val = client_received
+        .get_data(DataType::PqSignature.to_id(&tm))
+        .clone();
     assert_eq!(client_val, mtp_codec::DataValue::UnsignedNumber(99));
 
     // Close both sides

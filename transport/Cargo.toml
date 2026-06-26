@@ -24,6 +24,10 @@ log = "0.4"
 [dev-dependencies]
 rcgen = "0.14"
 
+[[test]]
+name = "integration"
+required-features = ["host"]
+
 [features]
 default = []
 # Enables hosting a MTP server
