@@ -41,6 +41,34 @@ enum FrameOutcome {
 }
 
 /*
+ * Debug-log the exact bytes about to be written to the WebTransport stream.
+ *
+ * Wire layout (note the DOUBLE length prefix):
+ *   [0..4]   outer_len  u32 BE  - added by send_frame (= inner frame length)
+ *   [4..8]   inner_len  u32 BE  - added by CommunicationValue::to_bytes
+ *   [8..10]  comm_type  u16 BE  - e.g. Identification
+ *   [10]     flags      u8
+ *   [11..]   id/sender/receiver/signature/data, gated by `flags`
+ */
+fn log_frame_bytes(wire: &[u8]) {
+    let hex: String = wire.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+
+    let outer_len = wire.get(0..4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let inner_len = wire.get(4..8).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let comm_type = wire.get(8..10).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let flags = wire.get(10).copied();
+
+    web_sys::console::log_1(
+        &format!(
+            "mtp-wasm send_frame: {len} bytes | outer_len={outer_len:?} inner_len={inner_len:?} \
+             comm_type={comm_type:?} flags={flags:?}\n{hex}",
+            len = wire.len(),
+        )
+        .into(),
+    );
+}
+
+/*
  * WebTransport client transport.
  *
  * The native host sends with a *persistent* uni-directional stream: the auth
@@ -118,6 +146,8 @@ impl WasmTransport {
         let mut wire = Vec::with_capacity(4 + frame.len());
         wire.extend_from_slice(&len.to_be_bytes());
         wire.extend_from_slice(frame);
+
+        log_frame_bytes(&wire);
 
         let chunk = js_sys::Uint8Array::from(&wire[..]);
 
