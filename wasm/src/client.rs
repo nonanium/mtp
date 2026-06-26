@@ -193,7 +193,6 @@ impl WasmClient {
         self.set_state(ConnectionState::Connecting);
         let transport =
             WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
-        let inner = transport.inner().clone();
 
         let version_str = format!("{}", PROTOCOL_VERSION);
         let ident = CommunicationValue::new(CommunicationType::Identification)
@@ -207,6 +206,7 @@ impl WasmClient {
             .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
         transport.send_frame(&ident_bytes).await?;
 
+        let loop_transport = transport.clone();
         self.transport = Some(transport);
         self.set_state(ConnectionState::Connected);
 
@@ -214,9 +214,7 @@ impl WasmClient {
         let on_msg = self.on_message.clone();
         let on_err = self.on_error.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            WasmTransport::from_inner(inner)
-                .receive_loop(on_msg, on_err)
-                .await;
+            loop_transport.receive_loop(on_msg, on_err).await;
             state.set(ConnectionState::Disconnected);
         });
         Ok(())
@@ -250,7 +248,6 @@ impl WasmClient {
 
         let transport =
             WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
-        let inner = transport.inner().clone();
 
         // 1. Send the unsigned Identification hello.
         let hello = CommunicationValue::new(CommunicationType::Identification)
@@ -360,6 +357,7 @@ impl WasmClient {
             }
         };
 
+        let loop_transport = transport.clone();
         self.transport = Some(transport);
         self.set_state(ConnectionState::Connected);
 
@@ -367,9 +365,7 @@ impl WasmClient {
         let on_msg = self.on_message.clone();
         let on_err = self.on_error.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            WasmTransport::from_inner(inner)
-                .receive_loop(on_msg, on_err)
-                .await;
+            loop_transport.receive_loop(on_msg, on_err).await;
             state.set(ConnectionState::Disconnected);
         });
 
@@ -403,7 +399,6 @@ impl WasmClient {
 
         let transport =
             WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
-        let inner = transport.inner().clone();
 
         // 1. Send the unsigned Register hello (version + public-key bundle).
         let hello = CommunicationValue::new(CommunicationType::Register)
@@ -510,6 +505,7 @@ impl WasmClient {
             return Err(e);
         }
 
+        let loop_transport = transport.clone();
         self.transport = Some(transport);
         self.set_state(ConnectionState::Connected);
 
@@ -517,9 +513,7 @@ impl WasmClient {
         let on_msg = self.on_message.clone();
         let on_err = self.on_error.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            WasmTransport::from_inner(inner)
-                .receive_loop(on_msg, on_err)
-                .await;
+            loop_transport.receive_loop(on_msg, on_err).await;
             state.set(ConnectionState::Disconnected);
         });
 
