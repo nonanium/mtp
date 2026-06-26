@@ -36,23 +36,54 @@ fn unexpected_response_type_error(
     ))
 }
 
-/// Verify the host's authentication signature over the handshake response,
-/// mirroring the native client (`client/src/lib.rs`). The signed payload is
-/// `0x01 || id.to_be_bytes() || client_nonce.to_be_bytes() || host_nonce.to_be_bytes()`,
-/// where `id` is the client id for login and the host-assigned id for register.
-/// The Ed25519 signature is mandatory; the ML-DSA signature is verified only
-/// when the host included one.
-fn verify_host_signature(
+/*
+ * Verify the host's signature over the challenge it issued (step 2), mirroring
+ * the native client (`client/src/lib.rs`). `id` is the client id for a login or
+ * `0` for a registration. The Ed25519 signature is mandatory; the ML-DSA
+ * signature is verified only when the host included one.
+ */
+fn verify_host_challenge(
+    challenge: &CommunicationValue,
+    tm: &mtp_codec::TypeMap,
+    host_pk: &mtp_crypto::PublicKeyBundle,
+    id: u64,
+    server_challenge: u128,
+) -> Result<(), JsValue> {
+    let sig = match challenge.get_data(DataType::Signature.to_id(tm)) {
+        DataValue::Bytes(b) => b.clone(),
+        _ => return Err(js_error("missing host challenge signature")),
+    };
+    let pq_sig = match challenge.get_data(DataType::PqSignature.to_id(tm)) {
+        DataValue::Bytes(b) => b.clone(),
+        _ => vec![],
+    };
+
+    let payload = mtp_crypto::auth::challenge_payload(id, server_challenge);
+    mtp_crypto::verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig)
+        .map_err(|_| js_error("host challenge signature invalid"))?;
+    if !pq_sig.is_empty() {
+        mtp_crypto::verify_ml_dsa(&host_pk.sig_pq_public_key, &payload, &pq_sig)
+            .map_err(|_| js_error("host challenge PQ signature invalid"))?;
+    }
+    Ok(())
+}
+
+/*
+ * Verify the host's final confirmation (step 4): the echoed `client_nonce` and
+ * the host signature over the handshake transcript. `id` is the client id for a
+ * login and the host-assigned id for a register.
+ */
+fn verify_host_final(
     resp: &CommunicationValue,
     tm: &mtp_codec::TypeMap,
     host_pk: &mtp_crypto::PublicKeyBundle,
     id: u64,
     client_nonce: u128,
+    server_challenge: u128,
 ) -> Result<(), JsValue> {
-    let host_new_nonce = match resp.get_data(DataType::Timestamp.to_id(tm)) {
-        DataValue::UnsignedNumber(n) => *n,
-        _ => return Err(js_error("missing host nonce")),
-    };
+    if *resp.get_data(DataType::ClientNonce.to_id(tm)) != DataValue::UnsignedNumber(client_nonce) {
+        return Err(js_error("nonce mismatch"));
+    }
     let host_sig = match resp.get_data(DataType::Signature.to_id(tm)) {
         DataValue::Bytes(b) => b.clone(),
         _ => return Err(js_error("missing host signature")),
@@ -62,12 +93,7 @@ fn verify_host_signature(
         _ => vec![],
     };
 
-    let mut payload = Vec::new();
-    payload.push(0x01);
-    payload.extend_from_slice(&id.to_be_bytes());
-    payload.extend_from_slice(&client_nonce.to_be_bytes());
-    payload.extend_from_slice(&host_new_nonce.to_be_bytes());
-
+    let payload = mtp_crypto::auth::host_final_payload(id, client_nonce, server_challenge);
     mtp_crypto::verify_ed25519(&host_pk.sig_cl_public_key, &payload, &host_sig)
         .map_err(|_| js_error("host signature invalid"))?;
     if !host_pq_sig.is_empty() {
@@ -219,26 +245,68 @@ impl WasmClient {
         let keyring = mtp_crypto::Keyring::from_bytes(keyring_bytes)
             .map_err(|e| js_error(&format!("invalid keyring: {}", e)))?;
 
+        let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
+
+        let transport =
+            WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
+        let inner = transport.inner().clone();
+
+        // 1. Send the unsigned Identification hello.
+        let hello = CommunicationValue::new(CommunicationType::Identification)
+            .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
+            .add_typed_default(DataType::Id, DataValue::UnsignedNumber(client_id as u128))
+            .to_bytes()
+            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        transport.send_frame(&hello).await?;
+
+        // 2. Receive and verify the host's challenge.
+        let challenge_bytes = transport.read_one_frame().await?;
+        let challenge = CommunicationValue::from_bytes(&challenge_bytes)
+            .map_err(|e| js_error(&format!("parse challenge: {}", e)))?;
+        let expected = CommunicationType::Challenge.to_id(&tm);
+        if challenge.get_type() != expected {
+            self.set_state(ConnectionState::Disconnected);
+            return Err(unexpected_response_type_error(
+                "auth_connect challenge",
+                expected,
+                challenge.get_type(),
+                &challenge_bytes,
+                &challenge,
+            ));
+        }
+        let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(&tm)) {
+            DataValue::UnsignedNumber(n) => *n,
+            _ => {
+                self.set_state(ConnectionState::Disconnected);
+                return Err(js_error("missing server challenge"));
+            }
+        };
+        if let Err(e) =
+            verify_host_challenge(&challenge, &tm, &host_pk, client_id, server_challenge)
+        {
+            self.set_state(ConnectionState::Disconnected);
+            return Err(e);
+        }
+
+        // 3. Sign the host's challenge and send the proof.
         let mut nonce_bytes = [0u8; 16];
         getrandom::fill(&mut nonce_bytes).map_err(|_| js_error("rng failed"))?;
         let client_nonce = u128::from_be_bytes(nonce_bytes);
 
-        // Build signature payload: version || client_id || client_nonce
-        let mut sig_payload = Vec::new();
-        sig_payload.extend_from_slice(version_str.as_bytes());
-        sig_payload.extend_from_slice(&client_id.to_be_bytes());
-        sig_payload.extend_from_slice(&client_nonce.to_be_bytes());
-
+        let proof_payload = mtp_crypto::auth::login_proof_payload(
+            &version_str,
+            client_id,
+            server_challenge,
+            client_nonce,
+        );
         let signer = mtp_crypto::Ed25519Signer::new(&keyring.sig_cl_secret_key)
             .map_err(|e| js_error(&format!("signer creation failed: {}", e)))?;
         let signature = signer
-            .sign(&sig_payload)
+            .sign(&proof_payload)
             .map_err(|e| js_error(&format!("signature failed: {}", e)))?;
 
-        let frame = CommunicationValue::new(CommunicationType::Identification)
-            .add_typed_default(DataType::Version, DataValue::Str(version_str))
-            .add_typed_default(DataType::Id, DataValue::UnsignedNumber(client_id as u128))
+        let proof = CommunicationValue::new(CommunicationType::ChallengeResponse)
             .add_typed_default(
                 DataType::ClientNonce,
                 DataValue::UnsignedNumber(client_nonce),
@@ -246,18 +314,12 @@ impl WasmClient {
             .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
             .to_bytes()
             .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        transport.send_frame(&proof).await?;
 
-        let transport =
-            WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
-        let inner = transport.inner().clone();
-        transport.send_frame(&frame).await?;
-
-        // Read and verify the host's IdentificationResponse
+        // 4. Receive and verify the host's final confirmation.
         let response = transport.read_one_frame().await?;
         let resp_comm = CommunicationValue::from_bytes(&response)
             .map_err(|e| js_error(&format!("parse response: {}", e)))?;
-
-        let tm = mtp_codec::TypeMap::latest();
         let resp_type = resp_comm.get_type();
         let expected_type = CommunicationType::IdentificationResponse.to_id(&tm);
         if resp_type != expected_type {
@@ -276,15 +338,15 @@ impl WasmClient {
             return Err(js_error("host rejected authentication"));
         }
 
-        // Verify echoed nonce
-        let echo_nonce = resp_comm.get_data(DataType::ClientNonce.to_id(&tm));
-        if *echo_nonce != DataValue::UnsignedNumber(client_nonce) {
-            self.set_state(ConnectionState::Disconnected);
-            return Err(js_error("nonce mismatch"));
-        }
-
-        // Verify the host's signature over the handshake (login: id is client_id).
-        if let Err(e) = verify_host_signature(&resp_comm, &tm, &host_pk, client_id, client_nonce) {
+        // Verify echoed nonce + host signature (login: id is client_id).
+        if let Err(e) = verify_host_final(
+            &resp_comm,
+            &tm,
+            &host_pk,
+            client_id,
+            client_nonce,
+            server_challenge,
+        ) {
             self.set_state(ConnectionState::Disconnected);
             return Err(e);
         }
@@ -335,46 +397,80 @@ impl WasmClient {
         let keyring = mtp_crypto::Keyring::from_bytes(keyring_bytes)
             .map_err(|e| js_error(&format!("invalid keyring: {}", e)))?;
 
+        let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
-        let mut nonce_bytes = [0u8; 16];
-        getrandom::fill(&mut nonce_bytes).map_err(|_| js_error("rng failed"))?;
-        let client_nonce = u128::from_be_bytes(nonce_bytes);
-
         let pk_bytes = keyring.public_key_bundle().as_bytes();
-
-        // Build signature payload: version || client_nonce || pk_bytes
-        let mut sig_payload = Vec::new();
-        sig_payload.extend_from_slice(version_str.as_bytes());
-        sig_payload.extend_from_slice(&client_nonce.to_be_bytes());
-        sig_payload.extend_from_slice(&pk_bytes);
-
-        let signer = mtp_crypto::Ed25519Signer::new(&keyring.sig_cl_secret_key)
-            .map_err(|e| js_error(&format!("signer creation failed: {}", e)))?;
-        let signature = signer
-            .sign(&sig_payload)
-            .map_err(|e| js_error(&format!("signature failed: {}", e)))?;
-
-        let frame = CommunicationValue::new(CommunicationType::Register)
-            .add_typed_default(DataType::Version, DataValue::Str(version_str))
-            .add_typed_default(
-                DataType::ClientNonce,
-                DataValue::UnsignedNumber(client_nonce),
-            )
-            .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes))
-            .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
-            .to_bytes()
-            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
 
         let transport =
             WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
         let inner = transport.inner().clone();
-        transport.send_frame(&frame).await?;
 
+        // 1. Send the unsigned Register hello (version + public-key bundle).
+        let hello = CommunicationValue::new(CommunicationType::Register)
+            .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
+            .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()))
+            .to_bytes()
+            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        transport.send_frame(&hello).await?;
+
+        // 2. Receive and verify the host's challenge (register binds id = 0).
+        let challenge_bytes = transport.read_one_frame().await?;
+        let challenge = CommunicationValue::from_bytes(&challenge_bytes)
+            .map_err(|e| js_error(&format!("parse challenge: {}", e)))?;
+        let expected = CommunicationType::Challenge.to_id(&tm);
+        if challenge.get_type() != expected {
+            self.set_state(ConnectionState::Disconnected);
+            return Err(unexpected_response_type_error(
+                "auth_register challenge",
+                expected,
+                challenge.get_type(),
+                &challenge_bytes,
+                &challenge,
+            ));
+        }
+        let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(&tm)) {
+            DataValue::UnsignedNumber(n) => *n,
+            _ => {
+                self.set_state(ConnectionState::Disconnected);
+                return Err(js_error("missing server challenge"));
+            }
+        };
+        if let Err(e) = verify_host_challenge(&challenge, &tm, &host_pk, 0, server_challenge) {
+            self.set_state(ConnectionState::Disconnected);
+            return Err(e);
+        }
+
+        // 3. Sign the host's challenge over the bundle and send the proof.
+        let mut nonce_bytes = [0u8; 16];
+        getrandom::fill(&mut nonce_bytes).map_err(|_| js_error("rng failed"))?;
+        let client_nonce = u128::from_be_bytes(nonce_bytes);
+
+        let proof_payload = mtp_crypto::auth::register_proof_payload(
+            &version_str,
+            &pk_bytes,
+            server_challenge,
+            client_nonce,
+        );
+        let signer = mtp_crypto::Ed25519Signer::new(&keyring.sig_cl_secret_key)
+            .map_err(|e| js_error(&format!("signer creation failed: {}", e)))?;
+        let signature = signer
+            .sign(&proof_payload)
+            .map_err(|e| js_error(&format!("signature failed: {}", e)))?;
+
+        let proof = CommunicationValue::new(CommunicationType::ChallengeResponse)
+            .add_typed_default(
+                DataType::ClientNonce,
+                DataValue::UnsignedNumber(client_nonce),
+            )
+            .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
+            .to_bytes()
+            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        transport.send_frame(&proof).await?;
+
+        // 4. Receive the host's final confirmation; extract + verify assigned id.
         let response = transport.read_one_frame().await?;
         let resp_comm = CommunicationValue::from_bytes(&response)
             .map_err(|e| js_error(&format!("parse response: {}", e)))?;
-
-        let tm = mtp_codec::TypeMap::latest();
         let resp_type = resp_comm.get_type();
         let expected_type = CommunicationType::RegisterResponse.to_id(&tm);
         if resp_type != expected_type {
@@ -393,12 +489,6 @@ impl WasmClient {
             return Err(js_error("host rejected registration"));
         }
 
-        let echo = resp_comm.get_data(DataType::ClientNonce.to_id(&tm));
-        if *echo != DataValue::UnsignedNumber(client_nonce) {
-            self.set_state(ConnectionState::Disconnected);
-            return Err(js_error("nonce mismatch"));
-        }
-
         let assigned_id = match resp_comm.get_data(DataType::Id.to_id(&tm)) {
             DataValue::UnsignedNumber(n) => *n as u64,
             _ => {
@@ -407,10 +497,15 @@ impl WasmClient {
             }
         };
 
-        // Verify the host's signature over the handshake (register: id is the
-        // host-assigned id).
-        if let Err(e) = verify_host_signature(&resp_comm, &tm, &host_pk, assigned_id, client_nonce)
-        {
+        // Verify echoed nonce + host signature (register: id is host-assigned).
+        if let Err(e) = verify_host_final(
+            &resp_comm,
+            &tm,
+            &host_pk,
+            assigned_id,
+            client_nonce,
+            server_challenge,
+        ) {
             self.set_state(ConnectionState::Disconnected);
             return Err(e);
         }

@@ -25,139 +25,150 @@ struct ReservedEntry {
 
 const RESERVED_COMM_TYPES: &[ReservedEntry] = &[
     ReservedEntry {
-        name: "Error",
+        name: "Identification",
         id: 0,
     },
     ReservedEntry {
-        name: "ErrorParsing",
+        name: "IdentificationResponse",
         id: 1,
     },
     ReservedEntry {
-        name: "ErrorBadVersion",
+        name: "Register",
         id: 2,
     },
     ReservedEntry {
-        name: "Disconnect",
+        name: "RegisterResponse",
         id: 3,
     },
     ReservedEntry {
-        name: "Redirect",
+        name: "Challenge",
         id: 4,
     },
     ReservedEntry {
-        name: "Shutdown",
+        name: "ChallengeResponse",
         id: 5,
     },
     ReservedEntry {
-        name: "BadRequest",
+        name: "Ping",
         id: 6,
     },
     ReservedEntry {
-        name: "Unauthorized",
+        name: "Pong",
         id: 7,
     },
     ReservedEntry {
-        name: "Forbidden",
+        name: "Disconnect",
         id: 8,
     },
     ReservedEntry {
-        name: "NotFound",
+        name: "Redirect",
         id: 9,
     },
     ReservedEntry {
-        name: "TooManyRequests",
+        name: "Shutdown",
         id: 10,
     },
     ReservedEntry {
-        name: "InternalServerError",
+        name: "Error",
         id: 11,
     },
     ReservedEntry {
-        name: "BadGateway",
+        name: "ErrorParsing",
         id: 12,
     },
     ReservedEntry {
-        name: "ServiceUnavailable",
+        name: "ErrorBadVersion",
         id: 13,
     },
     ReservedEntry {
-        name: "GatewayTimeout",
+        name: "BadRequest",
         id: 14,
     },
     ReservedEntry {
-        name: "Identification",
+        name: "Unauthorized",
         id: 15,
     },
     ReservedEntry {
-        name: "IdentificationResponse",
+        name: "Forbidden",
         id: 16,
     },
     ReservedEntry {
-        name: "Register",
+        name: "NotFound",
         id: 17,
     },
     ReservedEntry {
-        name: "RegisterResponse",
+        name: "TooManyRequests",
         id: 18,
     },
     ReservedEntry {
-        name: "Ping",
+        name: "InternalServerError",
         id: 19,
     },
     ReservedEntry {
-        name: "Pong",
+        name: "BadGateway",
         id: 20,
+    },
+    ReservedEntry {
+        name: "ServiceUnavailable",
+        id: 21,
+    },
+    ReservedEntry {
+        name: "GatewayTimeout",
+        id: 22,
     },
 ];
 
 const RESERVED_DATA_TYPES: &[ReservedEntry] = &[
     ReservedEntry {
-        name: "Error",
+        name: "Version",
         id: 0,
     },
     ReservedEntry {
-        name: "ErrorParsing",
+        name: "Id",
         id: 1,
     },
     ReservedEntry {
-        name: "ErrorMessage",
+        name: "ClientNonce",
         id: 2,
     },
     ReservedEntry {
-        name: "Version",
+        name: "ServerNonce",
         id: 3,
     },
     ReservedEntry {
-        name: "Description",
+        name: "PublicKeys",
         id: 4,
     },
     ReservedEntry {
-        name: "Timestamp",
-        id: 5,
-    },
-    ReservedEntry { name: "Id", id: 6 },
-    ReservedEntry {
-        name: "ClientNonce",
-        id: 7,
-    },
-    ReservedEntry {
-        name: "ServerNonce",
-        id: 8,
-    },
-    ReservedEntry {
-        name: "PublicKeys",
-        id: 9,
-    },
-    ReservedEntry {
         name: "Signature",
-        id: 10,
-    },
-    ReservedEntry {
-        name: "Connected",
-        id: 11,
+        id: 5,
     },
     ReservedEntry {
         name: "PqSignature",
+        id: 6,
+    },
+    ReservedEntry {
+        name: "Description",
+        id: 7,
+    },
+    ReservedEntry {
+        name: "Connected",
+        id: 8,
+    },
+    ReservedEntry {
+        name: "Timestamp",
+        id: 9,
+    },
+    ReservedEntry {
+        name: "Error",
+        id: 10,
+    },
+    ReservedEntry {
+        name: "ErrorParsing",
+        id: 11,
+    },
+    ReservedEntry {
+        name: "ErrorMessage",
         id: 12,
     },
 ];

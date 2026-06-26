@@ -68,14 +68,24 @@ The host's `accept()` method:
 6. Returns `None` if the version is unsupported
 7. Returns an `MTPConnection` with the negotiated version otherwise
 
-### Login/Register Handshake (crypto feature)
+### Login/Register Handshake
 
-When `require_authentication` is set, the host sends a **greeting** first (host ID, public keys, nonce). The client then responds with either:
+When `require_authentication` is set, the parties run a mutually-authenticated
+**challenge-response**. The client speaks first with an *unsigned* hello:
 
-- **Login** (`CommunicationType::Identification`, ID 15): client ID, nonce, signature
-- **Register** (`CommunicationType::Register`, ID 17): public keys, nonce, signature
+- **Login** (`CommunicationType::Identification`, ID 15): version, client ID
+- **Register** (`CommunicationType::Register`, ID 17): version, public keys
 
-The host verifies the client's signature, sends a signed response, and the client verifies the host's signature.
+The host then issues a fresh random `server_challenge` in a signed `Challenge`
+(`CommunicationType::Challenge`, ID 21, carrying `ServerNonce`). The client signs
+that challenge, binding its id (login) or public keys (register), and returns a
+`ChallengeResponse` (ID 22). The host verifies the proof against the challenge it
+issued and sends a signed final response, which the client verifies.
+
+Because the client's proof covers the host-issued `server_challenge` (a one-time
+value held only on the accepting task's stack), a captured proof cannot be
+replayed on another connection. All signed payloads are domain-separated; see
+`mtp::crypto::auth`.
 
 ---
 
@@ -116,8 +126,8 @@ Client (v2.0)         Host (v0.0, v1.0, v2.0)
     |  CommValue{ Ident. }   |
     |    Version -> "2.0"    |
     |    Id -> 8765          |
-    |    Nonce -> ...        |
-    |    Signature -> ...    |
+    |  (unsigned hello; auth |
+    |   challenge follows)   |
     |----------------------->|
     |                        |  registry.negotiate(&[Version(2,0)])
     |                        |  -> Some(Version(2,0))

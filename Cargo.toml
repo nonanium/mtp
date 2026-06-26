@@ -79,3 +79,8 @@ host = ["dep:mtp-host", "mtp-codec/registry", "mtp-transport/host"]
 
 # MTP client - outgoing QUIC connections to a host.
 client = ["dep:mtp-client"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+rcgen = "0.14"
+rand = "0.8"

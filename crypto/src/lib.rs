@@ -1,4 +1,5 @@
 pub mod aead;
+pub mod auth;
 pub mod error;
 pub mod keypair;
 

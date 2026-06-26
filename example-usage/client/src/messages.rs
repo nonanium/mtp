@@ -1,6 +1,7 @@
 use mtp::client::MTPConnection;
-use mtp::codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue};
+use mtp::codec::{CommunicationType, CommunicationValue, DataType, DataValue};
 use mtp::crypto::{Ed25519Signer, EncryptionType, Keyring, PublicKeyBundle, SigAlgorithm};
+use mtp::type_map::TypeMap;
 
 pub fn build_demo_message(
     client_id: u64,
@@ -12,26 +13,28 @@ pub fn build_demo_message(
     let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)
         .expect("Ed25519 signer from keyring");
 
+    let tm = TypeMap::latest();
+
     let inner_enc = DataValue::Container(vec![
-        (DataTypeId(1), DataValue::Str("secret inner data".into())),
-        (DataTypeId(2), DataValue::UnsignedNumber(42)),
+        (DataType::Version.to_id(&tm), DataValue::Str("secret inner data".into())),
+        (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(42)),
     ]);
     let mut dv_enc = inner_enc;
     dv_enc.encrypt_container(enc_type, server_bundle, b"demo-aad");
 
     let inner_sig = DataValue::Container(vec![
-        (DataTypeId(1), DataValue::Str("signed by client".into())),
-        (DataTypeId(2), DataValue::UnsignedNumber(99)),
+        (DataType::Version.to_id(&tm), DataValue::Str("signed by client".into())),
+        (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(99)),
     ]);
     let mut dv_sig = inner_sig;
     dv_sig.sign_container(SigAlgorithm::ED25519, &signer);
 
     let inner_sec = DataValue::Container(vec![
         (
-            DataTypeId(1),
+            DataType::Version.to_id(&tm),
             DataValue::Str("signed+encrypted payload".into()),
         ),
-        (DataTypeId(2), DataValue::UnsignedNumber(7)),
+        (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(7)),
     ]);
     let mut dv_sec = inner_sec;
     dv_sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, enc_type, server_bundle, b"demo-aad");

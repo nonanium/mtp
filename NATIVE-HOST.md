@@ -129,12 +129,19 @@ let negotiated = registry.negotiate(&[Version(1, 0), Version(2, 0)]);
 // -> Some(Version(2, 0)) if both versions are registered
 ```
 
-## Authentication Flow (crypto feature)
+## Authentication Flow
 
-When `require_authentication` is `true`, `accept()` runs an authenticated
-handshake before returning the connection. The flow is:
+When `require_authentication` is `true`, `accept()` runs a mutually-authenticated
+**challenge-response** handshake before returning the connection. The host issues
+a fresh, random `server_challenge` that the client must sign, which is what makes
+the client's proof unreplayable: a captured proof is bound to a one-time challenge
+the host generates per connection and will never reissue. The challenge lives only
+on the accepting task's stack; there is no replay database or shared state.
 
-### Login (existing client)
+All signed payloads begin with a one-byte domain-separation tag (see
+`mtp::crypto::auth`) so a signature for one step can never be reused as another.
+
+### Login
 
 ```
 Client                                    Host
@@ -142,26 +149,35 @@ Client                                    Host
   |  QUIC connect                           |
   |---------------------------------------->|
   |                                         |
-  |  Identification {                       |
-  |    Version, Id, ClientNonce,            |
-  |    Signature, [PqSignature]             |
+  |  Identification { Version, Id }         |  (unsigned hello)
+  |---------------------------------------->|
+  |                                         |  lookup get_existing_user(id)
+  |                                         |  generate random server_challenge
+  |  Challenge {                            |
+  |    ServerNonce(server_challenge),       |
+  |    Signature, [PqSignature]             |  host signs the challenge
+  |  }                                      |
+  |<----------------------------------------|
+  |  ChallengeResponse {                    |
+  |    ClientNonce, Signature, [PqSignature]|  client signs the challenge
   |  }                                      |
   |---------------------------------------->|
-  |                                         |  lookup get_existing_user(client_id)
-  |                                         |  verify Ed25519 (and optional ML-DSA) sig
+  |                                         |  verify proof over server_challenge
   |  IdentificationResponse {              |
-  |    Connected=true, ClientNonce(echoed), |
-  |    Id, Timestamp(new_nonce),            |
+  |    Connected=true, Id,                  |
+  |    ClientNonce(echoed),                 |
   |    Signature, [PqSignature]             |
   |  }                                      |
   |<----------------------------------------|
 ```
 
-The client signature payload is: `version_string || client_id (8 bytes, big-endian) || client_nonce (16 bytes, big-endian)`
+Payloads (`||` is concatenation, integers big-endian; `DS_*` are domain tags):
 
-The host signs: `0x01 || assigned_id (8 bytes, big-endian) || client_nonce (16 bytes) || host_new_nonce (16 bytes)`
+- Host challenge: `DS_CHALLENGE || id (8) || server_challenge (16)`
+- Client proof:   `DS_LOGIN_PROOF || version_string || id (8) || server_challenge (16) || client_nonce (16)`
+- Host final:     `DS_HOST_FINAL || assigned_id (8) || client_nonce (16) || server_challenge (16)`
 
-### Register (new client)
+### Register
 
 ```
 Client                                    Host
@@ -170,23 +186,32 @@ Client                                    Host
   |---------------------------------------->|
   |                                         |
   |  Register {                             |
-  |    Version, ClientNonce,                |
-  |    PublicKeys (serialized PublicKeyBundle),
-  |    Signature, [PqSignature]             |
+  |    Version,                             |  (unsigned hello)
+  |    PublicKeys (serialized PublicKeyBundle)
   |  }                                      |
   |---------------------------------------->|
-  |                                         |  extract PublicKeyBundle from frame
-  |                                         |  verify Ed25519 (and optional ML-DSA) sig
+  |                                         |  generate random server_challenge
+  |  Challenge {                            |
+  |    ServerNonce(server_challenge),       |
+  |    Signature, [PqSignature]             |  (challenge binds id = 0)
+  |  }                                      |
+  |<----------------------------------------|
+  |  ChallengeResponse {                    |
+  |    ClientNonce, Signature, [PqSignature]|
+  |  }                                      |
+  |---------------------------------------->|
+  |                                         |  verify proof over server_challenge
   |                                         |  call complete_register(bundle) -> new_id
   |  RegisterResponse {                    |
-  |    Connected=true, ClientNonce(echoed), |
-  |    Id, Timestamp(new_nonce),            |
+  |    Connected=true, Id(new_id),          |
+  |    ClientNonce(echoed),                 |
   |    Signature, [PqSignature]             |
   |  }                                      |
   |<----------------------------------------|
 ```
 
-The client signature payload is: `version_string || client_nonce (16 bytes) || public_key_bytes`
+The register client proof is:
+`DS_REGISTER_PROOF || version_string || server_challenge (16) || client_nonce (16) || public_key_bytes`
 
 After a successful handshake, `accept()` returns an `MTPConnection` with
 `auth_state = Authenticated`, `client_id` set, and `client_public_key`

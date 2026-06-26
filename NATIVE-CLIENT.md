@@ -109,14 +109,21 @@ let config = ClientConfig {
 let conn = MTPClient::auth_connect(config, &keys, &host_pk).await?;
 ```
 
-Protocol:
-1. Client generates a random nonce
-2. Builds a signature payload: `version || client_id || client_nonce`
-3. Signs with Ed25519 (and optionally ML-DSA-65)
-4. Sends `Identification` frame containing version, client ID, nonce, signature(s)
-5. Host responds with `IdentificationResponse` containing echoed nonce, host
-   nonce, and host signature
+Protocol (challenge-response, the host issues the freshness):
+1. Client sends an unsigned `Identification` hello (version, client ID)
+2. Host replies with a `Challenge` carrying a fresh random `server_challenge`
+   and the host's signature over it; the client verifies that signature
+3. Client generates a random `client_nonce` and signs
+   `version || client_id || server_challenge || client_nonce` with Ed25519
+   (and optionally ML-DSA-65)
+4. Client sends a `ChallengeResponse` frame (nonce + signature(s))
+5. Host verifies the proof against `server_challenge` and responds with
+   `IdentificationResponse` (echoed nonce + host signature)
 6. Client verifies the host signature and nonce echo
+
+Because the client's signature covers the host-issued `server_challenge`, a
+captured proof cannot be replayed on another connection (each connection gets a
+different challenge).
 
 ### Registration
 
@@ -134,13 +141,16 @@ let id = conn.client_id;
 let keyring_bytes = keyring.to_bytes();
 ```
 
-Protocol:
-1. Client generates a random nonce
-2. Builds a signature payload: `version || client_nonce || public_key_bytes`
-3. Signs with Ed25519 (and optionally ML-DSA-65)
-4. Sends `Register` frame containing version, nonce, public key bundle, signature(s)
-5. Host assigns a new client ID, responds with `RegisterResponse` containing
-   the ID, echoed nonce, host nonce, and host signature
+Protocol (challenge-response):
+1. Client sends an unsigned `Register` hello (version, public key bundle)
+2. Host replies with a `Challenge` carrying a fresh random `server_challenge`
+   (signed by the host); the client verifies that signature
+3. Client generates a random `client_nonce` and signs
+   `version || server_challenge || client_nonce || public_key_bytes` with
+   Ed25519 (and optionally ML-DSA-65)
+4. Client sends a `ChallengeResponse` frame (nonce + signature(s))
+5. Host verifies the proof against `server_challenge`, assigns a new client ID,
+   and responds with `RegisterResponse` (the ID, echoed nonce, host signature)
 6. Client verifies the host signature and nonce echo
 
 ## Key Material
@@ -271,7 +281,7 @@ sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, enc_type, &recipi
 ```
 
 On the receiving side, the recipient decrypts with its own `Keyring` (each blob
-is self-describing — its leading byte selects the algorithm and the matching KEM
+is self-describing: its leading byte selects the algorithm and the matching KEM
 key from the keyring):
 
 ```rust

@@ -223,7 +223,10 @@ impl WasmTransport {
         let incoming = self.inner.incoming_unidirectional_streams();
 
         let reader_fn = match js_sys::Reflect::get(&incoming, &JsValue::from_str("getReader")) {
-            Ok(f) => f.dyn_into::<js_sys::Function>().unwrap(),
+            Ok(f) => match f.dyn_into::<js_sys::Function>() {
+                Ok(f) => f,
+                Err(_) => return,
+            },
             Err(_) => return,
         };
         let reader_val = match reader_fn.call0(&incoming) {
@@ -233,7 +236,10 @@ impl WasmTransport {
 
         loop {
             let read_fn = match js_sys::Reflect::get(&reader_val, &JsValue::from_str("read")) {
-                Ok(f) => f.dyn_into::<js_sys::Function>().unwrap(),
+                Ok(f) => match f.dyn_into::<js_sys::Function>() {
+                    Ok(f) => f,
+                    Err(_) => break,
+                },
                 Err(_) => break,
             };
             let result = match read_fn.call0(&reader_val) {

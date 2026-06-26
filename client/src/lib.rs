@@ -22,7 +22,7 @@ pub struct ClientConfig {
     pub client_id: u64,
 }
 
-// Established MTP connection with a single negotiated version.
+/* Established MTP connection with a single negotiated version. */
 pub struct MTPConnection {
     pub version: Version,
     pub sender: Sender,
@@ -78,6 +78,113 @@ impl MTPClient {
 }
 
 /* ===== Authentication ===== */
+
+/*
+ * Verify the host's signature over the challenge it issued (step 2).
+ *
+ * `id` is the client id for a login, or `0` for a registration (the host binds
+ * `0` since no id has been assigned yet). The Ed25519 signature is mandatory;
+ * the ML-DSA signature is checked only when the host included one.
+ */
+#[cfg(feature = "crypto")]
+fn verify_host_challenge(
+    challenge: &CommunicationValue,
+    tm: &mtp_codec::TypeMap,
+    host_pk: &mtp_crypto::PublicKeyBundle,
+    id: u64,
+    server_challenge: u128,
+) -> Result<(), CommunicationError> {
+    use mtp_crypto::{auth, verify_ed25519, verify_ml_dsa};
+
+    let sig = match challenge.get_data(DataType::Signature.to_id(tm)) {
+        DataValue::Bytes(b) => b.clone(),
+        _ => {
+            return Err(CommunicationError::AuthenticationFailed(
+                "Missing host challenge signature".into(),
+            ));
+        }
+    };
+    let pq_sig = match challenge.get_data(DataType::PqSignature.to_id(tm)) {
+        DataValue::Bytes(b) => b.clone(),
+        _ => vec![],
+    };
+
+    let payload = auth::challenge_payload(id, server_challenge);
+    verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig).map_err(|_| {
+        CommunicationError::AuthenticationFailed("Host challenge signature invalid".into())
+    })?;
+    if !pq_sig.is_empty() && verify_ml_dsa(&host_pk.sig_pq_public_key, &payload, &pq_sig).is_err() {
+        return Err(CommunicationError::AuthenticationFailed(
+            "Host challenge PQ signature invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+/*
+ * Verify the host's final confirmation (step 4): the echoed `client_nonce` and
+ * the host signature over the handshake transcript.
+ */
+#[cfg(feature = "crypto")]
+fn verify_host_final(
+    response: &CommunicationValue,
+    tm: &mtp_codec::TypeMap,
+    host_pk: &mtp_crypto::PublicKeyBundle,
+    id: u64,
+    client_nonce: u128,
+    server_challenge: u128,
+) -> Result<(), CommunicationError> {
+    use mtp_crypto::{auth, verify_ed25519, verify_ml_dsa};
+
+    match response.get_data(DataType::ClientNonce.to_id(tm)) {
+        DataValue::UnsignedNumber(n) if *n == client_nonce => {}
+        _ => {
+            return Err(CommunicationError::AuthenticationFailed(
+                "Nonce mismatch".into(),
+            ));
+        }
+    }
+
+    let sig = match response.get_data(DataType::Signature.to_id(tm)) {
+        DataValue::Bytes(b) => b.clone(),
+        _ => {
+            return Err(CommunicationError::AuthenticationFailed(
+                "Missing signature".into(),
+            ));
+        }
+    };
+    let pq_sig = match response.get_data(DataType::PqSignature.to_id(tm)) {
+        DataValue::Bytes(b) => b.clone(),
+        _ => vec![],
+    };
+
+    let payload = auth::host_final_payload(id, client_nonce, server_challenge);
+    verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig)
+        .map_err(|_| CommunicationError::AuthenticationFailed("Host signature invalid".into()))?;
+    if !pq_sig.is_empty() && verify_ml_dsa(&host_pk.sig_pq_public_key, &payload, &pq_sig).is_err() {
+        return Err(CommunicationError::AuthenticationFailed(
+            "Host PQ signature invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+/* Interpret the host's `Connected` flag. */
+#[cfg(feature = "crypto")]
+fn check_connected(
+    response: &CommunicationValue,
+    tm: &mtp_codec::TypeMap,
+    reject_msg: &str,
+) -> Result<(), CommunicationError> {
+    match response.get_data(DataType::Connected.to_id(tm)) {
+        DataValue::BoolTrue => Ok(()),
+        DataValue::BoolFalse => Err(CommunicationError::AuthenticationFailed(reject_msg.into())),
+        _ => Err(CommunicationError::AuthenticationFailed(
+            "Invalid response".into(),
+        )),
+    }
+}
+
 #[cfg(feature = "crypto")]
 impl MTPClient {
     pub async fn auth_connect(
@@ -85,59 +192,82 @@ impl MTPClient {
         keys: &mtp_crypto::Keyring,
         host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
     ) -> Result<MTPConnection, CommunicationError> {
-        use mtp_crypto::{
-            Ed25519Signer, MlDsaSigner, SignatureScheme, verify_ed25519, verify_ml_dsa,
-        };
+        use mtp_crypto::{Ed25519Signer, MlDsaSigner, SignatureScheme, auth};
 
         let (sender, receiver) =
             mtp_transport::connect(&config.url, config.server_cert, Policy::default()).await?;
 
-        // 1. Build and send Identification message immediately (no greeting)
-        let client_nonce: u128 = rand::random();
+        let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
 
-        let mut sig_payload = Vec::new();
-        sig_payload.extend_from_slice(version_str.as_bytes());
-        sig_payload.extend_from_slice(&config.client_id.to_be_bytes());
-        sig_payload.extend_from_slice(&client_nonce.to_be_bytes());
-
-        let signer = Ed25519Signer::new(&keys.sig_cl_secret_key)
-            .map_err(|e| CommunicationError::Other(e.to_string()))?;
-
-        /* ===== Signature ===== */
-        let signature = signer
-            .sign(&sig_payload)
-            .map_err(|e| CommunicationError::Other(e.to_string()))?;
-
-        let mut ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)
-            .add_typed_default(DataType::Version, DataValue::Str(version_str))
+        // 1. Send the unsigned Identification hello (version + claimed id).
+        let ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)
+            .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
             .add_typed_default(
                 DataType::Id,
                 DataValue::UnsignedNumber(config.client_id as u128),
-            )
+            );
+        sender.send(&ident).await?;
+
+        // 2. Receive and verify the host's challenge.
+        let challenge = receiver.receive().await?;
+        let expected = mtp_codec::CommunicationType::Challenge.to_id(&tm);
+        if challenge.get_type() != expected {
+            return Err(unexpected_response_type_error(
+                "auth_connect challenge",
+                expected,
+                &challenge,
+            ));
+        }
+        let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(&tm)) {
+            DataValue::UnsignedNumber(n) => *n,
+            _ => {
+                return Err(CommunicationError::AuthenticationFailed(
+                    "Missing server challenge".into(),
+                ));
+            }
+        };
+        verify_host_challenge(
+            &challenge,
+            &tm,
+            host_public_key_bundle,
+            config.client_id,
+            server_challenge,
+        )?;
+
+        // 3. Sign the host's challenge and send the proof.
+        let client_nonce: u128 = rand::random();
+        let proof_payload = auth::login_proof_payload(
+            &version_str,
+            config.client_id,
+            server_challenge,
+            client_nonce,
+        );
+
+        let signer = Ed25519Signer::new(&keys.sig_cl_secret_key)
+            .map_err(|e| CommunicationError::Other(e.to_string()))?;
+        let signature = signer
+            .sign(&proof_payload)
+            .map_err(|e| CommunicationError::Other(e.to_string()))?;
+
+        let mut proof = CommunicationValue::new(mtp_codec::CommunicationType::ChallengeResponse)
             .add_typed_default(
                 DataType::ClientNonce,
                 DataValue::UnsignedNumber(client_nonce),
             )
             .add_typed_default(DataType::Signature, DataValue::Bytes(signature));
-
         if !keys.sig_pq_secret_key.as_bytes().is_empty() {
             let pq_signer = MlDsaSigner::new(&keys.sig_pq_secret_key, &keys.sig_pq_public_key)
                 .map_err(|e| CommunicationError::Other(e.to_string()))?;
             let pq_signature = pq_signer
-                .sign(&sig_payload)
+                .sign(&proof_payload)
                 .map_err(|e| CommunicationError::Other(e.to_string()))?;
-            ident = ident.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
+            proof = proof.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
         }
-        /* ===== End Signature ===== */
+        sender.send(&proof).await?;
 
-        sender.send(&ident).await?;
-
-        // 2. Receive host response (single message)
+        // 4. Receive and verify the host's final confirmation.
         let response = receiver.receive().await?;
-
-        let tm = mtp_codec::TypeMap::latest();
-
         let expected_type = mtp_codec::CommunicationType::IdentificationResponse.to_id(&tm);
         if response.get_type() != expected_type {
             return Err(unexpected_response_type_error(
@@ -146,81 +276,15 @@ impl MTPClient {
                 &response,
             ));
         }
-
-        let connected = response.get_data(DataType::Connected.to_id(&tm));
-        match connected {
-            DataValue::BoolTrue => {}
-            DataValue::BoolFalse => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Server rejected authentication".into(),
-                ));
-            }
-            _ => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Invalid response".into(),
-                ));
-            }
-        }
-
-        let echo_nonce = response.get_data(DataType::ClientNonce.to_id(&tm));
-        match echo_nonce {
-            DataValue::UnsignedNumber(n) if *n == client_nonce as u128 => {}
-            _ => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Nonce mismatch".into(),
-                ));
-            }
-        }
-
-        let host_new_nonce = match response.get_data(DataType::Timestamp.to_id(&tm)) {
-            DataValue::UnsignedNumber(n) => *n,
-            _ => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Missing new nonce".into(),
-                ));
-            }
-        };
-
-        let host_sig = match response.get_data(DataType::Signature.to_id(&tm)) {
-            DataValue::Bytes(b) => b.clone(),
-            _ => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Missing signature".into(),
-                ));
-            }
-        };
-
-        let host_pq_sig = match response.get_data(DataType::PqSignature.to_id(&tm)) {
-            DataValue::Bytes(b) => b.clone(),
-            _ => vec![],
-        };
-
-        let mut host_sig_payload = Vec::new();
-        host_sig_payload.push(0x01);
-        host_sig_payload.extend_from_slice(&config.client_id.to_be_bytes());
-        host_sig_payload.extend_from_slice(&client_nonce.to_be_bytes());
-        host_sig_payload.extend_from_slice(&host_new_nonce.to_be_bytes());
-
-        /* ===== Signature ===== */
-        verify_ed25519(
-            &host_public_key_bundle.sig_cl_public_key,
-            &host_sig_payload,
-            &host_sig,
-        )
-        .map_err(|_| CommunicationError::AuthenticationFailed("Host signature invalid".into()))?;
-        if !host_pq_sig.is_empty()
-            && verify_ml_dsa(
-                &host_public_key_bundle.sig_pq_public_key,
-                &host_sig_payload,
-                &host_pq_sig,
-            )
-            .is_err()
-        {
-            return Err(CommunicationError::AuthenticationFailed(
-                "Host PQ signature invalid".into(),
-            ));
-        }
-        /* ===== End Signature ===== */
+        check_connected(&response, &tm, "Server rejected authentication")?;
+        verify_host_final(
+            &response,
+            &tm,
+            host_public_key_bundle,
+            config.client_id,
+            client_nonce,
+            server_challenge,
+        )?;
 
         Ok(MTPConnection {
             version: PROTOCOL_VERSION,
@@ -236,59 +300,72 @@ impl MTPClient {
         keys: &mtp_crypto::Keyring,
         host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
     ) -> Result<MTPConnection, CommunicationError> {
-        use mtp_crypto::{
-            Ed25519Signer, MlDsaSigner, SignatureScheme, verify_ed25519, verify_ml_dsa,
-        };
+        use mtp_crypto::{Ed25519Signer, MlDsaSigner, SignatureScheme, auth};
 
         let (sender, receiver) =
             mtp_transport::connect(&config.url, config.server_cert, Policy::default()).await?;
 
-        // 1. Build and send Register message immediately
-        let client_nonce: u128 = rand::random();
+        let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
         let pk_bundle = keys.public_key_bundle();
         let pk_bytes = pk_bundle.as_bytes();
 
-        let mut sig_payload = Vec::new();
-        sig_payload.extend_from_slice(version_str.as_bytes());
-        sig_payload.extend_from_slice(&client_nonce.to_be_bytes());
-        sig_payload.extend_from_slice(&pk_bytes);
+        // 1. Send the unsigned Register hello (version + public-key bundle).
+        let register = CommunicationValue::new(mtp_codec::CommunicationType::Register)
+            .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
+            .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
+        sender.send(&register).await?;
+
+        // 2. Receive and verify the host's challenge (register binds id = 0).
+        let challenge = receiver.receive().await?;
+        let expected = mtp_codec::CommunicationType::Challenge.to_id(&tm);
+        if challenge.get_type() != expected {
+            return Err(unexpected_response_type_error(
+                "auth_register challenge",
+                expected,
+                &challenge,
+            ));
+        }
+        let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(&tm)) {
+            DataValue::UnsignedNumber(n) => *n,
+            _ => {
+                return Err(CommunicationError::AuthenticationFailed(
+                    "Missing server challenge".into(),
+                ));
+            }
+        };
+        verify_host_challenge(&challenge, &tm, host_public_key_bundle, 0, server_challenge)?;
+
+        // 3. Sign the host's challenge over the bundle and send the proof.
+        let client_nonce: u128 = rand::random();
+        let proof_payload =
+            auth::register_proof_payload(&version_str, &pk_bytes, server_challenge, client_nonce);
 
         let signer = Ed25519Signer::new(&keys.sig_cl_secret_key)
             .map_err(|e| CommunicationError::Other(e.to_string()))?;
-
-        /* ===== Signature ===== */
         let signature = signer
-            .sign(&sig_payload)
+            .sign(&proof_payload)
             .map_err(|e| CommunicationError::Other(e.to_string()))?;
 
-        let mut register = CommunicationValue::new(mtp_codec::CommunicationType::Register)
-            .add_typed_default(DataType::Version, DataValue::Str(version_str))
+        let mut proof = CommunicationValue::new(mtp_codec::CommunicationType::ChallengeResponse)
             .add_typed_default(
                 DataType::ClientNonce,
                 DataValue::UnsignedNumber(client_nonce),
             )
-            .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes))
             .add_typed_default(DataType::Signature, DataValue::Bytes(signature));
-
         if !keys.sig_pq_secret_key.as_bytes().is_empty() {
             let pq_signer = MlDsaSigner::new(&keys.sig_pq_secret_key, &keys.sig_pq_public_key)
                 .map_err(|e| CommunicationError::Other(e.to_string()))?;
             let pq_signature = pq_signer
-                .sign(&sig_payload)
+                .sign(&proof_payload)
                 .map_err(|e| CommunicationError::Other(e.to_string()))?;
-            register =
-                register.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
+            proof = proof.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
         }
-        /* ===== End Signature ===== */
+        sender.send(&proof).await?;
 
-        sender.send(&register).await?;
-
-        // 2. Receive host response (single message)
+        // 4. Receive the host's final confirmation; extract the assigned id and
+        //    verify the host signature binds to it.
         let response = receiver.receive().await?;
-
-        let tm = mtp_codec::TypeMap::latest();
-
         let expected_type = mtp_codec::CommunicationType::RegisterResponse.to_id(&tm);
         if response.get_type() != expected_type {
             return Err(unexpected_response_type_error(
@@ -297,97 +374,30 @@ impl MTPClient {
                 &response,
             ));
         }
-
-        let connected = response.get_data(DataType::Connected.to_id(&tm));
-        match connected {
-            DataValue::BoolTrue => {}
-            DataValue::BoolFalse => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Server rejected registration".into(),
-                ));
-            }
-            _ => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Invalid response".into(),
-                ));
-            }
-        }
-
+        check_connected(&response, &tm, "Server rejected registration")?;
         let assigned_id = match response.get_data(DataType::Id.to_id(&tm)) {
-            DataValue::UnsignedNumber(n) => *n,
+            DataValue::UnsignedNumber(n) => *n as u64,
             _ => {
                 return Err(CommunicationError::AuthenticationFailed(
                     "Missing assigned ID".into(),
                 ));
             }
         };
-
-        let echo_nonce = response.get_data(DataType::ClientNonce.to_id(&tm));
-        match echo_nonce {
-            DataValue::UnsignedNumber(n) if *n == client_nonce as u128 => {}
-            _ => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Nonce mismatch".into(),
-                ));
-            }
-        }
-
-        let host_new_nonce = match response.get_data(DataType::Timestamp.to_id(&tm)) {
-            DataValue::UnsignedNumber(n) => *n,
-            _ => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Missing new nonce".into(),
-                ));
-            }
-        };
-
-        let host_sig = match response.get_data(DataType::Signature.to_id(&tm)) {
-            DataValue::Bytes(b) => b.clone(),
-            _ => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Missing signature".into(),
-                ));
-            }
-        };
-
-        let host_pq_sig = match response.get_data(DataType::PqSignature.to_id(&tm)) {
-            DataValue::Bytes(b) => b.clone(),
-            _ => vec![],
-        };
-
-        let mut host_sig_payload = Vec::new();
-        host_sig_payload.push(0x01);
-        host_sig_payload.extend_from_slice(&(assigned_id as u64).to_be_bytes());
-        host_sig_payload.extend_from_slice(&client_nonce.to_be_bytes());
-        host_sig_payload.extend_from_slice(&host_new_nonce.to_be_bytes());
-
-        /* ===== Signature ===== */
-        verify_ed25519(
-            &host_public_key_bundle.sig_cl_public_key,
-            &host_sig_payload,
-            &host_sig,
-        )
-        .map_err(|_| CommunicationError::AuthenticationFailed("Host signature invalid".into()))?;
-        if !host_pq_sig.is_empty()
-            && verify_ml_dsa(
-                &host_public_key_bundle.sig_pq_public_key,
-                &host_sig_payload,
-                &host_pq_sig,
-            )
-            .is_err()
-        {
-            return Err(CommunicationError::AuthenticationFailed(
-                "Host PQ signature invalid".into(),
-            ));
-        }
-        /* ===== End Signature ===== */
+        verify_host_final(
+            &response,
+            &tm,
+            host_public_key_bundle,
+            assigned_id,
+            client_nonce,
+            server_challenge,
+        )?;
 
         Ok(MTPConnection {
             version: PROTOCOL_VERSION,
             sender,
             receiver,
             auth_state: AuthState::Authenticated,
-            client_id: assigned_id as u64,
+            client_id: assigned_id,
         })
     }
 }

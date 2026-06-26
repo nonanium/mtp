@@ -976,6 +976,9 @@ dependencies = [
  "mtp-host",
  "mtp-transport",
  "mtp-type-map",
+ "rand 0.8.6",
+ "rcgen",
+ "tokio",
 ]
 
 [[package]]

@@ -345,7 +345,7 @@ impl CommunicationValue {
         let data = if is_encrypted {
             let mut map = BTreeMap::new();
             map.insert(
-                DataTypeId(0),
+                DataType::Version.to_id(&TypeMap::latest()),
                 DataValue::EncryptedContainer(data_bytes.to_vec()),
             );
             map
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(total_len as usize + 4, bytes.len());
 
         let typ = c.read_u16::<BigEndian>().expect("read type");
-        assert_eq!(typ, 1);
+        assert_eq!(typ, 12);
 
         let flags = c.read_u8().expect("read flags");
         assert_eq!(flags & 0b0000_0111, 0);
@@ -602,7 +602,7 @@ mod tests {
         assert_eq!(total_len as usize + 4, bytes.len());
 
         let typ = c.read_u16::<BigEndian>().expect("read type");
-        assert_eq!(typ, 2);
+        assert_eq!(typ, 13);
 
         let flags = c.read_u8().expect("read flags");
         assert_eq!(flags & 0b0000_0111, 0b0000_0111);
@@ -621,15 +621,16 @@ mod tests {
 
     #[test]
     fn test_roundtrip_complex() {
+        let tm = TypeMap::latest();
         let cv = CommunicationValue::new(CommunicationType::Disconnect)
             .with_id(1234)
             .with_sender(111)
             .with_receiver(222)
-            .add_data(DataTypeId(1), DataValue::Str("alice".to_string()))
-            .add_data(DataTypeId(2), DataValue::SignedNumber(42))
-            .add_data(DataTypeId(3), DataValue::BoolTrue)
-            .add_data(
-                DataTypeId(4),
+            .add_typed_default(DataType::Id, DataValue::Str("alice".to_string()))
+            .add_typed_default(DataType::ClientNonce, DataValue::SignedNumber(42))
+            .add_typed_default(DataType::ServerNonce, DataValue::BoolTrue)
+            .add_typed_default(
+                DataType::PublicKeys,
                 DataValue::Array(vec![DataValue::SignedNumber(1), DataValue::SignedNumber(2)]),
             );
 
@@ -638,13 +639,13 @@ mod tests {
         assert_eq!(decoded.get_id(), 1234);
         assert_eq!(decoded.get_sender(), 111);
         assert_eq!(decoded.get_receiver(), 222);
-        assert_eq!(decoded.get_type(), CommunicationTypeId(3));
+        assert_eq!(decoded.get_type(), CommunicationType::Disconnect.to_id(&tm));
         assert_eq!(
-            decoded.get_data(DataTypeId(1)),
+            decoded.get_data(DataType::Id.to_id(&tm)),
             &DataValue::Str("alice".to_string())
         );
         assert_eq!(
-            decoded.get_data(DataTypeId(2)),
+            decoded.get_data(DataType::ClientNonce.to_id(&tm)),
             &DataValue::SignedNumber(42)
         );
     }
@@ -668,7 +669,7 @@ mod tests {
             .with_id(7)
             .with_sender(1)
             .with_receiver(2)
-            .add_data(DataTypeId(6), DataValue::UnsignedNumber(42));
+            .add_typed_default(DataType::PqSignature, DataValue::UnsignedNumber(42));
 
         assert!(cv.sign_frame(SigAlgorithm::ED25519, &signer).is_some());
 
@@ -691,7 +692,7 @@ mod tests {
         let (_, other_sk, _) = Ed25519Signer::generate();
 
         let mut cv = CommunicationValue::new(CommunicationType::Ping)
-            .add_data(DataTypeId(6), DataValue::UnsignedNumber(42));
+            .add_typed_default(DataType::PqSignature, DataValue::UnsignedNumber(42));
         assert!(cv.sign_frame(SigAlgorithm::ED25519, &signer).is_some());
 
         let wrong = Ed25519Signer::new(&other_sk).unwrap();

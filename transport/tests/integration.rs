@@ -1,6 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 
+use mtp_codec::{CommunicationType, DataType};
 use mtp_transport::{Policy, connect, host};
+use mtp_type_map::TypeMap;
 
 fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
     let key_pair = rcgen::KeyPair::generate().unwrap();
@@ -51,22 +53,24 @@ async fn test_send_receive_roundtrip() {
     // Accept on host side
     let (host_tx, host_rx) = h.next().await.unwrap();
 
+    let tm = TypeMap::latest();
+
     // Client sends a simple message
-    let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Ping).add_data(
-        mtp_codec::DataTypeId(6),
+    let msg = mtp_codec::CommunicationValue::new(CommunicationType::Ping).add_data(
+        DataType::PqSignature.to_id(&tm),
         mtp_codec::DataValue::UnsignedNumber(42),
     );
     client_tx.send(&msg).await.unwrap();
 
     // Host receives it
     let received = host_rx.receive().await.unwrap();
-    assert_eq!(received.get_type(), mtp_codec::CommunicationTypeId(19)); // Ping
-    let val = received.get_data(mtp_codec::DataTypeId(6)).clone();
+    assert_eq!(received.get_type(), CommunicationType::Ping.to_id(&tm));
+    let val = received.get_data(DataType::PqSignature.to_id(&tm)).clone();
     assert_eq!(val, mtp_codec::DataValue::UnsignedNumber(42));
 
     // Host sends a response
-    let resp = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Pong).add_data(
-        mtp_codec::DataTypeId(6),
+    let resp = mtp_codec::CommunicationValue::new(CommunicationType::Pong).add_data(
+        DataType::PqSignature.to_id(&tm),
         mtp_codec::DataValue::UnsignedNumber(99),
     );
     host_tx.send(&resp).await.unwrap();
@@ -75,9 +79,9 @@ async fn test_send_receive_roundtrip() {
     let client_received = client_rx.receive().await.unwrap();
     assert_eq!(
         client_received.get_type(),
-        mtp_codec::CommunicationTypeId(20)
-    ); // Pong
-    let client_val = client_received.get_data(mtp_codec::DataTypeId(6)).clone();
+        CommunicationType::Pong.to_id(&tm)
+    );
+    let client_val = client_received.get_data(DataType::PqSignature.to_id(&tm)).clone();
     assert_eq!(client_val, mtp_codec::DataValue::UnsignedNumber(99));
 
     // Close both sides
@@ -106,10 +110,12 @@ async fn test_concurrent_messages() {
 
     let (_host_tx, host_rx) = h.next().await.unwrap();
 
+    let tm = TypeMap::latest();
+
     // Send 5 messages in sequence
     for i in 0..5u128 {
-        let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Ping).add_data(
-            mtp_codec::DataTypeId(6),
+        let msg = mtp_codec::CommunicationValue::new(CommunicationType::Ping).add_data(
+            DataType::PqSignature.to_id(&tm),
             mtp_codec::DataValue::UnsignedNumber(i),
         );
         client_tx.send(&msg).await.unwrap();
@@ -118,14 +124,14 @@ async fn test_concurrent_messages() {
     // Receive all 5 in order
     for i in 0..5u128 {
         let received = host_rx.receive().await.unwrap();
-        let val = received.get_data(mtp_codec::DataTypeId(6)).clone();
+        let val = received.get_data(DataType::PqSignature.to_id(&tm)).clone();
         assert_eq!(val, mtp_codec::DataValue::UnsignedNumber(i));
     }
 
     // Send 3 responses back
     for i in 0..3u128 {
-        let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Pong).add_data(
-            mtp_codec::DataTypeId(6),
+        let msg = mtp_codec::CommunicationValue::new(CommunicationType::Pong).add_data(
+            DataType::PqSignature.to_id(&tm),
             mtp_codec::DataValue::UnsignedNumber(i * 10),
         );
         client_tx.send(&msg).await.unwrap();
@@ -133,7 +139,7 @@ async fn test_concurrent_messages() {
 
     for i in 0..3u128 {
         let received = host_rx.receive().await.unwrap();
-        let val = received.get_data(mtp_codec::DataTypeId(6)).clone();
+        let val = received.get_data(DataType::PqSignature.to_id(&tm)).clone();
         assert_eq!(val, mtp_codec::DataValue::UnsignedNumber(i * 10));
     }
 
@@ -162,13 +168,14 @@ async fn test_close_detection() {
     let (_host_tx, host_rx) = h.next().await.unwrap();
 
     // Send a message then close
-    let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Ping);
+    let msg = mtp_codec::CommunicationValue::new(CommunicationType::Ping);
     client_tx.send(&msg).await.unwrap();
     client_tx.close();
 
     // Host should still receive the message
+    let tm = TypeMap::latest();
     let received = host_rx.receive().await.unwrap();
-    assert_eq!(received.get_type(), mtp_codec::CommunicationTypeId(19)); // Ping
+    assert_eq!(received.get_type(), CommunicationType::Ping.to_id(&tm));
 
     // Host should get an error or closed signal on next receive
     let result = host_rx.receive().await;
@@ -234,7 +241,7 @@ async fn test_drop_receiver_keeps_sender_alive() {
     let (host_tx, host_rx) = h.next().await.unwrap();
 
     // Client sends a message the host receives.
-    let msg = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Ping);
+    let msg = mtp_codec::CommunicationValue::new(CommunicationType::Ping);
     client_tx.send(&msg).await.unwrap();
     let _ = host_rx.receive().await.unwrap();
 
@@ -242,16 +249,18 @@ async fn test_drop_receiver_keeps_sender_alive() {
     // the same connection and must keep working.
     drop(host_rx);
 
-    let resp = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::Pong).add_data(
-        mtp_codec::DataTypeId(6),
+    let tm = TypeMap::latest();
+
+    let resp = mtp_codec::CommunicationValue::new(CommunicationType::Pong).add_data(
+        DataType::PqSignature.to_id(&tm),
         mtp_codec::DataValue::UnsignedNumber(7),
     );
     host_tx.send(&resp).await.unwrap();
 
     let got = client_rx.receive().await.unwrap();
-    assert_eq!(got.get_type(), mtp_codec::CommunicationTypeId(20)); // Pong
+    assert_eq!(got.get_type(), CommunicationType::Pong.to_id(&tm));
     assert_eq!(
-        got.get_data(mtp_codec::DataTypeId(6)).clone(),
+        got.get_data(DataType::PqSignature.to_id(&tm)).clone(),
         mtp_codec::DataValue::UnsignedNumber(7)
     );
 

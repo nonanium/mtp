@@ -6,7 +6,7 @@ use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
 use std::net::IpAddr;
 
-// Host configuration.
+/* Host configuration. */
 pub struct HostConfig {
     pub ip: IpAddr,
     pub port: u16,
@@ -33,7 +33,7 @@ pub enum AuthState {
     Failed,
 }
 
-// A connection that has completed version negotiation.
+/* A connection that has completed version negotiation. */
 pub struct MTPConnection {
     pub version: Version,
     pub codec: VersionedCodec,
@@ -47,7 +47,7 @@ pub struct MTPConnection {
     pub client_public_key: Option<mtp_crypto::PublicKeyBundle>,
 }
 
-// High-level MTP host with built-in version negotiation.
+/* High-level MTP host with built-in version negotiation. */
 pub struct MTPHost {
     transport: mtp_transport::Host,
     registry: Registry,
@@ -132,221 +132,235 @@ impl MTPHost {
 
 #[cfg(feature = "crypto")]
 impl MTPHost {
+    /*
+     * Mutually-authenticated handshake with a server-issued challenge.
+     *
+     *   1. C -> H : Identification { version, id }   (or Register { version, public_keys })
+     *   2. H -> C : Challenge { server_challenge, host_sig }
+     *   3. C -> H : ChallengeResponse { client_nonce, sig }
+     *   4. H -> C : IdentificationResponse / RegisterResponse { connected, id, sig }
+     *
+     * The client's authenticating signature (step 3) covers `server_challenge`,
+     * a fresh value generated here in step 2 and kept on this task's stack for
+     * the lifetime of the connection. It is therefore one-time per connection
+     * with no shared replay state, and a captured proof cannot be replayed on
+     * any other connection.
+     */
     async fn accept_authenticated(
         &mut self,
         sender: Sender,
         receiver: Receiver,
     ) -> Option<MTPConnection> {
         use mtp_crypto::{
-            Ed25519Signer, PublicKeyBundle, SignatureScheme, verify_ed25519, verify_ml_dsa,
+            Ed25519Signer, MlDsaSigner, PublicKeyBundle, SignatureScheme, auth, verify_ed25519,
+            verify_ml_dsa,
         };
 
-        let tm = TypeMap::latest();
+        // Flow-specific state resolved from the client's opening hello.
+        enum Flow {
+            Login {
+                id: u64,
+                bundle: PublicKeyBundle,
+            },
+            Register {
+                bundle: PublicKeyBundle,
+                pk_bytes: Vec<u8>,
+            },
+        }
 
-        // 1. Receive client message first (no host greeting)
-        let msg = receiver.receive().await.ok()?;
-        let version_str = match msg.get_data(DataType::Version.to_id(&tm)) {
+        let tm = TypeMap::latest();
+        let pq_enabled = !self
+            .config
+            .host_keyring
+            .sig_pq_secret_key
+            .as_bytes()
+            .is_empty();
+
+        // Sign `payload` with the host keys (Ed25519 always, ML-DSA when configured).
+        let host_sign = |payload: &[u8]| -> Option<(Vec<u8>, Vec<u8>)> {
+            let signer = Ed25519Signer::new(&self.config.host_keyring.sig_cl_secret_key).ok()?;
+            let sig = signer.sign(payload).ok()?;
+            let pq_sig = if pq_enabled {
+                let pq = MlDsaSigner::new(
+                    &self.config.host_keyring.sig_pq_secret_key,
+                    &self.config.host_keyring.sig_pq_public_key,
+                )
+                .ok()?;
+                pq.sign(payload).ok()?
+            } else {
+                Vec::new()
+            };
+            Some((sig, pq_sig))
+        };
+
+        // ===== Step 1: receive the client's unsigned hello =====
+        let hello = receiver.receive().await.ok()?;
+        let version_str = match hello.get_data(DataType::Version.to_id(&tm)) {
             DataValue::Str(s) => s.clone(),
             _ => {
                 sender.close();
                 return None;
             }
         };
-
         let client_version = Version::parse(&version_str)?;
 
-        let client_nonce = match msg.get_data(DataType::ClientNonce.to_id(&tm)) {
+        let (flow, response_type) =
+            if hello.get_type() == mtp_codec::CommunicationType::Identification.to_id(&tm) {
+                // LOGIN: look up the claimed user before issuing a challenge.
+                let cid = match hello.get_data(DataType::Id.to_id(&tm)) {
+                    DataValue::UnsignedNumber(n) => *n as u64,
+                    _ => {
+                        sender.close();
+                        return None;
+                    }
+                };
+                let bundle = match (self.config.get_existing_user)(cid) {
+                    Some(b) => b,
+                    None => {
+                        let rejection = CommunicationValue::new(
+                            mtp_codec::CommunicationType::IdentificationResponse,
+                        )
+                        .add_typed_default(DataType::Connected, DataValue::BoolFalse);
+                        let _ = sender.send(&rejection).await;
+                        sender.close();
+                        return None;
+                    }
+                };
+                (
+                    Flow::Login { id: cid, bundle },
+                    mtp_codec::CommunicationType::IdentificationResponse,
+                )
+            } else if hello.get_type() == mtp_codec::CommunicationType::Register.to_id(&tm) {
+                // REGISTER: the client presents the bundle it wants to register.
+                let bundle = match hello.get_data(DataType::PublicKeys.to_id(&tm)) {
+                    DataValue::Bytes(b) => PublicKeyBundle::from_bytes(b).ok()?,
+                    _ => {
+                        sender.close();
+                        return None;
+                    }
+                };
+                let pk_bytes = bundle.as_bytes();
+                (
+                    Flow::Register { bundle, pk_bytes },
+                    mtp_codec::CommunicationType::RegisterResponse,
+                )
+            } else {
+                sender.close();
+                return None;
+            };
+
+        // The id bound into the challenge (0 for register: none assigned yet).
+        let challenge_id = match &flow {
+            Flow::Login { id, .. } => *id,
+            Flow::Register { .. } => 0,
+        };
+
+        // ===== Step 2: issue a fresh, host-signed challenge =====
+        let server_challenge: u128 = rand::random();
+        let (chal_sig, chal_pq_sig) =
+            host_sign(&auth::challenge_payload(challenge_id, server_challenge))?;
+
+        let mut challenge_msg = CommunicationValue::new(mtp_codec::CommunicationType::Challenge)
+            .add_typed_default(
+                DataType::ServerNonce,
+                DataValue::UnsignedNumber(server_challenge),
+            )
+            .add_typed_default(DataType::Signature, DataValue::Bytes(chal_sig));
+        if pq_enabled {
+            challenge_msg = challenge_msg
+                .add_typed_default(DataType::PqSignature, DataValue::Bytes(chal_pq_sig));
+        }
+        sender.send(&challenge_msg).await.ok()?;
+
+        // ===== Step 3: receive and verify the client's proof =====
+        let proof = receiver.receive().await.ok()?;
+        if proof.get_type() != mtp_codec::CommunicationType::ChallengeResponse.to_id(&tm) {
+            sender.close();
+            return None;
+        }
+        let client_nonce = match proof.get_data(DataType::ClientNonce.to_id(&tm)) {
             DataValue::UnsignedNumber(n) => *n,
             _ => {
                 sender.close();
                 return None;
             }
         };
-
-        let sig_bytes = match msg.get_data(DataType::Signature.to_id(&tm)) {
+        let sig_bytes = match proof.get_data(DataType::Signature.to_id(&tm)) {
             DataValue::Bytes(b) => b.clone(),
             _ => {
                 sender.close();
                 return None;
             }
         };
-
-        let pq_sig_bytes: Vec<u8> = match msg.get_data(DataType::PqSignature.to_id(&tm)) {
+        let pq_sig_bytes: Vec<u8> = match proof.get_data(DataType::PqSignature.to_id(&tm)) {
             DataValue::Bytes(b) => b.clone(),
             _ => vec![],
         };
 
-        let (assigned_id, client_bundle, response_type) = if msg.get_type()
-            == mtp_codec::CommunicationType::Identification.to_id(&tm)
-        {
-            // LOGIN
-            let cid = match msg.get_data(DataType::Id.to_id(&tm)) {
-                DataValue::UnsignedNumber(n) => *n as u64,
-                _ => {
-                    sender.close();
-                    return None;
-                }
-            };
-
-            let bundle = match (self.config.get_existing_user)(cid) {
-                Some(b) => b,
-                None => {
-                    let rejection = CommunicationValue::new(
-                        mtp_codec::CommunicationType::IdentificationResponse,
-                    )
-                    .add_typed_default(DataType::Connected, DataValue::BoolFalse)
-                    .add_typed_default(
-                        DataType::ClientNonce,
-                        DataValue::UnsignedNumber(client_nonce),
-                    );
-                    let _ = sender.send(&rejection).await;
-                    sender.close();
-                    return None;
-                }
-            };
-
-            let mut sig_payload = Vec::new();
-            sig_payload.extend_from_slice(version_str.as_bytes());
-            sig_payload.extend_from_slice(&cid.to_be_bytes());
-            sig_payload.extend_from_slice(&client_nonce.to_be_bytes());
-
-            /* ===== Signature ===== */
-            if verify_ed25519(&bundle.sig_cl_public_key, &sig_payload, &sig_bytes).is_err() {
-                let rejection =
-                    CommunicationValue::new(mtp_codec::CommunicationType::IdentificationResponse)
-                        .add_typed_default(DataType::Connected, DataValue::BoolFalse)
-                        .add_typed_default(
-                            DataType::ClientNonce,
-                            DataValue::UnsignedNumber(client_nonce),
-                        );
-                let _ = sender.send(&rejection).await;
-                sender.close();
-                return None;
-            }
-            if !pq_sig_bytes.is_empty()
-                && verify_ml_dsa(&bundle.sig_pq_public_key, &sig_payload, &pq_sig_bytes).is_err()
-            {
-                let rejection =
-                    CommunicationValue::new(mtp_codec::CommunicationType::IdentificationResponse)
-                        .add_typed_default(DataType::Connected, DataValue::BoolFalse)
-                        .add_typed_default(
-                            DataType::ClientNonce,
-                            DataValue::UnsignedNumber(client_nonce),
-                        );
-                let _ = sender.send(&rejection).await;
-                sender.close();
-                return None;
-            }
-            /* ===== End Signature ===== */
-
-            (
-                cid,
+        let (proof_payload, bundle) = match &flow {
+            Flow::Login { id, bundle } => (
+                auth::login_proof_payload(&version_str, *id, server_challenge, client_nonce),
                 bundle,
-                mtp_codec::CommunicationType::IdentificationResponse,
-            )
-        } else if msg.get_type() == mtp_codec::CommunicationType::Register.to_id(&tm) {
-            // REGISTER
-            let bundle = match msg.get_data(DataType::PublicKeys.to_id(&tm)) {
-                DataValue::Bytes(b) => PublicKeyBundle::from_bytes(b).ok()?,
-                _ => {
-                    sender.close();
-                    return None;
-                }
-            };
-            let pk_bytes = bundle.as_bytes();
-
-            let mut sig_payload = Vec::new();
-            sig_payload.extend_from_slice(version_str.as_bytes());
-            sig_payload.extend_from_slice(&client_nonce.to_be_bytes());
-            sig_payload.extend_from_slice(&pk_bytes);
-
-            /* ===== Signature ===== */
-            if verify_ed25519(&bundle.sig_cl_public_key, &sig_payload, &sig_bytes).is_err() {
-                let rejection =
-                    CommunicationValue::new(mtp_codec::CommunicationType::RegisterResponse)
-                        .add_typed_default(DataType::Connected, DataValue::BoolFalse)
-                        .add_typed_default(
-                            DataType::ClientNonce,
-                            DataValue::UnsignedNumber(client_nonce),
-                        );
-                let _ = sender.send(&rejection).await;
-                sender.close();
-                return None;
-            }
-            if !pq_sig_bytes.is_empty()
-                && verify_ml_dsa(&bundle.sig_pq_public_key, &sig_payload, &pq_sig_bytes).is_err()
-            {
-                let rejection =
-                    CommunicationValue::new(mtp_codec::CommunicationType::RegisterResponse)
-                        .add_typed_default(DataType::Connected, DataValue::BoolFalse)
-                        .add_typed_default(
-                            DataType::ClientNonce,
-                            DataValue::UnsignedNumber(client_nonce),
-                        );
-                let _ = sender.send(&rejection).await;
-                sender.close();
-                return None;
-            }
-            /* ===== End Signature ===== */
-
-            let new_id = (self.config.complete_register)(bundle.clone());
-            (
-                new_id,
+            ),
+            Flow::Register {
+                bundle, pk_bytes, ..
+            } => (
+                auth::register_proof_payload(
+                    &version_str,
+                    pk_bytes,
+                    server_challenge,
+                    client_nonce,
+                ),
                 bundle,
-                mtp_codec::CommunicationType::RegisterResponse,
-            )
-        } else {
-            sender.close();
-            return None;
+            ),
         };
 
-        // 2. Send success response (single host message)
-        let new_nonce: u128 = rand::random();
+        let proof_ok = verify_ed25519(&bundle.sig_cl_public_key, &proof_payload, &sig_bytes)
+            .is_ok()
+            && (pq_sig_bytes.is_empty()
+                || verify_ml_dsa(&bundle.sig_pq_public_key, &proof_payload, &pq_sig_bytes).is_ok());
 
-        let mut host_sig_payload = Vec::new();
-        host_sig_payload.push(0x01);
-        host_sig_payload.extend_from_slice(&assigned_id.to_be_bytes());
-        host_sig_payload.extend_from_slice(&client_nonce.to_be_bytes());
-        host_sig_payload.extend_from_slice(&new_nonce.to_be_bytes());
+        if !proof_ok {
+            let rejection = CommunicationValue::new(response_type)
+                .add_typed_default(DataType::Connected, DataValue::BoolFalse);
+            let _ = sender.send(&rejection).await;
+            sender.close();
+            return None;
+        }
 
-        let host_signer = Ed25519Signer::new(&self.config.host_keyring.sig_cl_secret_key).ok()?;
+        // Proof verified: resolve the assigned id and retain the client's bundle.
+        let (assigned_id, client_bundle) = match flow {
+            Flow::Login { id, bundle } => (id, bundle),
+            Flow::Register { bundle, .. } => {
+                let new_id = (self.config.complete_register)(bundle.clone());
+                (new_id, bundle)
+            }
+        };
 
-        /* ===== Signature ===== */
-        let host_sig = host_signer.sign(&host_sig_payload).ok()?;
+        // ===== Step 4: send the host's final confirmation =====
+        let (host_sig, host_pq_sig) = host_sign(&auth::host_final_payload(
+            assigned_id,
+            client_nonce,
+            server_challenge,
+        ))?;
 
         let mut response = CommunicationValue::new(response_type)
             .add_typed_default(DataType::Connected, DataValue::BoolTrue)
+            .add_typed_default(DataType::Id, DataValue::UnsignedNumber(assigned_id as u128))
             .add_typed_default(
                 DataType::ClientNonce,
                 DataValue::UnsignedNumber(client_nonce),
             )
-            .add_typed_default(DataType::Timestamp, DataValue::UnsignedNumber(new_nonce))
-            .add_typed_default(DataType::Signature, DataValue::Bytes(host_sig))
-            .add_typed_default(DataType::Id, DataValue::UnsignedNumber(assigned_id as u128));
-
-        if !self
-            .config
-            .host_keyring
-            .sig_pq_secret_key
-            .as_bytes()
-            .is_empty()
-        {
-            use mtp_crypto::MlDsaSigner;
-            let host_pq_signer = MlDsaSigner::new(
-                &self.config.host_keyring.sig_pq_secret_key,
-                &self.config.host_keyring.sig_pq_public_key,
-            )
-            .ok()?;
-            let host_pq_sig = host_pq_signer.sign(&host_sig_payload).ok()?;
+            .add_typed_default(DataType::Signature, DataValue::Bytes(host_sig));
+        if pq_enabled {
             response =
                 response.add_typed_default(DataType::PqSignature, DataValue::Bytes(host_pq_sig));
         }
-        /* ===== End Signature ===== */
 
         sender.send(&response).await.ok()?;
         sender.finish_stream().await.ok()?;
 
-        // 3. Version negotiation
+        // ===== Version negotiation =====
         let negotiated = self.registry.negotiate(&[client_version])?;
         let codec = VersionedCodec::new(self.registry.clone());
 

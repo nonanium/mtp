@@ -9,6 +9,9 @@ use std::io::Cursor;
 use mtp_common::CodecError;
 use mtp_type_map::DataTypeId;
 
+#[cfg(test)]
+use mtp_type_map::{DataType, TypeMap};
+
 #[cfg(feature = "crypto")]
 use mtp_crypto::{EncryptionType, Keyring, PublicKeyBundle, SigAlgorithm, SignatureScheme};
 
@@ -151,11 +154,13 @@ impl DataValue {
 
     const KIND_NULL: u8 = 0xFF;
 
-    /// Smallest possible encoded entry, used to cap pre-reservation when
-    /// decoding containers/arrays so a small frame cannot force a huge
-    /// allocation from an attacker-controlled count. A bool/null entry in a
-    /// container is 3 bytes (1 kind + 2 key); a bare value in an array is 1
-    /// byte, so 1 is the safe lower bound shared by both.
+    /*
+     * Smallest possible encoded entry, used to cap pre-reservation when
+     * decoding containers/arrays so a small frame cannot force a huge
+     * allocation from an attacker-controlled count. A bool/null entry in a
+     * container is 3 bytes (1 kind + 2 key); a bare value in an array is 1
+     * byte, so 1 is the safe lower bound shared by both.
+     */
     const MIN_ENTRY_BYTES: usize = 1;
 
     pub fn container_from_map(map: &BTreeMap<DataTypeId, DataValue>) -> DataValue {
@@ -954,8 +959,6 @@ impl Hash for DataValue {
 mod tests {
     use super::*;
 
-    /// Only Container and Array can be top-level serialized forms.
-    /// Scalars must be tested inside a container.
     fn container_roundtrip(values: Vec<(DataTypeId, DataValue)>) {
         let dv = DataValue::Container(values.clone());
         let bytes = dv.to_bytes().expect("encode failed");
@@ -972,9 +975,10 @@ mod tests {
 
     #[test]
     fn test_bool_in_container() {
+        let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataTypeId(1), DataValue::BoolTrue),
-            (DataTypeId(2), DataValue::BoolFalse),
+            (DataType::Id.to_id(&tm), DataValue::BoolTrue),
+            (DataType::ClientNonce.to_id(&tm), DataValue::BoolFalse),
         ]);
     }
 
@@ -995,54 +999,60 @@ mod tests {
 
     #[test]
     fn test_signed_number_in_container() {
+        let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataTypeId(1), DataValue::SignedNumber(0)),
-            (DataTypeId(2), DataValue::SignedNumber(42)),
-            (DataTypeId(3), DataValue::SignedNumber(-42)),
-            (DataTypeId(4), DataValue::SignedNumber(i128::MAX)),
-            (DataTypeId(5), DataValue::SignedNumber(i128::MIN)),
+            (DataType::Version.to_id(&tm), DataValue::SignedNumber(0)),
+            (DataType::Id.to_id(&tm), DataValue::SignedNumber(42)),
+            (DataType::ClientNonce.to_id(&tm), DataValue::SignedNumber(-42)),
+            (DataType::ServerNonce.to_id(&tm), DataValue::SignedNumber(i128::MAX)),
+            (DataType::PublicKeys.to_id(&tm), DataValue::SignedNumber(i128::MIN)),
         ]);
     }
 
     #[test]
     fn test_unsigned_number_in_container() {
+        let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataTypeId(1), DataValue::UnsignedNumber(0)),
-            (DataTypeId(2), DataValue::UnsignedNumber(42)),
-            (DataTypeId(3), DataValue::UnsignedNumber(u128::MAX)),
+            (DataType::Version.to_id(&tm), DataValue::UnsignedNumber(0)),
+            (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(42)),
+            (DataType::ClientNonce.to_id(&tm), DataValue::UnsignedNumber(u128::MAX)),
         ]);
     }
 
     #[test]
     fn test_float_in_container() {
+        let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataTypeId(1), DataValue::Float(0, 0)),
-            (DataTypeId(2), DataValue::Float(2, 12345)),
-            (DataTypeId(3), DataValue::Float(255, 4294967295)),
+            (DataType::Version.to_id(&tm), DataValue::Float(0, 0)),
+            (DataType::Id.to_id(&tm), DataValue::Float(2, 12345)),
+            (DataType::ClientNonce.to_id(&tm), DataValue::Float(255, 4294967295)),
         ]);
     }
 
     #[test]
     fn test_str_in_container() {
+        let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataTypeId(1), DataValue::Str(String::new())),
-            (DataTypeId(2), DataValue::Str("hello".to_string())),
-            (DataTypeId(3), DataValue::Str("a".repeat(1000))),
+            (DataType::Version.to_id(&tm), DataValue::Str(String::new())),
+            (DataType::Id.to_id(&tm), DataValue::Str("hello".to_string())),
+            (DataType::ClientNonce.to_id(&tm), DataValue::Str("a".repeat(1000))),
         ]);
     }
 
     #[test]
     fn test_bytes_in_container() {
+        let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataTypeId(1), DataValue::Bytes(vec![])),
-            (DataTypeId(2), DataValue::Bytes(vec![0x00, 0xFF, 0xAB])),
-            (DataTypeId(3), DataValue::Bytes(vec![0x42; 100])),
+            (DataType::Version.to_id(&tm), DataValue::Bytes(vec![])),
+            (DataType::Id.to_id(&tm), DataValue::Bytes(vec![0x00, 0xFF, 0xAB])),
+            (DataType::ClientNonce.to_id(&tm), DataValue::Bytes(vec![0x42; 100])),
         ]);
     }
 
     #[test]
     fn test_null_in_container() {
-        container_roundtrip(vec![(DataTypeId(1), DataValue::Null)]);
+        let tm = TypeMap::latest();
+        container_roundtrip(vec![(DataType::Version.to_id(&tm), DataValue::Null)]);
     }
 
     #[test]
@@ -1070,24 +1080,26 @@ mod tests {
 
     #[test]
     fn test_container_mixed_roundtrip() {
+        let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataTypeId(1), DataValue::BoolTrue),
-            (DataTypeId(2), DataValue::SignedNumber(-100)),
-            (DataTypeId(3), DataValue::Str("test".to_string())),
-            (DataTypeId(4), DataValue::UnsignedNumber(u128::MAX)),
-            (DataTypeId(5), DataValue::Null),
+            (DataType::Version.to_id(&tm), DataValue::BoolTrue),
+            (DataType::Id.to_id(&tm), DataValue::SignedNumber(-100)),
+            (DataType::ClientNonce.to_id(&tm), DataValue::Str("test".to_string())),
+            (DataType::ServerNonce.to_id(&tm), DataValue::UnsignedNumber(u128::MAX)),
+            (DataType::PublicKeys.to_id(&tm), DataValue::Null),
         ]);
     }
 
     #[test]
     fn test_container_nested_roundtrip() {
+        let tm = TypeMap::latest();
         container_roundtrip(vec![
             (
-                DataTypeId(1),
-                DataValue::Container(vec![(DataTypeId(10), DataValue::BoolTrue)]),
+                DataType::Version.to_id(&tm),
+                DataValue::Container(vec![(DataType::Error.to_id(&tm), DataValue::BoolTrue)]),
             ),
             (
-                DataTypeId(2),
+                DataType::Id.to_id(&tm),
                 DataValue::Array(vec![DataValue::SignedNumber(1), DataValue::SignedNumber(2)]),
             ),
         ]);
@@ -1095,8 +1107,9 @@ mod tests {
 
     #[test]
     fn test_container_base64_roundtrip() {
+        let tm = TypeMap::latest();
         let dv = DataValue::Container(vec![(
-            DataTypeId(7),
+            DataType::Description.to_id(&tm),
             DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         )]);
         let b64 = dv.to_base64().expect("encode failed");
@@ -1126,28 +1139,29 @@ mod tests {
 
     #[test]
     fn test_as_accessors() {
+        let tm = TypeMap::latest();
         let dv = DataValue::Container(vec![
-            (DataTypeId(1), DataValue::Str("alice".to_string())),
-            (DataTypeId(2), DataValue::SignedNumber(42)),
-            (DataTypeId(3), DataValue::Bytes(vec![0x01, 0x02])),
-            (DataTypeId(4), DataValue::Array(vec![DataValue::BoolTrue])),
+            (DataType::Version.to_id(&tm), DataValue::Str("alice".to_string())),
+            (DataType::Id.to_id(&tm), DataValue::SignedNumber(42)),
+            (DataType::ClientNonce.to_id(&tm), DataValue::Bytes(vec![0x01, 0x02])),
+            (DataType::ServerNonce.to_id(&tm), DataValue::Array(vec![DataValue::BoolTrue])),
         ]);
 
         let map = dv.as_map().expect("should be a container");
         assert_eq!(
-            map.get(&DataTypeId(1)).and_then(|v| v.as_str()),
+            map.get(&DataType::Version.to_id(&tm)).and_then(|v| v.as_str()),
             Some("alice")
         );
         assert_eq!(
-            map.get(&DataTypeId(2)).and_then(|v| v.as_signed_number()),
+            map.get(&DataType::Id.to_id(&tm)).and_then(|v| v.as_signed_number()),
             Some(42)
         );
         assert_eq!(
-            map.get(&DataTypeId(3)).and_then(|v| v.as_bytes()),
+            map.get(&DataType::ClientNonce.to_id(&tm)).and_then(|v| v.as_bytes()),
             Some(vec![0x01, 0x02])
         );
         assert_eq!(
-            map.get(&DataTypeId(4)).and_then(|v| v.as_array()),
+            map.get(&DataType::ServerNonce.to_id(&tm)).and_then(|v| v.as_array()),
             Some(vec![DataValue::BoolTrue])
         );
     }
@@ -1168,9 +1182,10 @@ mod tests {
 
     #[test]
     fn test_container_from_map() {
+        let tm = TypeMap::latest();
         let mut map = BTreeMap::new();
-        map.insert(DataTypeId(1), DataValue::BoolTrue);
-        map.insert(DataTypeId(2), DataValue::SignedNumber(99));
+        map.insert(DataType::Version.to_id(&tm), DataValue::BoolTrue);
+        map.insert(DataType::Id.to_id(&tm), DataValue::SignedNumber(99));
         let dv = DataValue::container_from_map(&map);
         let container = dv.as_container().expect("should be container");
         assert_eq!(container.len(), 2);
@@ -1190,7 +1205,8 @@ mod tests {
 
     #[test]
     fn test_truncated_container_rejected() {
-        let dv = DataValue::Container(vec![(DataTypeId(1), DataValue::Str("hello".to_string()))]);
+        let tm = TypeMap::latest();
+        let dv = DataValue::Container(vec![(DataType::Version.to_id(&tm), DataValue::Str("hello".to_string()))]);
         let bytes = dv.to_bytes().expect("encode failed");
         // Truncate to fewer than 2 bytes so neither container nor array can be read
         assert!(DataValue::from_bytes(&bytes[..1]).is_none());
@@ -1246,9 +1262,10 @@ mod tests {
 
     #[test]
     fn test_container_display() {
+        let tm = TypeMap::latest();
         let dv = DataValue::Container(vec![
-            (DataTypeId(3), DataValue::Str("v2.0".to_string())),
-            (DataTypeId(6), DataValue::UnsignedNumber(42)),
+            (DataType::ServerNonce.to_id(&tm), DataValue::Str("v2.0".to_string())),
+            (DataType::PqSignature.to_id(&tm), DataValue::UnsignedNumber(42)),
         ]);
         let s = format!("{}", dv);
         assert!(s.contains("3:"));
@@ -1268,12 +1285,13 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_container_roundtrip() {
         use mtp_crypto::{EncryptionType, Keyring};
+        let tm = TypeMap::latest();
         let keyring = Keyring::generate();
         let bundle = keyring.public_key_bundle();
 
         let mut dv = DataValue::Container(vec![
-            (DataTypeId(1), DataValue::Str("secret".to_string())),
-            (DataTypeId(2), DataValue::UnsignedNumber(42)),
+            (DataType::Version.to_id(&tm), DataValue::Str("secret".to_string())),
+            (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(42)),
         ]);
 
         assert!(
@@ -1293,11 +1311,12 @@ mod tests {
     #[test]
     fn test_encrypt_container_wrong_key_fails() {
         use mtp_crypto::{EncryptionType, Keyring};
+        let tm = TypeMap::latest();
         let keyring_a = Keyring::generate();
         let keyring_b = Keyring::generate();
 
         let mut dv =
-            DataValue::Container(vec![(DataTypeId(1), DataValue::Str("secret".to_string()))]);
+            DataValue::Container(vec![(DataType::Version.to_id(&tm), DataValue::Str("secret".to_string()))]);
 
         assert!(
             dv.encrypt_container(
@@ -1314,10 +1333,11 @@ mod tests {
     #[test]
     fn test_encrypt_container_wrong_aad_fails() {
         use mtp_crypto::{EncryptionType, Keyring};
+        let tm = TypeMap::latest();
         let keyring = Keyring::generate();
 
         let mut dv =
-            DataValue::Container(vec![(DataTypeId(1), DataValue::Str("secret".to_string()))]);
+            DataValue::Container(vec![(DataType::Version.to_id(&tm), DataValue::Str("secret".to_string()))]);
 
         assert!(
             dv.encrypt_container(
@@ -1351,12 +1371,13 @@ mod tests {
     #[test]
     fn test_sign_verify_container_roundtrip() {
         use mtp_crypto::{Ed25519Signer, EncryptionType, Keyring, SigAlgorithm};
+        let tm = TypeMap::latest();
 
         let keyring = Keyring::generate();
         let (signer, sk, _pk) = Ed25519Signer::generate();
 
         let mut dv = DataValue::Container(vec![(
-            DataTypeId(1),
+            DataType::Version.to_id(&tm),
             DataValue::Str("signed data".to_string()),
         )]);
 
@@ -1390,13 +1411,14 @@ mod tests {
     #[test]
     fn test_sign_container_wrong_key_fails() {
         use mtp_crypto::{Ed25519Signer, SigAlgorithm};
+        let tm = TypeMap::latest();
 
         let (signer, _, _) = Ed25519Signer::generate();
         let (_, sk2, _) = Ed25519Signer::generate();
         let wrong_verifier = Ed25519Signer::new(&sk2).unwrap();
 
         let mut dv = DataValue::Container(vec![(
-            DataTypeId(1),
+            DataType::Version.to_id(&tm),
             DataValue::Str("signed data".to_string()),
         )]);
 

@@ -24,7 +24,7 @@ let pt = cipher.decrypt(&ct, b"aad")?;
 
 ## Signatures
 
-### Ed25519 (classical)
+### Ed25519
 
 ```rust
 use mtp_crypto::{Ed25519Signer, SignatureScheme};
@@ -34,7 +34,7 @@ let sig = signer.sign(b"message")?;
 signer.verify(b"message", &sig)?;
 ```
 
-### ML-DSA-65 (post-quantum, requires `pqc`)
+### ML-DSA-65
 
 ```rust
 use mtp_crypto::{MlDsaSigner, SignatureScheme};
@@ -47,7 +47,7 @@ signer.verify(b"message", &sig)?;
 let signer = MlDsaSigner::new(&sk, &pk)?;
 ```
 
-### Dual signatures (requires `pqc`)
+### Dual signatures
 
 ```rust
 use mtp_crypto::{sign_dual, DualSignature, Ed25519Signer, MlDsaSigner};
@@ -58,7 +58,7 @@ let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg");
 dual.verify(ed_signer.verifying_key(), ml_signer.verifying_key(), b"msg")?;
 ```
 
-## Hybrid KEM (requires `pqc`)
+## Hybrid KEM
 
 X25519 + ML-KEM-768. 64-byte shared secret. Feed into HKDF before use.
 

@@ -348,7 +348,7 @@ impl Keyring {
                     .get(*offset..*offset + 2)
                     .ok_or(CryptoError::InvalidKeyLength)?
                     .try_into()
-                    .unwrap(),
+                    .expect("slice is 2 bytes, verified above"),
             ) as usize;
             *offset += 2;
             let key = bytes

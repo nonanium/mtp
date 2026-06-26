@@ -4,6 +4,7 @@ pub mod error;
 pub mod message;
 pub mod transport;
 
+#[cfg(not(test))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(not(test))]

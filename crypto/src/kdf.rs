@@ -16,8 +16,10 @@ pub fn hkdf_expand(
 }
 
 pub fn hkdf_extract(ikm: &[u8], salt: &[u8]) -> [u8; 32] {
-    // Return the pseudo-random key (PRK) produced by HKDF-Extract directly.
-    // Extract cannot fail, so this avoids the panicking expand step entirely.
+    /*
+     * Return the pseudo-random key (PRK) produced by HKDF-Extract directly.
+     * Extract cannot fail, so this avoids the panicking expand step entirely.
+     */
     let (prk, _) = Hkdf::<Sha256>::extract(Some(salt), ikm);
     let mut out = [0u8; 32];
     out.copy_from_slice(&prk);

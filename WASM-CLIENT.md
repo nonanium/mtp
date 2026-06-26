@@ -97,7 +97,7 @@ await client.connect(config);
 
 Sends an `Identification` frame with the protocol version and client ID. The host may accept or reject. No cryptographic handshake occurs.
 
-### Authenticated Login (existing client ID)
+### Authenticated Login
 
 ```typescript
 const confirmedId = await client.auth_connect(
@@ -108,10 +108,14 @@ const confirmedId = await client.auth_connect(
 );
 ```
 
-Exchange: client sends a signed `Identification` frame, the host verifies it and
-responds with a signed `IdentificationResponse`. Returns the confirmed client ID.
+Exchange (challenge-response): the client sends an unsigned `Identification`
+hello, the host replies with a signed `Challenge` carrying a fresh
+`server_challenge`, the client signs that challenge in a `ChallengeResponse`, and
+the host verifies it and replies with a signed `IdentificationResponse`. Signing
+over the host-issued challenge is what prevents a captured proof from being
+replayed on another connection. Returns the confirmed client ID.
 
-### Registration (new client)
+### Registration
 
 ```typescript
 const newId = await client.auth_register(
@@ -121,8 +125,10 @@ const newId = await client.auth_register(
 );
 ```
 
-Exchange: client sends a signed `Register` frame with public keys, the host
-assigns a new ID and responds with a signed `RegisterResponse`. Returns the
+Exchange (challenge-response): the client sends an unsigned `Register` hello with
+its public keys, the host replies with a signed `Challenge`, the client signs it
+(binding the public-key bundle) in a `ChallengeResponse`, and the host verifies
+it, assigns a new ID, and responds with a signed `RegisterResponse`. Returns the
 newly assigned client ID.
 
 ## Sending and Receiving Messages

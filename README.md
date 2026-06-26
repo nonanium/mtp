@@ -2,7 +2,7 @@
 
 MTP is a modular transport protocol built on QUIC. It provides version-negotiable type maps, a binary codec, cryptographic primitives (classical and post-quantum), and host/client connection management with mutual authentication.
 
-There are Area specific docs when working with seperate concerns for the [Native-Client](./NATIVE-CLIENT.md), [WASM-Client](./WASM-CLIENT.md) & [Host](./NATIVE-HOST.md)
+See the area-specific docs for [Native Client](./NATIVE-CLIENT.md), [WASM Client](./WASM-CLIENT.md), and [Host](./NATIVE-HOST.md)
 
 ## Getting Started
 

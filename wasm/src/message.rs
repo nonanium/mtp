@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue};
 use mtp_crypto::{Ed25519Signer, EncryptionType, Keyring, PublicKeyBundle, SigAlgorithm};
-use mtp_type_map::communication_type_name;
+use mtp_type_map::{communication_type_name, TypeMap};
 
 use crate::error::js_error;
 
@@ -52,10 +52,10 @@ pub fn build_demo_message(
     let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)
         .map_err(|e| js_error(&format!("signer creation failed: {}", e)))?;
 
-    // Encrypted container (DataTypeId 1 = arbitrary custom)
+    // Encrypted container
     let inner_enc = DataValue::Container(vec![
-        (DataTypeId(1), DataValue::Str("secret inner data".into())),
-        (DataTypeId(2), DataValue::UnsignedNumber(42)),
+        (DataType::Version.to_id(&TypeMap::latest()), DataValue::Str("secret inner data".into())),
+        (DataType::Id.to_id(&TypeMap::latest()), DataValue::UnsignedNumber(42)),
     ]);
     let mut dv_enc = inner_enc;
     dv_enc
@@ -64,8 +64,8 @@ pub fn build_demo_message(
 
     // Signed container
     let inner_sig = DataValue::Container(vec![
-        (DataTypeId(1), DataValue::Str("signed by client".into())),
-        (DataTypeId(2), DataValue::UnsignedNumber(99)),
+        (DataType::Version.to_id(&TypeMap::latest()), DataValue::Str("signed by client".into())),
+        (DataType::Id.to_id(&TypeMap::latest()), DataValue::UnsignedNumber(99)),
     ]);
     let mut dv_sig = inner_sig;
     dv_sig
@@ -75,10 +75,10 @@ pub fn build_demo_message(
     // Signed + encrypted container
     let inner_sec = DataValue::Container(vec![
         (
-            DataTypeId(1),
+            DataType::Version.to_id(&TypeMap::latest()),
             DataValue::Str("signed+encrypted payload".into()),
         ),
-        (DataTypeId(2), DataValue::UnsignedNumber(7)),
+        (DataType::Id.to_id(&TypeMap::latest()), DataValue::UnsignedNumber(7)),
     ]);
     let mut dv_sec = inner_sec;
     dv_sec
@@ -115,24 +115,24 @@ pub fn parse_auth_response(response: &[u8]) -> Result<JsValue, JsValue> {
     let comm = CommunicationValue::from_bytes(response)
         .map_err(|e| js_error(&format!("parse failed: {}", e)))?;
 
-    let connected = matches!(comm.get_data(DataTypeId(11)), DataValue::BoolTrue);
+    let connected = matches!(comm.get_data(DataType::Connected.to_id(&TypeMap::latest())), DataValue::BoolTrue);
 
-    let client_nonce = match comm.get_data(DataTypeId(7)) {
+    let client_nonce = match comm.get_data(DataType::ClientNonce.to_id(&TypeMap::latest())) {
         DataValue::UnsignedNumber(n) => Some(*n),
         _ => None,
     };
 
-    let assigned_id = match comm.get_data(DataTypeId(6)) {
+    let assigned_id = match comm.get_data(DataType::Id.to_id(&TypeMap::latest())) {
         DataValue::UnsignedNumber(n) => Some(*n as u64),
         _ => None,
     };
 
-    let timestamp = match comm.get_data(DataTypeId(5)) {
+    let timestamp = match comm.get_data(DataType::Timestamp.to_id(&TypeMap::latest())) {
         DataValue::UnsignedNumber(n) => Some(*n),
         _ => None,
     };
 
-    let signature = match comm.get_data(DataTypeId(10)) {
+    let signature = match comm.get_data(DataType::Signature.to_id(&TypeMap::latest())) {
         DataValue::Bytes(b) => Some(b.clone()),
         _ => None,
     };
@@ -252,15 +252,16 @@ mod tests {
     fn build_ping_frame_roundtrip() {
         let bytes = build_ping_frame(42, "test-ping", 1234567890, &[]).expect("encode failed");
         let cv = CommunicationValue::from_bytes(&bytes).expect("decode failed");
+        let tm = TypeMap::latest();
 
-        assert_eq!(cv.get_type(), CommunicationTypeId(19)); // Ping
+        assert_eq!(cv.get_type(), CommunicationType::Ping.to_id(&tm));
         assert_eq!(cv.get_sender(), 42);
         assert_eq!(
-            cv.get_data(DataTypeId(4)),
+            cv.get_data(DataType::Description.to_id(&tm)),
             &DataValue::Str("test-ping".into())
         );
         assert_eq!(
-            cv.get_data(DataTypeId(5)),
+            cv.get_data(DataType::Timestamp.to_id(&tm)),
             &DataValue::UnsignedNumber(1234567890)
         );
     }
@@ -270,16 +271,17 @@ mod tests {
         let payload = b"attachment-data";
         let bytes = build_ping_frame(99, "with-data", 555, payload).expect("encode failed");
         let cv = CommunicationValue::from_bytes(&bytes).expect("decode failed");
+        let tm = TypeMap::latest();
 
-        assert_eq!(cv.get_type(), CommunicationTypeId(19));
+        assert_eq!(cv.get_type(), CommunicationType::Ping.to_id(&tm));
         assert_eq!(cv.get_sender(), 99);
         assert_eq!(
-            cv.get_data(DataTypeId(4)),
+            cv.get_data(DataType::Description.to_id(&tm)),
             &DataValue::Str("with-data".into())
         );
-        assert_eq!(cv.get_data(DataTypeId(5)), &DataValue::UnsignedNumber(555));
+        assert_eq!(cv.get_data(DataType::Timestamp.to_id(&tm)), &DataValue::UnsignedNumber(555));
         assert_eq!(
-            cv.get_data(DataTypeId(6)),
+            cv.get_data(DataType::Id.to_id(&tm)),
             &DataValue::Bytes(payload.to_vec())
         );
     }
@@ -304,11 +306,12 @@ mod tests {
 
         let bytes = result.unwrap();
         let cv = CommunicationValue::from_bytes(&bytes).expect("decode failed");
+        let tm = TypeMap::latest();
 
-        assert_eq!(cv.get_type(), CommunicationTypeId(19)); // Ping
+        assert_eq!(cv.get_type(), CommunicationType::Ping.to_id(&tm));
         assert_eq!(cv.get_sender(), 7);
         assert_eq!(
-            cv.get_data(DataTypeId(4)),
+            cv.get_data(DataType::Description.to_id(&tm)),
             &DataValue::Str("MTP WASM Demo".into())
         );
     }

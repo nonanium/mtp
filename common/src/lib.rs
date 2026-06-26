@@ -42,13 +42,11 @@ mod tests {
     }
 }
 
-// ===========================================================================
-// CommunicationError
-//
-// On native targets the full variant set (including quinn / wtransport
-// wrappers) is available.  On WASM only the transport-independent subset is
-// compiled.
-// ===========================================================================
+/* CommunicationError
+ *
+ * On native targets the full variant set (including quinn / wtransport
+ * wrappers) is available.  On WASM only the transport-independent subset is
+ * compiled. */
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Error, Clone)]
