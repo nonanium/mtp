@@ -1,18 +1,3 @@
 **target/
 *.pem
 *.key
-example-usage/dev-cert/
-
-# The root Cargo.lock and the example-usage workspace lockfile are committed:
-# the workspace ships binaries (example-usage/*) and a committed lockfile keeps
-# their builds reproducible. Workspace members do not own a lockfile (the root
-# one governs them); ignore any stray per-member lockfiles so they are not
-# committed by accident.
-/client/Cargo.lock
-/codec/Cargo.lock
-/common/Cargo.lock
-/crypto/Cargo.lock
-/host/Cargo.lock
-/transport/Cargo.lock
-/type-map/Cargo.lock
-/wasm/Cargo.lock
