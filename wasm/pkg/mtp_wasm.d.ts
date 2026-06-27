@@ -228,7 +228,6 @@ export interface InitOutput {
     readonly format_frame: (a: number, b: number) => [number, number, number, number];
     readonly parse_auth_response: (a: number, b: number) => [number, number, number];
     readonly parse_response_frame: (a: number, b: number) => [number, number, number, number];
-    readonly main: () => void;
     readonly __wbg_connectionconfig_free: (a: number, b: number) => void;
     readonly __wbg_wasmclient_free: (a: number, b: number) => void;
     readonly connectionconfig_client_id: (a: number) => bigint;
@@ -244,9 +243,10 @@ export interface InitOutput {
     readonly wasmclient_new: (a: any, b: any, c: any) => number;
     readonly wasmclient_send: (a: number, b: number, c: number) => any;
     readonly wasmclient_state: (a: number) => number;
+    readonly main: () => void;
     readonly wasm_bindgen__convert__closures_____invoke__h6588d25cdde23584: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__h5c81efa430e34369: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__h5c81efa430e34369_2: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen__convert__closures_____invoke__h2faccefeed15993f: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen__convert__closures_____invoke__h2faccefeed15993f_2: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h4bf2427f775cf424: (a: number, b: number, c: any, d: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

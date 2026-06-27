@@ -908,7 +908,6 @@ dependencies = [
  "mtp-crypto",
  "mtp-transport",
  "rand 0.8.6",
- "tokio",
 ]
 
 [[package]]
@@ -953,12 +952,12 @@ dependencies = [
 name = "mtp-host"
 version = "0.1.0"
 dependencies = [
+ "log",
  "mtp-codec",
  "mtp-common",
  "mtp-crypto",
  "mtp-transport",
  "rand 0.8.6",
- "tokio",
 ]
 
 [[package]]
@@ -968,10 +967,8 @@ dependencies = [
  "log",
  "mtp-codec",
  "mtp-common",
- "quinn",
  "rustls",
  "rustls-native-certs",
- "thiserror",
  "tokio",
  "wtransport",
 ]
@@ -1553,7 +1550,6 @@ dependencies = [
  "hex",
  "mtp",
  "rcgen",
- "serde_core",
  "serde_json",
  "tokio",
 ]

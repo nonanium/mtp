@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue};
 use mtp_crypto::{Ed25519Signer, EncryptionType, Keyring, PublicKeyBundle, SigAlgorithm};
-use mtp_type_map::{communication_type_name, TypeMap};
+use mtp_type_map::{TypeMap, communication_type_name};
 
 use crate::error::js_error;
 
@@ -54,8 +54,14 @@ pub fn build_demo_message(
 
     // Encrypted container
     let inner_enc = DataValue::Container(vec![
-        (DataType::Version.to_id(&TypeMap::latest()), DataValue::Str("secret inner data".into())),
-        (DataType::Id.to_id(&TypeMap::latest()), DataValue::UnsignedNumber(42)),
+        (
+            DataType::Version.to_id(&TypeMap::latest()),
+            DataValue::Str("secret inner data".into()),
+        ),
+        (
+            DataType::Id.to_id(&TypeMap::latest()),
+            DataValue::UnsignedNumber(42),
+        ),
     ]);
     let mut dv_enc = inner_enc;
     dv_enc
@@ -64,8 +70,14 @@ pub fn build_demo_message(
 
     // Signed container
     let inner_sig = DataValue::Container(vec![
-        (DataType::Version.to_id(&TypeMap::latest()), DataValue::Str("signed by client".into())),
-        (DataType::Id.to_id(&TypeMap::latest()), DataValue::UnsignedNumber(99)),
+        (
+            DataType::Version.to_id(&TypeMap::latest()),
+            DataValue::Str("signed by client".into()),
+        ),
+        (
+            DataType::Id.to_id(&TypeMap::latest()),
+            DataValue::UnsignedNumber(99),
+        ),
     ]);
     let mut dv_sig = inner_sig;
     dv_sig
@@ -78,7 +90,10 @@ pub fn build_demo_message(
             DataType::Version.to_id(&TypeMap::latest()),
             DataValue::Str("signed+encrypted payload".into()),
         ),
-        (DataType::Id.to_id(&TypeMap::latest()), DataValue::UnsignedNumber(7)),
+        (
+            DataType::Id.to_id(&TypeMap::latest()),
+            DataValue::UnsignedNumber(7),
+        ),
     ]);
     let mut dv_sec = inner_sec;
     dv_sec
@@ -115,7 +130,10 @@ pub fn parse_auth_response(response: &[u8]) -> Result<JsValue, JsValue> {
     let comm = CommunicationValue::from_bytes(response)
         .map_err(|e| js_error(&format!("parse failed: {}", e)))?;
 
-    let connected = matches!(comm.get_data(DataType::Connected.to_id(&TypeMap::latest())), DataValue::BoolTrue);
+    let connected = matches!(
+        comm.get_data(DataType::Connected.to_id(&TypeMap::latest())),
+        DataValue::BoolTrue
+    );
 
     let client_nonce = match comm.get_data(DataType::ClientNonce.to_id(&TypeMap::latest())) {
         DataValue::UnsignedNumber(n) => Some(*n),
@@ -279,7 +297,10 @@ mod tests {
             cv.get_data(DataType::Description.to_id(&tm)),
             &DataValue::Str("with-data".into())
         );
-        assert_eq!(cv.get_data(DataType::Timestamp.to_id(&tm)), &DataValue::UnsignedNumber(555));
+        assert_eq!(
+            cv.get_data(DataType::Timestamp.to_id(&tm)),
+            &DataValue::UnsignedNumber(555)
+        );
         assert_eq!(
             cv.get_data(DataType::Id.to_id(&tm)),
             &DataValue::Bytes(payload.to_vec())

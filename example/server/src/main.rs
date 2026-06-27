@@ -9,15 +9,15 @@ use std::path::Path;
 
 fn dev_cert_paths() -> (String, String) {
     let cert = std::env::var("MTP_DEV_CERT").unwrap_or_else(|_| {
-        if Path::new("example-usage/dev-cert/cert.pem").exists() {
-            "example-usage/dev-cert/cert.pem".to_string()
+        if Path::new("example/dev-cert/cert.pem").exists() {
+            "example/dev-cert/cert.pem".to_string()
         } else {
             "dev-cert/cert.pem".to_string()
         }
     });
     let key = std::env::var("MTP_DEV_KEY").unwrap_or_else(|_| {
-        if Path::new("example-usage/dev-cert/key.pem").exists() {
-            "example-usage/dev-cert/key.pem".to_string()
+        if Path::new("example/dev-cert/key.pem").exists() {
+            "example/dev-cert/key.pem".to_string()
         } else {
             "dev-cert/key.pem".to_string()
         }

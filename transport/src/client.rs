@@ -52,19 +52,7 @@ fn configure_client_with_cert(
             .map_err(|_| CommunicationError::CertificateParseFailed)?;
     }
 
-    let mut tls_config = RustlsClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    tls_config.alpn_protocols = vec![b"h3".to_vec()];
-
-    Ok(ClientConfig::builder()
-        .with_bind_default()
-        .with_custom_tls(tls_config)
-        .keep_alive_interval(policy.keep_alive_interval)
-        .max_idle_timeout(policy.max_idle_timeout)
-        .map_err(|e| CommunicationError::Other(e.to_string()))?
-        .build())
+    client_config_from_roots(root_store, policy)
 }
 
 fn configure_client_system_roots(policy: &Policy) -> Result<ClientConfig, CommunicationError> {
@@ -77,6 +65,13 @@ fn configure_client_system_roots(policy: &Policy) -> Result<ClientConfig, Commun
         root_store.add(cert).ok();
     }
 
+    client_config_from_roots(root_store, policy)
+}
+
+fn client_config_from_roots(
+    root_store: RootCertStore,
+    policy: &Policy,
+) -> Result<ClientConfig, CommunicationError> {
     let mut tls_config = RustlsClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();

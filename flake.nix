@@ -31,8 +31,18 @@
           name = "mtp-clippy";
           runtimeInputs = [rustToolchain];
           text = ''
-            export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example-usage/type-maps.yaml}"
-            cargo clippy --workspace --exclude mtp-wasm --all-targets --all-features -- -D warnings -W unreachable-pub
+            export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example/type-maps.yaml}"
+            cargo clippy --workspace --exclude mtp-wasm --all-targets --all-features -- -D warnings \
+              -W unreachable-pub \
+              -W clippy::cognitive_complexity \
+              -W clippy::missing_docs_in_private_items \
+              -W clippy::missing_errors_doc \
+              -W clippy::missing_panics_doc \
+              -W clippy::missing_safety_doc \
+              -W clippy::undocumented_unsafe_blocks \
+              -W clippy::pedantic \
+              -W clippy::restriction \
+              -A clippy::blanket_clippy_restriction_lints
           '';
         };
 
@@ -48,19 +58,19 @@
           name = "mtp-build-all";
           runtimeInputs = [rustToolchain pkgs.wasm-pack pkgs.bun clippyCheck macheteCheck];
           text = ''
-            export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example-usage/type-maps.yaml}"
+            export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example/type-maps.yaml}"
 
             bun install --frozen-lockfile
             cargo fmt --all --check
             cargo b
             cargo test --workspace --exclude mtp-wasm --all-features
-            cargo check --manifest-path example-usage/Cargo.toml --workspace --all-targets --all-features
+            cargo check --manifest-path example/Cargo.toml --workspace --all-targets --all-features
             mtp-clippy
             mtp-machete
             bun run dup
             RUSTFLAGS='--cfg web_sys_unstable_apis' wasm-pack build wasm --target web --out-dir pkg --release
-            bun --cwd example-usage/web-client install --frozen-lockfile
-            bun --cwd example-usage/web-client run build
+            bun install --cwd example/web-client --frozen-lockfile
+            bun run --cwd example/web-client build
           '';
         };
 
@@ -85,12 +95,12 @@
               openssl
             ];
 
-            MTP_TYPE_MAPS = "${toString ./example-usage/type-maps.yaml}";
+            MTP_TYPE_MAPS = "${toString ./example/type-maps.yaml}";
 
             shellHook = ''
               repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-              cert_dir="$repo_root/example-usage/dev-cert"
-              public_dir="$repo_root/example-usage/web-client/public"
+              cert_dir="$repo_root/example/dev-cert"
+              public_dir="$repo_root/example/web-client/public"
               cert_key="$cert_dir/key.pem"
               cert_pem="$cert_dir/cert.pem"
               cert_hash="$cert_dir/sha256.txt"
@@ -132,7 +142,7 @@
               mprocs
             ];
             shellHook = ''
-              nix develop --command bash -c "mprocs 'cd wasm && wasm-pack build --target web --out-dir pkg && cd ../example-usage/web-client && bun dev' 'cargo b && cd example-usage && cargo r --bin server' 'cd example-usage && cargo r --bin client'"
+              nix develop --command bash -c "mprocs 'cd wasm && wasm-pack build --target web --out-dir pkg && cd ../example/web-client && bun dev' 'cargo b && cd example && cargo r --bin server' 'cd example && cargo r --bin client'"
               exit
             '';
           };

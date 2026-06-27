@@ -18,6 +18,14 @@ pub trait AeadCipher: AeadEncrypt + AeadDecrypt {
     fn key_size() -> usize;
 }
 
+#[cfg(any(feature = "chacha20poly1305", feature = "aes-gcm"))]
+fn prepend_nonce(nonce: &[u8], ciphertext: &mut Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nonce.len() + ciphertext.len());
+    out.extend_from_slice(nonce);
+    out.append(ciphertext);
+    out
+}
+
 #[cfg(feature = "chacha20poly1305")]
 pub struct ChaCha20Poly1305 {
     key: [u8; 32],
@@ -53,10 +61,7 @@ impl AeadEncrypt for ChaCha20Poly1305 {
             .encrypt(nonce_ref, payload)
             .map_err(|_| CryptoError::EncryptionFailed)?;
 
-        let mut out = Vec::with_capacity(nonce.len() + ciphertext.len());
-        out.extend_from_slice(&nonce);
-        out.append(&mut ciphertext);
-        Ok(out)
+        Ok(prepend_nonce(&nonce, &mut ciphertext))
     }
 }
 
@@ -126,10 +131,7 @@ impl AeadEncrypt for Aes256Gcm {
             .encrypt(nonce_ref, payload)
             .map_err(|_| CryptoError::EncryptionFailed)?;
 
-        let mut out = Vec::with_capacity(nonce.len() + ciphertext.len());
-        out.extend_from_slice(&nonce);
-        out.append(&mut ciphertext);
-        Ok(out)
+        Ok(prepend_nonce(&nonce, &mut ciphertext))
     }
 }
 

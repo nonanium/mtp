@@ -9,8 +9,8 @@ use mtp::crypto::{KemPublicKey, PublicKeyBundle, SignaturePqPublicKey, Signature
 
 fn dev_cert_path() -> String {
     std::env::var("MTP_DEV_CERT").unwrap_or_else(|_| {
-        if Path::new("example-usage/dev-cert/cert.pem").exists() {
-            "example-usage/dev-cert/cert.pem".to_string()
+        if Path::new("example/dev-cert/cert.pem").exists() {
+            "example/dev-cert/cert.pem".to_string()
         } else {
             "dev-cert/cert.pem".to_string()
         }

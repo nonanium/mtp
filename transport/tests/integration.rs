@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-use mtp_codec::{CommunicationType, DataType, TypeMap};
-use mtp_transport::{Policy, connect, host};
+use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap};
+use mtp_transport::{Host, Policy, Receiver, Sender, connect, host};
 
 fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
     let key_pair = rcgen::KeyPair::generate().unwrap();
@@ -13,10 +13,8 @@ fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
     (cert_pem.into_bytes(), key_pem.into_bytes())
 }
 
-#[tokio::test]
-async fn test_host_start_and_stop() {
-    let (cert_pem, key_pem) = generate_self_signed_cert();
-    let h = host(
+async fn start_test_host(cert_pem: Vec<u8>, key_pem: Vec<u8>) -> Host {
+    host(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         0,
         cert_pem,
@@ -24,7 +22,48 @@ async fn test_host_start_and_stop() {
         Policy::default(),
     )
     .await
-    .unwrap();
+    .unwrap()
+}
+
+async fn connect_to_host(h: &Host, cert_pem: Vec<u8>) -> (Sender, Receiver) {
+    let url = format!("https://127.0.0.1:{}", h.local_addr().port());
+    connect(&url, Some(cert_pem), Policy::default())
+        .await
+        .unwrap()
+}
+
+async fn connected_pair() -> (Host, Sender, Receiver, Sender, Receiver) {
+    let (cert_pem, key_pem) = generate_self_signed_cert();
+    let mut h = start_test_host(cert_pem.clone(), key_pem).await;
+    let (client_tx, client_rx) = connect_to_host(&h, cert_pem).await;
+    let (host_tx, host_rx) = h.next().await.unwrap();
+    (h, client_tx, client_rx, host_tx, host_rx)
+}
+
+fn numbered_message(comm_type: CommunicationType, value: u128, tm: &TypeMap) -> CommunicationValue {
+    CommunicationValue::new(comm_type).add_data(
+        DataType::PqSignature.to_id(tm),
+        DataValue::UnsignedNumber(value),
+    )
+}
+
+fn assert_numbered_message(
+    message: &CommunicationValue,
+    comm_type: CommunicationType,
+    value: u128,
+    tm: &TypeMap,
+) {
+    assert_eq!(message.get_type(), comm_type.to_id(tm));
+    assert_eq!(
+        message.get_data(DataType::PqSignature.to_id(tm)).clone(),
+        DataValue::UnsignedNumber(value)
+    );
+}
+
+#[tokio::test]
+async fn test_host_start_and_stop() {
+    let (cert_pem, key_pem) = generate_self_signed_cert();
+    let h = start_test_host(cert_pem, key_pem).await;
     let addr = h.local_addr();
     // Port should be non-zero (OS-assigned)
     assert!(addr.port() > 0);
@@ -32,58 +71,25 @@ async fn test_host_start_and_stop() {
 
 #[tokio::test]
 async fn test_send_receive_roundtrip() {
-    let (cert_pem, key_pem) = generate_self_signed_cert();
-    let mut h = host(
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        0,
-        cert_pem.clone(),
-        key_pem,
-        Policy::default(),
-    )
-    .await
-    .unwrap();
-    let addr = h.local_addr();
-
-    let url = format!("https://127.0.0.1:{}", addr.port());
-    let (client_tx, client_rx) = connect(&url, Some(cert_pem), Policy::default())
-        .await
-        .unwrap();
-
-    // Accept on host side
-    let (host_tx, host_rx) = h.next().await.unwrap();
+    let (_h, client_tx, client_rx, host_tx, host_rx) = connected_pair().await;
 
     let tm = TypeMap::latest();
 
     // Client sends a simple message
-    let msg = mtp_codec::CommunicationValue::new(CommunicationType::Ping).add_data(
-        DataType::PqSignature.to_id(&tm),
-        mtp_codec::DataValue::UnsignedNumber(42),
-    );
+    let msg = numbered_message(CommunicationType::Ping, 42, &tm);
     client_tx.send(&msg).await.unwrap();
 
     // Host receives it
     let received = host_rx.receive().await.unwrap();
-    assert_eq!(received.get_type(), CommunicationType::Ping.to_id(&tm));
-    let val = received.get_data(DataType::PqSignature.to_id(&tm)).clone();
-    assert_eq!(val, mtp_codec::DataValue::UnsignedNumber(42));
+    assert_numbered_message(&received, CommunicationType::Ping, 42, &tm);
 
     // Host sends a response
-    let resp = mtp_codec::CommunicationValue::new(CommunicationType::Pong).add_data(
-        DataType::PqSignature.to_id(&tm),
-        mtp_codec::DataValue::UnsignedNumber(99),
-    );
+    let resp = numbered_message(CommunicationType::Pong, 99, &tm);
     host_tx.send(&resp).await.unwrap();
 
     // Client receives it
     let client_received = client_rx.receive().await.unwrap();
-    assert_eq!(
-        client_received.get_type(),
-        CommunicationType::Pong.to_id(&tm)
-    );
-    let client_val = client_received
-        .get_data(DataType::PqSignature.to_id(&tm))
-        .clone();
-    assert_eq!(client_val, mtp_codec::DataValue::UnsignedNumber(99));
+    assert_numbered_message(&client_received, CommunicationType::Pong, 99, &tm);
 
     // Close both sides
     client_tx.close();
@@ -92,56 +98,31 @@ async fn test_send_receive_roundtrip() {
 
 #[tokio::test]
 async fn test_concurrent_messages() {
-    let (cert_pem, key_pem) = generate_self_signed_cert();
-    let mut h = host(
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        0,
-        cert_pem.clone(),
-        key_pem,
-        Policy::default(),
-    )
-    .await
-    .unwrap();
-    let addr = h.local_addr();
-
-    let url = format!("https://127.0.0.1:{}", addr.port());
-    let (client_tx, _client_rx) = connect(&url, Some(cert_pem), Policy::default())
-        .await
-        .unwrap();
-
-    let (_host_tx, host_rx) = h.next().await.unwrap();
+    let (_h, client_tx, _client_rx, _host_tx, host_rx) = connected_pair().await;
 
     let tm = TypeMap::latest();
 
     // Send 5 messages in sequence
     for i in 0..5u128 {
-        let msg = mtp_codec::CommunicationValue::new(CommunicationType::Ping).add_data(
-            DataType::PqSignature.to_id(&tm),
-            mtp_codec::DataValue::UnsignedNumber(i),
-        );
+        let msg = numbered_message(CommunicationType::Ping, i, &tm);
         client_tx.send(&msg).await.unwrap();
     }
 
     // Receive all 5 in order
     for i in 0..5u128 {
         let received = host_rx.receive().await.unwrap();
-        let val = received.get_data(DataType::PqSignature.to_id(&tm)).clone();
-        assert_eq!(val, mtp_codec::DataValue::UnsignedNumber(i));
+        assert_numbered_message(&received, CommunicationType::Ping, i, &tm);
     }
 
     // Send 3 responses back
     for i in 0..3u128 {
-        let msg = mtp_codec::CommunicationValue::new(CommunicationType::Pong).add_data(
-            DataType::PqSignature.to_id(&tm),
-            mtp_codec::DataValue::UnsignedNumber(i * 10),
-        );
+        let msg = numbered_message(CommunicationType::Pong, i * 10, &tm);
         client_tx.send(&msg).await.unwrap();
     }
 
     for i in 0..3u128 {
         let received = host_rx.receive().await.unwrap();
-        let val = received.get_data(DataType::PqSignature.to_id(&tm)).clone();
-        assert_eq!(val, mtp_codec::DataValue::UnsignedNumber(i * 10));
+        assert_numbered_message(&received, CommunicationType::Pong, i * 10, &tm);
     }
 
     client_tx.close();
@@ -149,27 +130,10 @@ async fn test_concurrent_messages() {
 
 #[tokio::test]
 async fn test_close_detection() {
-    let (cert_pem, key_pem) = generate_self_signed_cert();
-    let mut h = host(
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        0,
-        cert_pem.clone(),
-        key_pem,
-        Policy::default(),
-    )
-    .await
-    .unwrap();
-    let addr = h.local_addr();
-
-    let url = format!("https://127.0.0.1:{}", addr.port());
-    let (client_tx, _client_rx) = connect(&url, Some(cert_pem), Policy::default())
-        .await
-        .unwrap();
-
-    let (_host_tx, host_rx) = h.next().await.unwrap();
+    let (_h, client_tx, _client_rx, _host_tx, host_rx) = connected_pair().await;
 
     // Send a message then close
-    let msg = mtp_codec::CommunicationValue::new(CommunicationType::Ping);
+    let msg = CommunicationValue::new(CommunicationType::Ping);
     client_tx.send(&msg).await.unwrap();
     client_tx.close();
 
@@ -186,17 +150,8 @@ async fn test_close_detection() {
 #[tokio::test]
 async fn test_host_shutdown_stops_accepting() {
     let (cert_pem, key_pem) = generate_self_signed_cert();
-    let mut h = host(
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        0,
-        cert_pem.clone(),
-        key_pem,
-        Policy::default(),
-    )
-    .await
-    .unwrap();
-    let addr = h.local_addr();
-    let url = format!("https://127.0.0.1:{}", addr.port());
+    let mut h = start_test_host(cert_pem.clone(), key_pem).await;
+    let url = format!("https://127.0.0.1:{}", h.local_addr().port());
 
     // A connection succeeds while the host is accepting.
     let (_c_tx, _c_rx) = connect(&url, Some(cert_pem.clone()), Policy::default())
@@ -222,27 +177,10 @@ async fn test_host_shutdown_stops_accepting() {
 
 #[tokio::test]
 async fn test_drop_receiver_keeps_sender_alive() {
-    let (cert_pem, key_pem) = generate_self_signed_cert();
-    let mut h = host(
-        IpAddr::V4(Ipv4Addr::LOCALHOST),
-        0,
-        cert_pem.clone(),
-        key_pem,
-        Policy::default(),
-    )
-    .await
-    .unwrap();
-    let addr = h.local_addr();
-
-    let url = format!("https://127.0.0.1:{}", addr.port());
-    let (client_tx, client_rx) = connect(&url, Some(cert_pem), Policy::default())
-        .await
-        .unwrap();
-
-    let (host_tx, host_rx) = h.next().await.unwrap();
+    let (_h, client_tx, client_rx, host_tx, host_rx) = connected_pair().await;
 
     // Client sends a message the host receives.
-    let msg = mtp_codec::CommunicationValue::new(CommunicationType::Ping);
+    let msg = CommunicationValue::new(CommunicationType::Ping);
     client_tx.send(&msg).await.unwrap();
     let _ = host_rx.receive().await.unwrap();
 
@@ -252,18 +190,11 @@ async fn test_drop_receiver_keeps_sender_alive() {
 
     let tm = TypeMap::latest();
 
-    let resp = mtp_codec::CommunicationValue::new(CommunicationType::Pong).add_data(
-        DataType::PqSignature.to_id(&tm),
-        mtp_codec::DataValue::UnsignedNumber(7),
-    );
+    let resp = numbered_message(CommunicationType::Pong, 7, &tm);
     host_tx.send(&resp).await.unwrap();
 
     let got = client_rx.receive().await.unwrap();
-    assert_eq!(got.get_type(), CommunicationType::Pong.to_id(&tm));
-    assert_eq!(
-        got.get_data(DataType::PqSignature.to_id(&tm)).clone(),
-        mtp_codec::DataValue::UnsignedNumber(7)
-    );
+    assert_numbered_message(&got, CommunicationType::Pong, 7, &tm);
 
     client_tx.close();
     host_tx.close();

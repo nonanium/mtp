@@ -51,10 +51,18 @@ enum FrameOutcome {
  *   [11..]   id/sender/receiver/signature/data, gated by `flags`
  */
 fn log_frame_bytes(wire: &[u8]) {
-    let hex: String = wire.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let hex: String = wire
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
 
-    let outer_len = wire.get(0..4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
-    let inner_len = wire.get(4..8).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let outer_len = wire
+        .get(0..4)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let inner_len = wire
+        .get(4..8)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
     let comm_type = wire.get(8..10).map(|b| u16::from_be_bytes([b[0], b[1]]));
     let flags = wire.get(10).copied();
 

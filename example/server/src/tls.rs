@@ -52,7 +52,7 @@ pub fn export_webtransport_cert_hash(hash: &str) -> Result<(), Box<dyn std::erro
     let public_dir = if Path::new("web-client").exists() {
         Path::new("web-client/public")
     } else {
-        Path::new("example-usage/web-client/public")
+        Path::new("example/web-client/public")
     };
     fs::create_dir_all(public_dir)?;
     fs::write(public_dir.join("mtp_dev_cert_hash.txt"), hash)?;
@@ -60,7 +60,7 @@ pub fn export_webtransport_cert_hash(hash: &str) -> Result<(), Box<dyn std::erro
     let dev_cert_dir = if Path::new("dev-cert").exists() {
         Path::new("dev-cert")
     } else {
-        Path::new("example-usage/dev-cert")
+        Path::new("example/dev-cert")
     };
     if dev_cert_dir.exists() {
         fs::write(dev_cert_dir.join("sha256.txt"), hash)?;

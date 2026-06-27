@@ -123,10 +123,7 @@ const RESERVED_DATA_TYPES: &[ReservedEntry] = &[
         name: "Version",
         id: 0,
     },
-    ReservedEntry {
-        name: "Id",
-        id: 1,
-    },
+    ReservedEntry { name: "Id", id: 1 },
     ReservedEntry {
         name: "ClientNonce",
         id: 2,
@@ -275,18 +272,7 @@ fn generate(config: &Config, multi_version: bool) -> String {
 }
 
 fn generate_protocol_version(out: &mut String, config: &Config) {
-    let (major, minor) = if config.protocol_version.is_empty() {
-        (0, 0)
-    } else {
-        let parts: Vec<&str> = config.protocol_version.split('.').collect();
-        if parts.len() == 2 {
-            let maj = parts[0].parse::<u16>().unwrap_or(0);
-            let min = parts[1].parse::<u16>().unwrap_or(0);
-            (maj, min)
-        } else {
-            (0, 0)
-        }
-    };
+    let (major, minor) = parse_protocol_version(&config.protocol_version);
     writeln!(
         out,
         "pub const PROTOCOL_VERSION: Version = Version({}, {});",
@@ -297,18 +283,7 @@ fn generate_protocol_version(out: &mut String, config: &Config) {
 }
 
 fn generate_latest_method(out: &mut String, config: &Config) {
-    let (major, minor) = if config.protocol_version.is_empty() {
-        (0, 0)
-    } else {
-        let parts: Vec<&str> = config.protocol_version.split('.').collect();
-        if parts.len() == 2 {
-            let maj = parts[0].parse::<u16>().unwrap_or(0);
-            let min = parts[1].parse::<u16>().unwrap_or(0);
-            (maj, min)
-        } else {
-            (0, 0)
-        }
-    };
+    let (major, minor) = parse_protocol_version(&config.protocol_version);
     writeln!(out, "impl TypeMap {{").unwrap();
     writeln!(out, "    pub fn latest() -> Self {{").unwrap();
     writeln!(
@@ -320,6 +295,17 @@ fn generate_latest_method(out: &mut String, config: &Config) {
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
+}
+
+fn parse_protocol_version(version: &str) -> (u16, u16) {
+    let Some((major, minor)) = version.split_once('.') else {
+        return (0, 0);
+    };
+
+    (
+        major.parse::<u16>().unwrap_or(0),
+        minor.parse::<u16>().unwrap_or(0),
+    )
 }
 
 fn generate_comm_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {

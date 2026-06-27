@@ -103,6 +103,33 @@ fn verify_host_final(
     Ok(())
 }
 
+fn random_nonce() -> Result<u128, JsValue> {
+    let mut nonce_bytes = [0u8; 16];
+    getrandom::fill(&mut nonce_bytes).map_err(|_| js_error("rng failed"))?;
+    Ok(u128::from_be_bytes(nonce_bytes))
+}
+
+fn signed_challenge_response_bytes(
+    keyring: &mtp_crypto::Keyring,
+    proof_payload: &[u8],
+    client_nonce: u128,
+) -> Result<Vec<u8>, JsValue> {
+    let signer = mtp_crypto::Ed25519Signer::new(&keyring.sig_cl_secret_key)
+        .map_err(|e| js_error(&format!("signer creation failed: {}", e)))?;
+    let signature = signer
+        .sign(proof_payload)
+        .map_err(|e| js_error(&format!("signature failed: {}", e)))?;
+
+    CommunicationValue::new(CommunicationType::ChallengeResponse)
+        .add_typed_default(
+            DataType::ClientNonce,
+            DataValue::UnsignedNumber(client_nonce),
+        )
+        .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
+        .to_bytes()
+        .map_err(|e| js_error(&format!("encode failed: {}", e)))
+}
+
 #[wasm_bindgen]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -206,17 +233,7 @@ impl WasmClient {
             .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
         transport.send_frame(&ident_bytes).await?;
 
-        let loop_transport = transport.clone();
-        self.transport = Some(transport);
-        self.set_state(ConnectionState::Connected);
-
-        let state = self.state.clone();
-        let on_msg = self.on_message.clone();
-        let on_err = self.on_error.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            loop_transport.receive_loop(on_msg, on_err).await;
-            state.set(ConnectionState::Disconnected);
-        });
+        self.start_receive_loop(transport);
         Ok(())
     }
 
@@ -258,38 +275,18 @@ impl WasmClient {
         transport.send_frame(&hello).await?;
 
         // 2. Receive and verify the host's challenge.
-        let challenge_bytes = transport.read_one_frame().await?;
-        let challenge = CommunicationValue::from_bytes(&challenge_bytes)
-            .map_err(|e| js_error(&format!("parse challenge: {}", e)))?;
-        let expected = CommunicationType::Challenge.to_id(&tm);
-        if challenge.get_type() != expected {
-            self.set_state(ConnectionState::Disconnected);
-            return Err(unexpected_response_type_error(
+        let server_challenge = self
+            .read_verified_challenge(
+                &transport,
+                &tm,
+                &host_pk,
+                client_id,
                 "auth_connect challenge",
-                expected,
-                challenge.get_type(),
-                &challenge_bytes,
-                &challenge,
-            ));
-        }
-        let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(&tm)) {
-            DataValue::UnsignedNumber(n) => *n,
-            _ => {
-                self.set_state(ConnectionState::Disconnected);
-                return Err(js_error("missing server challenge"));
-            }
-        };
-        if let Err(e) =
-            verify_host_challenge(&challenge, &tm, &host_pk, client_id, server_challenge)
-        {
-            self.set_state(ConnectionState::Disconnected);
-            return Err(e);
-        }
+            )
+            .await?;
 
         // 3. Sign the host's challenge and send the proof.
-        let mut nonce_bytes = [0u8; 16];
-        getrandom::fill(&mut nonce_bytes).map_err(|_| js_error("rng failed"))?;
-        let client_nonce = u128::from_be_bytes(nonce_bytes);
+        let client_nonce = random_nonce()?;
 
         let proof_payload = mtp_crypto::auth::login_proof_payload(
             &version_str,
@@ -297,20 +294,7 @@ impl WasmClient {
             server_challenge,
             client_nonce,
         );
-        let signer = mtp_crypto::Ed25519Signer::new(&keyring.sig_cl_secret_key)
-            .map_err(|e| js_error(&format!("signer creation failed: {}", e)))?;
-        let signature = signer
-            .sign(&proof_payload)
-            .map_err(|e| js_error(&format!("signature failed: {}", e)))?;
-
-        let proof = CommunicationValue::new(CommunicationType::ChallengeResponse)
-            .add_typed_default(
-                DataType::ClientNonce,
-                DataValue::UnsignedNumber(client_nonce),
-            )
-            .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
-            .to_bytes()
-            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        let proof = signed_challenge_response_bytes(&keyring, &proof_payload, client_nonce)?;
         transport.send_frame(&proof).await?;
 
         // 4. Receive and verify the host's final confirmation.
@@ -357,17 +341,7 @@ impl WasmClient {
             }
         };
 
-        let loop_transport = transport.clone();
-        self.transport = Some(transport);
-        self.set_state(ConnectionState::Connected);
-
-        let state = self.state.clone();
-        let on_msg = self.on_message.clone();
-        let on_err = self.on_error.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            loop_transport.receive_loop(on_msg, on_err).await;
-            state.set(ConnectionState::Disconnected);
-        });
+        self.start_receive_loop(transport);
 
         Ok(assigned_id)
     }
@@ -409,36 +383,12 @@ impl WasmClient {
         transport.send_frame(&hello).await?;
 
         // 2. Receive and verify the host's challenge (register binds id = 0).
-        let challenge_bytes = transport.read_one_frame().await?;
-        let challenge = CommunicationValue::from_bytes(&challenge_bytes)
-            .map_err(|e| js_error(&format!("parse challenge: {}", e)))?;
-        let expected = CommunicationType::Challenge.to_id(&tm);
-        if challenge.get_type() != expected {
-            self.set_state(ConnectionState::Disconnected);
-            return Err(unexpected_response_type_error(
-                "auth_register challenge",
-                expected,
-                challenge.get_type(),
-                &challenge_bytes,
-                &challenge,
-            ));
-        }
-        let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(&tm)) {
-            DataValue::UnsignedNumber(n) => *n,
-            _ => {
-                self.set_state(ConnectionState::Disconnected);
-                return Err(js_error("missing server challenge"));
-            }
-        };
-        if let Err(e) = verify_host_challenge(&challenge, &tm, &host_pk, 0, server_challenge) {
-            self.set_state(ConnectionState::Disconnected);
-            return Err(e);
-        }
+        let server_challenge = self
+            .read_verified_challenge(&transport, &tm, &host_pk, 0, "auth_register challenge")
+            .await?;
 
         // 3. Sign the host's challenge over the bundle and send the proof.
-        let mut nonce_bytes = [0u8; 16];
-        getrandom::fill(&mut nonce_bytes).map_err(|_| js_error("rng failed"))?;
-        let client_nonce = u128::from_be_bytes(nonce_bytes);
+        let client_nonce = random_nonce()?;
 
         let proof_payload = mtp_crypto::auth::register_proof_payload(
             &version_str,
@@ -446,20 +396,7 @@ impl WasmClient {
             server_challenge,
             client_nonce,
         );
-        let signer = mtp_crypto::Ed25519Signer::new(&keyring.sig_cl_secret_key)
-            .map_err(|e| js_error(&format!("signer creation failed: {}", e)))?;
-        let signature = signer
-            .sign(&proof_payload)
-            .map_err(|e| js_error(&format!("signature failed: {}", e)))?;
-
-        let proof = CommunicationValue::new(CommunicationType::ChallengeResponse)
-            .add_typed_default(
-                DataType::ClientNonce,
-                DataValue::UnsignedNumber(client_nonce),
-            )
-            .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
-            .to_bytes()
-            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        let proof = signed_challenge_response_bytes(&keyring, &proof_payload, client_nonce)?;
         transport.send_frame(&proof).await?;
 
         // 4. Receive the host's final confirmation; extract + verify assigned id.
@@ -505,17 +442,7 @@ impl WasmClient {
             return Err(e);
         }
 
-        let loop_transport = transport.clone();
-        self.transport = Some(transport);
-        self.set_state(ConnectionState::Connected);
-
-        let state = self.state.clone();
-        let on_msg = self.on_message.clone();
-        let on_err = self.on_error.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            loop_transport.receive_loop(on_msg, on_err).await;
-            state.set(ConnectionState::Disconnected);
-        });
+        self.start_receive_loop(transport);
 
         Ok(assigned_id)
     }
@@ -542,5 +469,58 @@ impl WasmClient {
         let _ = self
             .on_state_change
             .call1(&JsValue::NULL, &JsValue::from(new_state as u8));
+    }
+
+    fn start_receive_loop(&mut self, transport: WasmTransport) {
+        let loop_transport = transport.clone();
+        self.transport = Some(transport);
+        self.set_state(ConnectionState::Connected);
+
+        let state = self.state.clone();
+        let on_msg = self.on_message.clone();
+        let on_err = self.on_error.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            loop_transport.receive_loop(on_msg, on_err).await;
+            state.set(ConnectionState::Disconnected);
+        });
+    }
+
+    async fn read_verified_challenge(
+        &self,
+        transport: &WasmTransport,
+        tm: &mtp_codec::TypeMap,
+        host_pk: &mtp_crypto::PublicKeyBundle,
+        bound_id: u64,
+        context: &str,
+    ) -> Result<u128, JsValue> {
+        let challenge_bytes = transport.read_one_frame().await?;
+        let challenge = CommunicationValue::from_bytes(&challenge_bytes)
+            .map_err(|e| js_error(&format!("parse challenge: {}", e)))?;
+        let expected = CommunicationType::Challenge.to_id(tm);
+        if challenge.get_type() != expected {
+            self.set_state(ConnectionState::Disconnected);
+            return Err(unexpected_response_type_error(
+                context,
+                expected,
+                challenge.get_type(),
+                &challenge_bytes,
+                &challenge,
+            ));
+        }
+
+        let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(tm)) {
+            DataValue::UnsignedNumber(n) => *n,
+            _ => {
+                self.set_state(ConnectionState::Disconnected);
+                return Err(js_error("missing server challenge"));
+            }
+        };
+
+        if let Err(e) = verify_host_challenge(&challenge, tm, host_pk, bound_id, server_challenge) {
+            self.set_state(ConnectionState::Disconnected);
+            return Err(e);
+        }
+
+        Ok(server_challenge)
     }
 }

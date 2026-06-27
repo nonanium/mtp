@@ -43,8 +43,18 @@ jobs:
       - name: Run clippy
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          export MTP_TYPE_MAPS="$PWD/example-usage/type-maps.yaml"
-          cargo clippy --workspace --exclude mtp-wasm --all-targets --all-features -- -D warnings -W unreachable-pub
+          export MTP_TYPE_MAPS="$PWD/example/type-maps.yaml"
+          cargo clippy --workspace --exclude mtp-wasm --all-targets --all-features -- -D warnings \
+            -W unreachable-pub \
+            -W clippy::cognitive_complexity \
+            -W clippy::missing_docs_in_private_items \
+            -W clippy::missing_errors_doc \
+            -W clippy::missing_panics_doc \
+            -W clippy::missing_safety_doc \
+            -W clippy::undocumented_unsafe_blocks \
+            -W clippy::pedantic \
+            -W clippy::restriction \
+            -A clippy::blanket_clippy_restriction_lints
 
   test:
     name: test
@@ -62,7 +72,7 @@ jobs:
       - name: Run tests
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          export MTP_TYPE_MAPS="$PWD/example-usage/type-maps.yaml"
+          export MTP_TYPE_MAPS="$PWD/example/type-maps.yaml"
           cargo test --workspace --exclude mtp-wasm --all-features
 
   wasm:
@@ -81,13 +91,13 @@ jobs:
       - name: Build wasm crate
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          export MTP_TYPE_MAPS="$PWD/example-usage/type-maps.yaml"
+          export MTP_TYPE_MAPS="$PWD/example/type-maps.yaml"
           cargo build -p mtp-wasm --target wasm32-unknown-unknown
         env:
           RUSTFLAGS: --cfg web_sys_unstable_apis
 
-  example-usage:
-    name: example usage
+  example:
+    name: example
     runs-on: docker
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
@@ -100,7 +110,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 
       - name: Check example usage workspace
-        working-directory: example-usage
+        working-directory: example
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           export MTP_TYPE_MAPS="$PWD/type-maps.yaml"
@@ -194,7 +204,7 @@ jobs:
       - name: Build wasm package
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          export MTP_TYPE_MAPS="$PWD/example-usage/type-maps.yaml"
+          export MTP_TYPE_MAPS="$PWD/example/type-maps.yaml"
           wasm-pack build wasm --target web
         env:
           RUSTFLAGS: --cfg web_sys_unstable_apis
@@ -204,13 +214,13 @@ jobs:
           curl -fsSL https://bun.sh/install | bash
 
       - name: Install dependencies
-        working-directory: example-usage/web-client
+        working-directory: example/web-client
         run: |
           export PATH="$HOME/.bun/bin:$PATH"
           bun install --frozen-lockfile
 
       - name: Build web client
-        working-directory: example-usage/web-client
+        working-directory: example/web-client
         run: |
           export PATH="$HOME/.bun/bin:$PATH"
           bun run build

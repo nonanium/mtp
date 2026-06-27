@@ -477,8 +477,7 @@ impl DataValue {
         let kind = Self::kind_marker(value);
         buf.push(kind);
 
-        if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL
-        {
+        if Self::kind_has_no_payload(kind) {
             buf.write_u16::<BigEndian>(key.0)
                 .map_err(|_| CodecError::InvalidEncoding)?;
             return Ok(());
@@ -513,8 +512,7 @@ impl DataValue {
         let kind = Self::kind_marker(value);
         buf.push(kind);
 
-        if kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL
-        {
+        if Self::kind_has_no_payload(kind) {
             return Ok(());
         }
 
@@ -625,18 +623,9 @@ impl DataValue {
         for _ in 0..count {
             let kind = cursor.read_u8().ok()?;
 
-            if kind == Self::KIND_BOOL_TRUE
-                || kind == Self::KIND_BOOL_FALSE
-                || kind == Self::KIND_NULL
-            {
+            if Self::kind_has_no_payload(kind) {
                 let key = DataTypeId(cursor.read_u16::<BigEndian>().ok()?);
-                let value = if kind == Self::KIND_BOOL_TRUE {
-                    DataValue::BoolTrue
-                } else if kind == Self::KIND_BOOL_FALSE {
-                    DataValue::BoolFalse
-                } else {
-                    DataValue::Null
-                };
+                let value = Self::read_payloadless_value(kind)?;
                 entries.push((key, value));
                 continue;
             }
@@ -644,20 +633,12 @@ impl DataValue {
             let len = cursor.read_u32::<BigEndian>().ok()? as usize;
             let key = DataTypeId(cursor.read_u16::<BigEndian>().ok()?);
 
-            let start = cursor.position() as usize;
-            let end = start.checked_add(len)?;
-            if end > cursor.get_ref().len() {
-                return None;
-            }
-
-            let payload = &cursor.get_ref()[start..end];
+            let payload = Self::read_payload_slice(cursor, len)?;
             let mut inner = Cursor::new(payload);
             let value = Self::read_value_by_kind(&mut inner, kind, Some(len))?;
             if inner.position() as usize != len {
                 return None;
             }
-
-            cursor.set_position(end as u64);
             entries.push((key, value));
         }
 
@@ -675,36 +656,19 @@ impl DataValue {
         for _ in 0..count {
             let kind = cursor.read_u8().ok()?;
 
-            if kind == Self::KIND_BOOL_TRUE
-                || kind == Self::KIND_BOOL_FALSE
-                || kind == Self::KIND_NULL
-            {
-                let value = if kind == Self::KIND_BOOL_TRUE {
-                    DataValue::BoolTrue
-                } else if kind == Self::KIND_BOOL_FALSE {
-                    DataValue::BoolFalse
-                } else {
-                    DataValue::Null
-                };
+            if Self::kind_has_no_payload(kind) {
+                let value = Self::read_payloadless_value(kind)?;
                 out.push(value);
                 continue;
             }
 
             let len = cursor.read_u32::<BigEndian>().ok()? as usize;
-            let start = cursor.position() as usize;
-            let end = start.checked_add(len)?;
-            if end > cursor.get_ref().len() {
-                return None;
-            }
-
-            let payload = &cursor.get_ref()[start..end];
+            let payload = Self::read_payload_slice(cursor, len)?;
             let mut inner = Cursor::new(payload);
             let value = Self::read_value_by_kind(&mut inner, kind, Some(len))?;
             if inner.position() as usize != len {
                 return None;
             }
-
-            cursor.set_position(end as u64);
             out.push(value);
         }
 
@@ -731,95 +695,45 @@ impl DataValue {
                 Some(DataValue::Float(a, b))
             }
             Self::KIND_STR => {
-                let len = payload_len?;
-                let start = cursor.position() as usize;
-                let end = start.checked_add(len)?;
-                if end > cursor.get_ref().len() {
-                    return None;
-                }
-                let s = std::str::from_utf8(&cursor.get_ref()[start..end])
+                let s = std::str::from_utf8(Self::read_payload_slice(cursor, payload_len?)?)
                     .ok()?
                     .to_string();
-                cursor.set_position(end as u64);
                 Some(DataValue::Str(s))
             }
-            Self::KIND_BYTES => {
-                let len = payload_len?;
-                let start = cursor.position() as usize;
-                let end = start.checked_add(len)?;
-                if end > cursor.get_ref().len() {
-                    return None;
-                }
-                let b = cursor.get_ref()[start..end].to_vec();
-                cursor.set_position(end as u64);
-                Some(DataValue::Bytes(b))
-            }
+            Self::KIND_BYTES => Some(DataValue::Bytes(Self::read_blob_payload(
+                cursor,
+                payload_len?,
+            )?)),
             Self::KIND_ARRAY => {
-                let start = cursor.position() as usize;
                 let len = payload_len?;
-                let end = start.checked_add(len)?;
-                if end > cursor.get_ref().len() {
-                    return None;
-                }
-                let mut inner = Cursor::new(&cursor.get_ref()[start..end]);
+                let mut inner = Cursor::new(Self::read_payload_slice(cursor, len)?);
                 let arr = Self::read_array(&mut inner)?;
                 if inner.position() as usize != len {
                     return None;
                 }
-                cursor.set_position(end as u64);
                 Some(arr)
             }
             Self::KIND_CONTAINER => {
-                let start = cursor.position() as usize;
                 let len = payload_len?;
-                let end = start.checked_add(len)?;
-                if end > cursor.get_ref().len() {
-                    return None;
-                }
-                let mut inner = Cursor::new(&cursor.get_ref()[start..end]);
+                let mut inner = Cursor::new(Self::read_payload_slice(cursor, len)?);
                 let c = Self::try_read_container(&mut inner)?;
                 if inner.position() as usize != len {
                     return None;
                 }
-                cursor.set_position(end as u64);
                 Some(c)
             }
             #[cfg(feature = "crypto")]
-            Self::KIND_ENCRYPTED_CONTAINER => {
-                let len = payload_len?;
-                let start = cursor.position() as usize;
-                let end = start.checked_add(len)?;
-                if end > cursor.get_ref().len() {
-                    return None;
-                }
-                let data = cursor.get_ref()[start..end].to_vec();
-                cursor.set_position(end as u64);
-                Some(DataValue::EncryptedContainer(data))
-            }
+            Self::KIND_ENCRYPTED_CONTAINER => Some(DataValue::EncryptedContainer(
+                Self::read_blob_payload(cursor, payload_len?)?,
+            )),
             #[cfg(feature = "crypto")]
-            Self::KIND_SIGNED_CONTAINER => {
-                let len = payload_len?;
-                let start = cursor.position() as usize;
-                let end = start.checked_add(len)?;
-                if end > cursor.get_ref().len() {
-                    return None;
-                }
-                let data = cursor.get_ref()[start..end].to_vec();
-                cursor.set_position(end as u64);
-                Some(DataValue::SignedContainer(data))
-            }
+            Self::KIND_SIGNED_CONTAINER => Some(DataValue::SignedContainer(
+                Self::read_blob_payload(cursor, payload_len?)?,
+            )),
             #[cfg(feature = "crypto")]
-            Self::KIND_SIGNED_ENCRYPTED_CONTAINER => {
-                let len = payload_len?;
-                let start = cursor.position() as usize;
-                let end = start.checked_add(len)?;
-                if end > cursor.get_ref().len() {
-                    return None;
-                }
-                let data = cursor.get_ref()[start..end].to_vec();
-                cursor.set_position(end as u64);
-                Some(DataValue::SignedEncryptedContainer(data))
-            }
+            Self::KIND_SIGNED_ENCRYPTED_CONTAINER => Some(DataValue::SignedEncryptedContainer(
+                Self::read_blob_payload(cursor, payload_len?)?,
+            )),
             Self::KIND_NULL => Some(DataValue::Null),
             #[cfg(not(feature = "crypto"))]
             0x0A | 0x0B | 0x0C => None,
@@ -853,6 +767,33 @@ impl DataValue {
             DataValue::SignedEncryptedContainer(_) => Self::KIND_SIGNED_ENCRYPTED_CONTAINER,
             DataValue::Null => Self::KIND_NULL,
         }
+    }
+
+    fn kind_has_no_payload(kind: u8) -> bool {
+        kind == Self::KIND_BOOL_TRUE || kind == Self::KIND_BOOL_FALSE || kind == Self::KIND_NULL
+    }
+
+    fn read_payloadless_value(kind: u8) -> Option<Self> {
+        match kind {
+            Self::KIND_BOOL_TRUE => Some(DataValue::BoolTrue),
+            Self::KIND_BOOL_FALSE => Some(DataValue::BoolFalse),
+            Self::KIND_NULL => Some(DataValue::Null),
+            _ => None,
+        }
+    }
+
+    fn read_payload_slice<'a>(cursor: &mut Cursor<&'a [u8]>, len: usize) -> Option<&'a [u8]> {
+        let start = cursor.position() as usize;
+        let end = start.checked_add(len)?;
+        if end > cursor.get_ref().len() {
+            return None;
+        }
+        cursor.set_position(end as u64);
+        Some(&cursor.get_ref()[start..end])
+    }
+
+    fn read_blob_payload(cursor: &mut Cursor<&[u8]>, len: usize) -> Option<Vec<u8>> {
+        Some(Self::read_payload_slice(cursor, len)?.to_vec())
     }
 }
 
@@ -1003,9 +944,18 @@ mod tests {
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::SignedNumber(0)),
             (DataType::Id.to_id(&tm), DataValue::SignedNumber(42)),
-            (DataType::ClientNonce.to_id(&tm), DataValue::SignedNumber(-42)),
-            (DataType::ServerNonce.to_id(&tm), DataValue::SignedNumber(i128::MAX)),
-            (DataType::PublicKeys.to_id(&tm), DataValue::SignedNumber(i128::MIN)),
+            (
+                DataType::ClientNonce.to_id(&tm),
+                DataValue::SignedNumber(-42),
+            ),
+            (
+                DataType::ServerNonce.to_id(&tm),
+                DataValue::SignedNumber(i128::MAX),
+            ),
+            (
+                DataType::PublicKeys.to_id(&tm),
+                DataValue::SignedNumber(i128::MIN),
+            ),
         ]);
     }
 
@@ -1015,7 +965,10 @@ mod tests {
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::UnsignedNumber(0)),
             (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(42)),
-            (DataType::ClientNonce.to_id(&tm), DataValue::UnsignedNumber(u128::MAX)),
+            (
+                DataType::ClientNonce.to_id(&tm),
+                DataValue::UnsignedNumber(u128::MAX),
+            ),
         ]);
     }
 
@@ -1025,7 +978,10 @@ mod tests {
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::Float(0, 0)),
             (DataType::Id.to_id(&tm), DataValue::Float(2, 12345)),
-            (DataType::ClientNonce.to_id(&tm), DataValue::Float(255, 4294967295)),
+            (
+                DataType::ClientNonce.to_id(&tm),
+                DataValue::Float(255, 4294967295),
+            ),
         ]);
     }
 
@@ -1035,7 +991,10 @@ mod tests {
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::Str(String::new())),
             (DataType::Id.to_id(&tm), DataValue::Str("hello".to_string())),
-            (DataType::ClientNonce.to_id(&tm), DataValue::Str("a".repeat(1000))),
+            (
+                DataType::ClientNonce.to_id(&tm),
+                DataValue::Str("a".repeat(1000)),
+            ),
         ]);
     }
 
@@ -1044,8 +1003,14 @@ mod tests {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::Bytes(vec![])),
-            (DataType::Id.to_id(&tm), DataValue::Bytes(vec![0x00, 0xFF, 0xAB])),
-            (DataType::ClientNonce.to_id(&tm), DataValue::Bytes(vec![0x42; 100])),
+            (
+                DataType::Id.to_id(&tm),
+                DataValue::Bytes(vec![0x00, 0xFF, 0xAB]),
+            ),
+            (
+                DataType::ClientNonce.to_id(&tm),
+                DataValue::Bytes(vec![0x42; 100]),
+            ),
         ]);
     }
 
@@ -1084,8 +1049,14 @@ mod tests {
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::BoolTrue),
             (DataType::Id.to_id(&tm), DataValue::SignedNumber(-100)),
-            (DataType::ClientNonce.to_id(&tm), DataValue::Str("test".to_string())),
-            (DataType::ServerNonce.to_id(&tm), DataValue::UnsignedNumber(u128::MAX)),
+            (
+                DataType::ClientNonce.to_id(&tm),
+                DataValue::Str("test".to_string()),
+            ),
+            (
+                DataType::ServerNonce.to_id(&tm),
+                DataValue::UnsignedNumber(u128::MAX),
+            ),
             (DataType::PublicKeys.to_id(&tm), DataValue::Null),
         ]);
     }
@@ -1141,27 +1112,40 @@ mod tests {
     fn test_as_accessors() {
         let tm = TypeMap::latest();
         let dv = DataValue::Container(vec![
-            (DataType::Version.to_id(&tm), DataValue::Str("alice".to_string())),
+            (
+                DataType::Version.to_id(&tm),
+                DataValue::Str("alice".to_string()),
+            ),
             (DataType::Id.to_id(&tm), DataValue::SignedNumber(42)),
-            (DataType::ClientNonce.to_id(&tm), DataValue::Bytes(vec![0x01, 0x02])),
-            (DataType::ServerNonce.to_id(&tm), DataValue::Array(vec![DataValue::BoolTrue])),
+            (
+                DataType::ClientNonce.to_id(&tm),
+                DataValue::Bytes(vec![0x01, 0x02]),
+            ),
+            (
+                DataType::ServerNonce.to_id(&tm),
+                DataValue::Array(vec![DataValue::BoolTrue]),
+            ),
         ]);
 
         let map = dv.as_map().expect("should be a container");
         assert_eq!(
-            map.get(&DataType::Version.to_id(&tm)).and_then(|v| v.as_str()),
+            map.get(&DataType::Version.to_id(&tm))
+                .and_then(|v| v.as_str()),
             Some("alice")
         );
         assert_eq!(
-            map.get(&DataType::Id.to_id(&tm)).and_then(|v| v.as_signed_number()),
+            map.get(&DataType::Id.to_id(&tm))
+                .and_then(|v| v.as_signed_number()),
             Some(42)
         );
         assert_eq!(
-            map.get(&DataType::ClientNonce.to_id(&tm)).and_then(|v| v.as_bytes()),
+            map.get(&DataType::ClientNonce.to_id(&tm))
+                .and_then(|v| v.as_bytes()),
             Some(vec![0x01, 0x02])
         );
         assert_eq!(
-            map.get(&DataType::ServerNonce.to_id(&tm)).and_then(|v| v.as_array()),
+            map.get(&DataType::ServerNonce.to_id(&tm))
+                .and_then(|v| v.as_array()),
             Some(vec![DataValue::BoolTrue])
         );
     }
@@ -1206,7 +1190,10 @@ mod tests {
     #[test]
     fn test_truncated_container_rejected() {
         let tm = TypeMap::latest();
-        let dv = DataValue::Container(vec![(DataType::Version.to_id(&tm), DataValue::Str("hello".to_string()))]);
+        let dv = DataValue::Container(vec![(
+            DataType::Version.to_id(&tm),
+            DataValue::Str("hello".to_string()),
+        )]);
         let bytes = dv.to_bytes().expect("encode failed");
         // Truncate to fewer than 2 bytes so neither container nor array can be read
         assert!(DataValue::from_bytes(&bytes[..1]).is_none());
@@ -1264,8 +1251,14 @@ mod tests {
     fn test_container_display() {
         let tm = TypeMap::latest();
         let dv = DataValue::Container(vec![
-            (DataType::ServerNonce.to_id(&tm), DataValue::Str("v2.0".to_string())),
-            (DataType::PqSignature.to_id(&tm), DataValue::UnsignedNumber(42)),
+            (
+                DataType::ServerNonce.to_id(&tm),
+                DataValue::Str("v2.0".to_string()),
+            ),
+            (
+                DataType::PqSignature.to_id(&tm),
+                DataValue::UnsignedNumber(42),
+            ),
         ]);
         let s = format!("{}", dv);
         assert!(s.contains("3:"));
@@ -1290,7 +1283,10 @@ mod tests {
         let bundle = keyring.public_key_bundle();
 
         let mut dv = DataValue::Container(vec![
-            (DataType::Version.to_id(&tm), DataValue::Str("secret".to_string())),
+            (
+                DataType::Version.to_id(&tm),
+                DataValue::Str("secret".to_string()),
+            ),
             (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(42)),
         ]);
 
@@ -1315,8 +1311,10 @@ mod tests {
         let keyring_a = Keyring::generate();
         let keyring_b = Keyring::generate();
 
-        let mut dv =
-            DataValue::Container(vec![(DataType::Version.to_id(&tm), DataValue::Str("secret".to_string()))]);
+        let mut dv = DataValue::Container(vec![(
+            DataType::Version.to_id(&tm),
+            DataValue::Str("secret".to_string()),
+        )]);
 
         assert!(
             dv.encrypt_container(
@@ -1336,8 +1334,10 @@ mod tests {
         let tm = TypeMap::latest();
         let keyring = Keyring::generate();
 
-        let mut dv =
-            DataValue::Container(vec![(DataType::Version.to_id(&tm), DataValue::Str("secret".to_string()))]);
+        let mut dv = DataValue::Container(vec![(
+            DataType::Version.to_id(&tm),
+            DataValue::Str("secret".to_string()),
+        )]);
 
         assert!(
             dv.encrypt_container(

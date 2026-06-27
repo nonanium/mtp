@@ -186,13 +186,82 @@ fn check_connected(
 }
 
 #[cfg(feature = "crypto")]
+fn signed_challenge_response(
+    keys: &mtp_crypto::Keyring,
+    proof_payload: &[u8],
+    client_nonce: u128,
+) -> Result<CommunicationValue, CommunicationError> {
+    use mtp_crypto::{Ed25519Signer, MlDsaSigner, SignatureScheme};
+
+    let signer = Ed25519Signer::new(&keys.sig_cl_secret_key)
+        .map_err(|e| CommunicationError::Other(e.to_string()))?;
+    let signature = signer
+        .sign(proof_payload)
+        .map_err(|e| CommunicationError::Other(e.to_string()))?;
+
+    let mut proof = CommunicationValue::new(mtp_codec::CommunicationType::ChallengeResponse)
+        .add_typed_default(
+            DataType::ClientNonce,
+            DataValue::UnsignedNumber(client_nonce),
+        )
+        .add_typed_default(DataType::Signature, DataValue::Bytes(signature));
+
+    if !keys.sig_pq_secret_key.as_bytes().is_empty() {
+        let pq_signer = MlDsaSigner::new(&keys.sig_pq_secret_key, &keys.sig_pq_public_key)
+            .map_err(|e| CommunicationError::Other(e.to_string()))?;
+        let pq_signature = pq_signer
+            .sign(proof_payload)
+            .map_err(|e| CommunicationError::Other(e.to_string()))?;
+        proof = proof.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
+    }
+
+    Ok(proof)
+}
+
+#[cfg(feature = "crypto")]
+async fn receive_verified_challenge(
+    receiver: &Receiver,
+    tm: &mtp_codec::TypeMap,
+    host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
+    bound_id: u64,
+    context: &str,
+) -> Result<u128, CommunicationError> {
+    let challenge = receiver.receive().await?;
+    let expected = mtp_codec::CommunicationType::Challenge.to_id(tm);
+    if challenge.get_type() != expected {
+        return Err(unexpected_response_type_error(
+            context, expected, &challenge,
+        ));
+    }
+
+    let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(tm)) {
+        DataValue::UnsignedNumber(n) => *n,
+        _ => {
+            return Err(CommunicationError::AuthenticationFailed(
+                "Missing server challenge".into(),
+            ));
+        }
+    };
+
+    verify_host_challenge(
+        &challenge,
+        tm,
+        host_public_key_bundle,
+        bound_id,
+        server_challenge,
+    )?;
+
+    Ok(server_challenge)
+}
+
+#[cfg(feature = "crypto")]
 impl MTPClient {
     pub async fn auth_connect(
         config: ClientConfig,
         keys: &mtp_crypto::Keyring,
         host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
     ) -> Result<MTPConnection, CommunicationError> {
-        use mtp_crypto::{Ed25519Signer, MlDsaSigner, SignatureScheme, auth};
+        use mtp_crypto::auth;
 
         let (sender, receiver) =
             mtp_transport::connect(&config.url, config.server_cert, Policy::default()).await?;
@@ -210,30 +279,14 @@ impl MTPClient {
         sender.send(&ident).await?;
 
         // 2. Receive and verify the host's challenge.
-        let challenge = receiver.receive().await?;
-        let expected = mtp_codec::CommunicationType::Challenge.to_id(&tm);
-        if challenge.get_type() != expected {
-            return Err(unexpected_response_type_error(
-                "auth_connect challenge",
-                expected,
-                &challenge,
-            ));
-        }
-        let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(&tm)) {
-            DataValue::UnsignedNumber(n) => *n,
-            _ => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Missing server challenge".into(),
-                ));
-            }
-        };
-        verify_host_challenge(
-            &challenge,
+        let server_challenge = receive_verified_challenge(
+            &receiver,
             &tm,
             host_public_key_bundle,
             config.client_id,
-            server_challenge,
-        )?;
+            "auth_connect challenge",
+        )
+        .await?;
 
         // 3. Sign the host's challenge and send the proof.
         let client_nonce: u128 = rand::random();
@@ -244,26 +297,7 @@ impl MTPClient {
             client_nonce,
         );
 
-        let signer = Ed25519Signer::new(&keys.sig_cl_secret_key)
-            .map_err(|e| CommunicationError::Other(e.to_string()))?;
-        let signature = signer
-            .sign(&proof_payload)
-            .map_err(|e| CommunicationError::Other(e.to_string()))?;
-
-        let mut proof = CommunicationValue::new(mtp_codec::CommunicationType::ChallengeResponse)
-            .add_typed_default(
-                DataType::ClientNonce,
-                DataValue::UnsignedNumber(client_nonce),
-            )
-            .add_typed_default(DataType::Signature, DataValue::Bytes(signature));
-        if !keys.sig_pq_secret_key.as_bytes().is_empty() {
-            let pq_signer = MlDsaSigner::new(&keys.sig_pq_secret_key, &keys.sig_pq_public_key)
-                .map_err(|e| CommunicationError::Other(e.to_string()))?;
-            let pq_signature = pq_signer
-                .sign(&proof_payload)
-                .map_err(|e| CommunicationError::Other(e.to_string()))?;
-            proof = proof.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
-        }
+        let proof = signed_challenge_response(keys, &proof_payload, client_nonce)?;
         sender.send(&proof).await?;
 
         // 4. Receive and verify the host's final confirmation.
@@ -300,7 +334,7 @@ impl MTPClient {
         keys: &mtp_crypto::Keyring,
         host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
     ) -> Result<MTPConnection, CommunicationError> {
-        use mtp_crypto::{Ed25519Signer, MlDsaSigner, SignatureScheme, auth};
+        use mtp_crypto::auth;
 
         let (sender, receiver) =
             mtp_transport::connect(&config.url, config.server_cert, Policy::default()).await?;
@@ -317,50 +351,21 @@ impl MTPClient {
         sender.send(&register).await?;
 
         // 2. Receive and verify the host's challenge (register binds id = 0).
-        let challenge = receiver.receive().await?;
-        let expected = mtp_codec::CommunicationType::Challenge.to_id(&tm);
-        if challenge.get_type() != expected {
-            return Err(unexpected_response_type_error(
-                "auth_register challenge",
-                expected,
-                &challenge,
-            ));
-        }
-        let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(&tm)) {
-            DataValue::UnsignedNumber(n) => *n,
-            _ => {
-                return Err(CommunicationError::AuthenticationFailed(
-                    "Missing server challenge".into(),
-                ));
-            }
-        };
-        verify_host_challenge(&challenge, &tm, host_public_key_bundle, 0, server_challenge)?;
+        let server_challenge = receive_verified_challenge(
+            &receiver,
+            &tm,
+            host_public_key_bundle,
+            0,
+            "auth_register challenge",
+        )
+        .await?;
 
         // 3. Sign the host's challenge over the bundle and send the proof.
         let client_nonce: u128 = rand::random();
         let proof_payload =
             auth::register_proof_payload(&version_str, &pk_bytes, server_challenge, client_nonce);
 
-        let signer = Ed25519Signer::new(&keys.sig_cl_secret_key)
-            .map_err(|e| CommunicationError::Other(e.to_string()))?;
-        let signature = signer
-            .sign(&proof_payload)
-            .map_err(|e| CommunicationError::Other(e.to_string()))?;
-
-        let mut proof = CommunicationValue::new(mtp_codec::CommunicationType::ChallengeResponse)
-            .add_typed_default(
-                DataType::ClientNonce,
-                DataValue::UnsignedNumber(client_nonce),
-            )
-            .add_typed_default(DataType::Signature, DataValue::Bytes(signature));
-        if !keys.sig_pq_secret_key.as_bytes().is_empty() {
-            let pq_signer = MlDsaSigner::new(&keys.sig_pq_secret_key, &keys.sig_pq_public_key)
-                .map_err(|e| CommunicationError::Other(e.to_string()))?;
-            let pq_signature = pq_signer
-                .sign(&proof_payload)
-                .map_err(|e| CommunicationError::Other(e.to_string()))?;
-            proof = proof.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
-        }
+        let proof = signed_challenge_response(keys, &proof_payload, client_nonce)?;
         sender.send(&proof).await?;
 
         // 4. Receive the host's final confirmation; extract the assigned id and
