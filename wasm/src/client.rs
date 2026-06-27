@@ -1,6 +1,9 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
+use futures_channel::oneshot;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, PROTOCOL_VERSION};
@@ -8,8 +11,115 @@ use mtp_type_map::CommunicationTypeId;
 
 use mtp_crypto::SignatureScheme;
 
+use crate::config::ConnectionConfig;
 use crate::error::js_error;
 use crate::transport::WasmTransport;
+
+struct PendingRequest {
+    response_type: Option<String>,
+    sender: oneshot::Sender<Result<JsValue, JsValue>>,
+}
+
+struct PingTimer {
+    id: i32,
+    closure: Closure<dyn FnMut()>,
+}
+
+fn frame_property(frame: &JsValue, key: &str) -> Option<JsValue> {
+    js_sys::Reflect::get(frame, &JsValue::from_str(key))
+        .ok()
+        .filter(|value| !value.is_null() && !value.is_undefined())
+}
+
+fn frame_id(frame: &JsValue) -> Option<u32> {
+    frame_property(frame, "id")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as u32)
+}
+
+fn frame_type(frame: &JsValue) -> Option<String> {
+    frame_property(frame, "type").and_then(|value| value.as_string())
+}
+
+fn route_incoming_frame(
+    frame: &JsValue,
+    on_message: &js_sys::Function,
+    subscriptions: &Rc<RefCell<HashMap<u32, (String, js_sys::Function)>>>,
+    pending_requests: &Rc<RefCell<HashMap<u32, PendingRequest>>>,
+) {
+    let message_type = frame_type(frame);
+
+    if let Some(request_id) = frame_id(frame) {
+        let pending = pending_requests.borrow_mut().remove(&request_id);
+        if let Some(pending) = pending {
+            let type_matches = pending
+                .response_type
+                .as_ref()
+                .zip(message_type.as_ref())
+                .map(|(expected, actual)| expected == actual)
+                .unwrap_or(true);
+            if type_matches {
+                let _ = pending.sender.send(Ok(frame.clone()));
+            } else {
+                let actual = message_type.clone().unwrap_or_else(|| "unknown".into());
+                let _ = pending.sender.send(Err(js_error(&format!(
+                    "unexpected response type: expected {}, got {}",
+                    pending.response_type.unwrap_or_else(|| "unknown".into()),
+                    actual
+                ))));
+            }
+        }
+    }
+
+    if let Some(message_type) = message_type.as_ref() {
+        let matching_id = pending_requests
+            .borrow()
+            .iter()
+            .find_map(|(id, pending)| match pending.response_type.as_ref() {
+                Some(response_type) if response_type == message_type => Some(*id),
+                _ => None,
+            });
+        if let Some(id) = matching_id {
+            if let Some(pending) = pending_requests.borrow_mut().remove(&id) {
+                let _ = pending.sender.send(Ok(frame.clone()));
+            }
+        }
+    }
+
+    let _ = on_message.call1(&JsValue::NULL, frame);
+
+    let Some(message_type) = message_type else {
+        return;
+    };
+    for (_, (subscription_type, callback)) in subscriptions.borrow().iter() {
+        if subscription_type == &message_type {
+            let _ = callback.call1(&JsValue::NULL, frame);
+        }
+    }
+}
+
+fn stop_ping_timer(ping_timer: &Rc<RefCell<Option<PingTimer>>>) {
+    let Some(timer) = ping_timer.borrow_mut().take() else {
+        return;
+    };
+    if let Ok(clear_interval) =
+        js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("clearInterval"))
+            .and_then(|value| value.dyn_into::<js_sys::Function>().map_err(Into::into))
+    {
+        let _ = clear_interval.call1(&JsValue::NULL, &JsValue::from_f64(timer.id as f64));
+    }
+    drop(timer.closure);
+}
+
+fn reject_pending_requests(
+    pending_requests: &Rc<RefCell<HashMap<u32, PendingRequest>>>,
+    message: &str,
+) {
+    let pending = std::mem::take(&mut *pending_requests.borrow_mut());
+    for (_, pending) in pending {
+        let _ = pending.sender.send(Err(js_error(message)));
+    }
+}
 
 fn raw_frame_preview(bytes: &[u8]) -> String {
     let shown = bytes.len().min(256);
@@ -140,51 +250,16 @@ pub enum ConnectionState {
 }
 
 #[wasm_bindgen]
-pub struct ConnectionConfig {
-    url: String,
-    server_certificate_hashes: Option<Vec<String>>,
-    client_id: u64,
-}
-
-#[wasm_bindgen]
-impl ConnectionConfig {
-    #[wasm_bindgen(constructor)]
-    pub fn new(url: String) -> Self {
-        Self {
-            url,
-            server_certificate_hashes: None,
-            client_id: 0,
-        }
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn url(&self) -> String {
-        self.url.clone()
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_client_id(&mut self, id: u64) {
-        self.client_id = id;
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn client_id(&self) -> u64 {
-        self.client_id
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_server_certificate_hashes(&mut self, hashes: Vec<String>) {
-        self.server_certificate_hashes = Some(hashes);
-    }
-}
-
-#[wasm_bindgen]
 pub struct WasmClient {
     transport: Option<WasmTransport>,
     state: Rc<Cell<ConnectionState>>,
     on_state_change: js_sys::Function,
     pub(crate) on_message: js_sys::Function,
     pub(crate) on_error: js_sys::Function,
+    subscriptions: Rc<RefCell<HashMap<u32, (String, js_sys::Function)>>>,
+    next_subscription_id: Rc<Cell<u32>>,
+    pending_requests: Rc<RefCell<HashMap<u32, PendingRequest>>>,
+    ping_timer: Rc<RefCell<Option<PingTimer>>>,
 }
 
 #[wasm_bindgen]
@@ -201,6 +276,10 @@ impl WasmClient {
             on_state_change: on_state_change.clone(),
             on_message: on_message.clone(),
             on_error: on_error.clone(),
+            subscriptions: Rc::new(RefCell::new(HashMap::new())),
+            next_subscription_id: Rc::new(Cell::new(1)),
+            pending_requests: Rc::new(RefCell::new(HashMap::new())),
+            ping_timer: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -456,11 +535,133 @@ impl WasmClient {
     }
 
     #[wasm_bindgen]
+    pub async fn request(
+        &self,
+        frame: Vec<u8>,
+        response_type: Option<String>,
+    ) -> Result<JsValue, JsValue> {
+        let request = CommunicationValue::from_bytes(&frame)
+            .map_err(|e| js_error(&format!("parse request: {}", e)))?;
+        let request_id = request.get_id();
+        if request_id == 0 {
+            return Err(js_error("request frame must have a non-zero id"));
+        }
+
+        let Some(transport) = self.transport.clone() else {
+            return Err(js_error("not connected"));
+        };
+
+        let (sender, receiver) = oneshot::channel();
+        self.pending_requests.borrow_mut().insert(
+            request_id,
+            PendingRequest {
+                response_type,
+                sender,
+            },
+        );
+
+        if let Err(error) = transport.send_frame(&frame).await {
+            self.pending_requests.borrow_mut().remove(&request_id);
+            return Err(error);
+        }
+
+        match receiver.await {
+            Ok(result) => result,
+            Err(_) => Err(js_error("request cancelled")),
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn subscribe(&self, message_type: String, callback: js_sys::Function) -> u32 {
+        let id = self.next_subscription_id.get();
+        self.next_subscription_id.set(id.wrapping_add(1).max(1));
+        self.subscriptions
+            .borrow_mut()
+            .insert(id, (message_type, callback));
+        id
+    }
+
+    #[wasm_bindgen]
+    pub fn unsubscribe(&self, id: u32) -> bool {
+        self.subscriptions.borrow_mut().remove(&id).is_some()
+    }
+
+    #[wasm_bindgen]
+    pub fn start_protocol_pings(&self, interval_ms: u32, client_id: u64) -> Result<(), JsValue> {
+        self.stop_protocol_pings();
+        let Some(transport) = self.transport.clone() else {
+            return Err(js_error("not connected"));
+        };
+        let interval_ms = interval_ms.max(1_000) as i32;
+        let on_error = self.on_error.clone();
+        let closure = Closure::wrap(Box::new(move || {
+            let transport = transport.clone();
+            let on_error = on_error.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let timestamp = js_sys::Date::now() as u64;
+                let frame = CommunicationValue::new(CommunicationType::Ping)
+                    .add_typed_default(
+                        DataType::Description,
+                        DataValue::Str("protocol ping".into()),
+                    )
+                    .add_typed_default(
+                        DataType::Timestamp,
+                        DataValue::UnsignedNumber(timestamp as u128),
+                    )
+                    .with_sender(client_id)
+                    .to_bytes()
+                    .map_err(|e| js_error(&format!("encode ping failed: {}", e)));
+                match frame {
+                    Ok(frame) => {
+                        if let Err(error) = transport.send_frame(&frame).await {
+                            let _ = on_error.call1(&JsValue::NULL, &error);
+                        }
+                    }
+                    Err(error) => {
+                        let _ = on_error.call1(&JsValue::NULL, &error);
+                    }
+                }
+            });
+        }) as Box<dyn FnMut()>);
+
+        let set_interval =
+            js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setInterval"))?
+                .dyn_into::<js_sys::Function>()?;
+        let id = set_interval
+            .call2(
+                &JsValue::NULL,
+                closure.as_ref().unchecked_ref(),
+                &JsValue::from_f64(interval_ms as f64),
+            )?
+            .as_f64()
+            .ok_or_else(|| js_error("setInterval did not return an id"))? as i32;
+        *self.ping_timer.borrow_mut() = Some(PingTimer { id, closure });
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn stop_protocol_pings(&self) {
+        let Some(timer) = self.ping_timer.borrow_mut().take() else {
+            return;
+        };
+        if let Ok(clear_interval) =
+            js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("clearInterval"))
+                .and_then(|value| value.dyn_into::<js_sys::Function>().map_err(Into::into))
+        {
+            let _ = clear_interval.call1(&JsValue::NULL, &JsValue::from_f64(timer.id as f64));
+        }
+        drop(timer.closure);
+    }
+
+    #[wasm_bindgen]
     pub fn disconnect(&mut self) {
+        self.stop_protocol_pings();
         if let Some(t) = &self.transport {
             t.close();
         }
         self.transport = None;
+        self.subscriptions.borrow_mut().clear();
+        self.reject_pending_requests("disconnected");
         self.set_state(ConnectionState::Disconnected);
     }
 
@@ -479,10 +680,32 @@ impl WasmClient {
         let state = self.state.clone();
         let on_msg = self.on_message.clone();
         let on_err = self.on_error.clone();
+        let subscriptions = self.subscriptions.clone();
+        let pending_requests = self.pending_requests.clone();
+        let loop_pending_requests = pending_requests.clone();
+        let ping_timer = self.ping_timer.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            loop_transport.receive_loop(on_msg, on_err).await;
+            let route_frame = Closure::wrap(Box::new(move |frame: JsValue| {
+                route_incoming_frame(&frame, &on_msg, &subscriptions, &loop_pending_requests);
+            }) as Box<dyn FnMut(JsValue)>);
+            loop_transport
+                .receive_loop(
+                    route_frame
+                        .as_ref()
+                        .unchecked_ref::<js_sys::Function>()
+                        .clone(),
+                    on_err.clone(),
+                )
+                .await;
+            drop(route_frame);
             state.set(ConnectionState::Disconnected);
+            stop_ping_timer(&ping_timer);
+            reject_pending_requests(&pending_requests, "disconnected");
         });
+    }
+
+    fn reject_pending_requests(&self, message: &str) {
+        reject_pending_requests(&self.pending_requests, message);
     }
 
     async fn read_verified_challenge(

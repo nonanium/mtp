@@ -1,29 +1,60 @@
 {
-  "name": "mtp-wasm",
+  "name": "mtp",
   "version": "0.1.0",
-  "description": "Browser WASM interface for MTP.",
+  "description": "MTP TypeScript SDK",
   "type": "module",
-  "module": "./wasm/pkg/mtp_wasm.js",
-  "types": "./wasm/pkg/mtp_wasm.d.ts",
+  "packageManager": "pnpm@11.8.0",
+  "module": "./dist/sdk/index.js",
+  "types": "./dist/sdk/index.d.ts",
   "exports": {
     ".": {
-      "types": "./wasm/pkg/mtp_wasm.d.ts",
-      "import": "./wasm/pkg/mtp_wasm.js",
-      "default": "./wasm/pkg/mtp_wasm.js"
+      "types": "./dist/sdk/index.d.ts",
+      "import": "./dist/sdk/index.js",
+      "default": "./dist/sdk/index.js"
+    },
+    "./raw": {
+      "types": "./dist/raw/index.d.ts",
+      "import": "./dist/raw/index.js",
+      "default": "./dist/raw/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite/index.d.ts",
+      "import": "./dist/vite/index.js",
+      "default": "./dist/vite/index.js"
+    },
+    "./type-map": {
+      "types": "./dist/type-map/index.d.ts",
+      "import": "./dist/type-map/index.js",
+      "default": "./dist/type-map/index.js"
     }
   },
   "files": [
-    "wasm/pkg/mtp_wasm.js",
-    "wasm/pkg/mtp_wasm.d.ts",
-    "wasm/pkg/mtp_wasm_bg.wasm",
-    "wasm/pkg/mtp_wasm_bg.wasm.d.ts"
+    "Cargo.lock",
+    "dist/",
+    "README.md",
+    "codec/Cargo.toml",
+    "codec/src/",
+    "common/Cargo.toml",
+    "common/src/",
+    "crypto/Cargo.toml",
+    "crypto/src/",
+    "type-map/Cargo.toml",
+    "type-map/build.rs",
+    "type-map/src/",
+    "wasm/.cargo/",
+    "wasm/Cargo.toml",
+    "wasm/src/",
+    "tsconfig.json"
   ],
   "scripts": {
-    "build": "MTP_TYPE_MAPS=$PWD/example/type-maps.yaml RUSTFLAGS='--cfg web_sys_unstable_apis' wasm-pack build wasm --target web --out-dir pkg --release",
+    "example": "pnpm install && pnpm run build:all && nix develop .#autoStart",
+    "build": "tsc && MTP_TYPE_MAPS=$PWD/example/type-maps.yaml RUSTFLAGS='--cfg web_sys_unstable_apis' wasm-pack build wasm --target web --out-dir pkg --release",
     "build:all": "nix run .#build-all",
     "dup": "jscpd --pattern '**/*.rs' --ignore 'target/**' --ignore 'wasm/pkg/**' --ignore '.git/**' --min-lines 8 --min-tokens 80 --threshold 4 --reporters console --no-tips ."
   },
   "devDependencies": {
-    "jscpd": "5.0.11"
+    "@types/node": "^26.0.1",
+    "jscpd": "5.0.11",
+    "typescript": "^6.0.3"
   }
 }

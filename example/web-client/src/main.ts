@@ -1,40 +1,68 @@
-import init, {
-  WasmClient,
-  ConnectionConfig,
-  ConnectionState,
-  WasmKeyring,
-  ed25519_generate,
-  keyring_from_ed25519,
-  build_demo_message,
-  format_frame,
-} from "mtp-wasm";
+import { MTPClient } from "mtp";
+import type { MTPCredentialStorage, MTPLogEvent, ParsedFrame } from "mtp";
 
 const STATUS = document.getElementById("status")!;
 const KEY_STATUS = document.getElementById("key-status")!;
 const SERVER_URL = document.getElementById("server-url") as HTMLInputElement;
 const HOST_PUBLIC_KEY = document.getElementById("host-public-key") as HTMLTextAreaElement;
-const CLIENT_PUBLIC_KEY = document.getElementById("client-public-key") as HTMLTextAreaElement;
+const CLIENT_CREDENTIALS = document.getElementById("client-credentials") as HTMLTextAreaElement;
 const GENERATE_KEYPAIR = document.getElementById("generate-keypair") as HTMLButtonElement;
 const CONNECT = document.getElementById("connect") as HTMLButtonElement;
 const CLEAR_KEYS = document.getElementById("clear-keys") as HTMLButtonElement;
 
-const STORAGE_KEY = "mtp-web-client-keys";
+const CREDENTIALS_KEY = "mtp-web-client-credentials";
+const HOST_PUBLIC_KEY_KEY = "mtp-web-client-host-public-key";
 
 type SavedKeys = {
   clientId: string | null;
-  keyring: number[];
+  keyring?: number[];
+  keyringBytes?: number[];
   hostPublicKey?: number[];
 };
 
-let keyringBytes: Uint8Array | null = null;
 let clientId: bigint | null = null;
 let devCertHash = "";
+
+const credentialStorage: MTPCredentialStorage = {
+  getItem: (key) => localStorage.getItem(key),
+  setItem: (key, value) => localStorage.setItem(key, value),
+  removeItem: (key) => localStorage.removeItem(key),
+};
 
 function log(msg: string, cls = "") {
   const line = document.createElement("div");
   line.textContent = msg;
   if (cls) line.className = cls;
   STATUS.appendChild(line);
+}
+
+function renderStructured(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => {
+    if (typeof item === "bigint") {
+      return item.toString();
+    }
+    if (item instanceof Uint8Array) {
+      return { bytes: item.length, hex: bytesToHex(item.slice(0, 32)) };
+    }
+    return item;
+  });
+}
+
+function formatParsedFrame(frame: ParsedFrame): string {
+  return renderStructured({
+    id: frame.id,
+    type: frame.type,
+    sender: frame.sender,
+    receiver: frame.receiver,
+    data: frame.data,
+    rawBytes: frame.raw.length,
+  });
+}
+
+function renderLoggerEvent(event: MTPLogEvent): string {
+  return event.hint === "error"
+    ? `[${event.hint}] ${event.type}: ${event.error}`
+    : `[${event.hint}] ${event.type}: ${renderStructured(event.data)}`;
 }
 
 function setKeyStatus(msg: string) {
@@ -57,37 +85,35 @@ function hexToBytes(value: string): Uint8Array {
   return bytes;
 }
 
-function saveKeys() {
-  if (!keyringBytes) {
-    return;
-  }
-
-  let hostPublicKey: number[] | undefined;
+function saveHostPublicKey() {
   try {
-    hostPublicKey = Array.from(hexToBytes(HOST_PUBLIC_KEY.value));
+    localStorage.setItem(HOST_PUBLIC_KEY_KEY, bytesToHex(hexToBytes(HOST_PUBLIC_KEY.value)));
   } catch {
-    hostPublicKey = undefined;
+    localStorage.removeItem(HOST_PUBLIC_KEY_KEY);
   }
-
-  const data: SavedKeys = {
-    clientId: clientId?.toString() ?? null,
-    keyring: Array.from(keyringBytes),
-    hostPublicKey,
-  };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 }
 
 function loadKeys() {
-  const raw = localStorage.getItem(STORAGE_KEY);
+  const raw = localStorage.getItem(CREDENTIALS_KEY);
+  const savedHostPublicKey = localStorage.getItem(HOST_PUBLIC_KEY_KEY);
+  if (savedHostPublicKey) {
+    HOST_PUBLIC_KEY.value = savedHostPublicKey;
+  }
+
   if (!raw) {
-    setKeyStatus("No client keypair generated yet.");
+    CLIENT_CREDENTIALS.value = "";
+    setKeyStatus("No saved SDK credentials. The next connection will generate and store a reusable keyring.");
     return;
   }
 
   const data = JSON.parse(raw) as SavedKeys;
-  keyringBytes = new Uint8Array(data.keyring);
   clientId = data.clientId ? BigInt(data.clientId) : null;
-  CLIENT_PUBLIC_KEY.value = publicKeyHexFromKeyring(keyringBytes);
+  const keyringLength = (data.keyring ?? data.keyringBytes ?? []).length;
+  CLIENT_CREDENTIALS.value = renderStructured({
+    clientId: data.clientId,
+    keyringBytes: keyringLength,
+    hostPublicKeyBytes: data.hostPublicKey?.length ?? 0,
+  });
   if (data.hostPublicKey) {
     HOST_PUBLIC_KEY.value = bytesToHex(new Uint8Array(data.hostPublicKey));
   }
@@ -108,7 +134,7 @@ async function loadHostPublicKey() {
     if (!hostPublicKey) return;
 
     HOST_PUBLIC_KEY.value = hostPublicKey;
-    saveKeys();
+    saveHostPublicKey();
     log(`Loaded host public key bundle (${hostPublicKey.length / 2} bytes).`);
   } catch {
     // Manual paste still works when the server has not exported the file yet.
@@ -131,109 +157,82 @@ async function loadDevCertHash() {
 
 async function initWasm() {
   log("Loading WASM module...");
-  await init();
-  log(`WASM loaded. WebTransport supported: ${WasmClient.is_supported()}`);
-  CONNECT.disabled = !WasmClient.is_supported();
-}
-
-function createClient(): WasmClient {
-  return new WasmClient(
-    (state: number) =>
-      log(`[state] ${ConnectionState[state] ?? state}`, "state"),
-    (data: Uint8Array) => {
-      try {
-        log(`Received: ${format_frame(data)}`, "received");
-      } catch (e) {
-        log(`[message parse error] ${e}`, "error");
-      }
-    },
-    (err: any) => log(`[error] ${err}`, "error"),
-  );
-}
-
-function generateKeyringBytes(): Uint8Array {
-  const gen = ed25519_generate();
-  const sk = gen.secretKey as Uint8Array;
-  const pk = gen.publicKey as Uint8Array;
-  gen.signer.free();
-  return keyring_from_ed25519(sk, pk);
-}
-
-function publicKeyHexFromKeyring(bytes: Uint8Array): string {
-  const keyring = WasmKeyring.from_bytes(bytes);
-  const publicBundle = keyring.public_key_bundle();
-  const publicHex = bytesToHex(publicBundle.to_bytes());
-  publicBundle.free();
-  keyring.free();
-  return publicHex;
+  await MTPClient.create({ url: SERVER_URL.value, storage: credentialStorage, credentialsStorageKey: CREDENTIALS_KEY });
+  const supported = MTPClient.isSupported();
+  log(`WASM loaded. WebTransport supported: ${supported}`);
+  CONNECT.disabled = !supported;
 }
 
 async function connect() {
   STATUS.textContent = "";
 
-  if (!WasmClient.is_supported()) {
+  if (!MTPClient.isSupported()) {
     log("WebTransport is not supported in this browser.", "error");
     return;
   }
-  if (!keyringBytes) {
-    log("Generate a client keypair first.", "error");
-    return;
-  }
-
   const hostPk = hexToBytes(HOST_PUBLIC_KEY.value);
+  saveHostPublicKey();
   await loadDevCertHash();
 
-  const client = createClient();
   const serverUrl = SERVER_URL.value.trim();
-  const config = new ConnectionConfig(serverUrl);
-  if (devCertHash) {
-    log(`Pinning WebTransport certificate hash: sha-256:${devCertHash}`);
-    config.server_certificate_hashes = [`sha-256:${devCertHash}`];
+  const serverCertificateHashes = devCertHash ? [`sha-256:${devCertHash}`] : undefined;
+  if (serverCertificateHashes) {
+    log(`Pinning WebTransport certificate hash: ${serverCertificateHashes[0]}`);
   } else {
     log("No WebTransport certificate hash loaded; relying on browser trust store.", "state");
   }
 
   try {
-    let activeClientId: bigint;
-    if (clientId !== null) {
-      log(`Using saved client ID ${clientId}...`);
-      activeClientId = await client.auth_connect(
-        config,
-        hostPk,
-        keyringBytes,
-        clientId,
-      );
-      log(`Authenticated as client ${activeClientId}`);
-    } else {
-      log("Registering generated client keypair...");
-      activeClientId = await client.auth_register(config, hostPk, keyringBytes);
-      clientId = activeClientId;
-      saveKeys();
-      log(`Registered with ID: ${activeClientId}`);
-    }
+    const client = await MTPClient.create({
+      url: serverUrl,
+      hostPublicKey: hostPk,
+      storage: credentialStorage,
+      credentialsStorageKey: CREDENTIALS_KEY,
+      serverCertificateHashes,
+      pings: { intervalMs: 30_000 },
+      logger(event) {
+        log(renderLoggerEvent(event), event.hint === "error" ? "error" : event.type === "state" ? "state" : "");
+      },
+    });
 
-    log("\nSending demo message...");
-    const frame = build_demo_message(activeClientId, keyringBytes, hostPk);
-    log(`Sending: ${format_frame(frame)}`, "state");
-    await client.send(frame);
-    log(`Sent ${frame.length} bytes`);
+    client.subscribe("Pong", (frame: ParsedFrame) => {
+      log(`Subscribed Pong: ${formatParsedFrame(frame)}`, "received");
+    });
+
+    const activeClientId = await client.connectOrRegister();
+    clientId = activeClientId;
+    loadKeys();
+    log(`Connected as client ${activeClientId}`);
+
+    log("\nSending typed Ping...");
+    await client.send("Ping", {
+      Description: "MTP web client send ping",
+      Timestamp: BigInt(Date.now()),
+    }, { sender: activeClientId });
+    log("Typed Ping sent.");
+
+    log("\nRequesting Pong by Ping frame id...");
+    const response = await client.request("Ping", {
+      Description: "MTP web client request ping",
+      Timestamp: BigInt(Date.now()),
+    }, { sender: activeClientId, responseType: "Pong" });
+    log(`Request response: ${formatParsedFrame(response)}`, "received");
 
     log("\nClient running. Waiting for incoming messages...");
-  } finally {
-    config.free();
+  } catch (error) {
+    log(`[error] ${error}`, "error");
   }
 }
 
 GENERATE_KEYPAIR.addEventListener("click", () => {
   try {
-    keyringBytes = generateKeyringBytes();
     clientId = null;
-    saveKeys();
-    CLIENT_PUBLIC_KEY.value = publicKeyHexFromKeyring(keyringBytes);
-    setKeyStatus("Generated client keypair. Not registered yet.");
-    log("Generated and saved a new client keypair.");
+    localStorage.removeItem(CREDENTIALS_KEY);
+    CLIENT_CREDENTIALS.value = "";
+    setKeyStatus("Cleared saved credentials. The next connection will generate a new reusable keyring.");
+    log("Cleared saved SDK credentials.");
   } catch (e) {
-    log(`Key generation failed: ${e}`, "error");
+    log(`Credential reset failed: ${e}`, "error");
     console.error(e);
   }
 });
@@ -242,7 +241,7 @@ CONNECT.addEventListener("click", () => {
   connect().catch((e) => {
     log(`Fatal error: ${e}`, "error");
     log(
-      `[fatal context] clientId=${clientId?.toString() ?? "unregistered"}, server=${SERVER_URL.value.trim()}, hostPkChars=${HOST_PUBLIC_KEY.value.replace(/[^0-9a-fA-F]/g, "").length}, keyringBytes=${keyringBytes?.length ?? 0}, certHash=${devCertHash || "none"}`,
+      `[fatal context] clientId=${clientId?.toString() ?? "unregistered"}, server=${SERVER_URL.value.trim()}, hostPkChars=${HOST_PUBLIC_KEY.value.replace(/[^0-9a-fA-F]/g, "").length}, hasStoredCredentials=${localStorage.getItem(CREDENTIALS_KEY) ? "yes" : "no"}, certHash=${devCertHash || "none"}`,
       "error",
     );
     console.error(e);
@@ -250,15 +249,15 @@ CONNECT.addEventListener("click", () => {
 });
 
 CLEAR_KEYS.addEventListener("click", () => {
-  keyringBytes = null;
   clientId = null;
-  CLIENT_PUBLIC_KEY.value = "";
-  localStorage.removeItem(STORAGE_KEY);
-  setKeyStatus("No client keypair generated yet.");
-  log("Cleared saved client keys.");
+  CLIENT_CREDENTIALS.value = "";
+  localStorage.removeItem(CREDENTIALS_KEY);
+  localStorage.removeItem(HOST_PUBLIC_KEY_KEY);
+  setKeyStatus("No saved SDK credentials.");
+  log("Cleared saved SDK credentials and host public key.");
 });
 
-HOST_PUBLIC_KEY.addEventListener("change", saveKeys);
+HOST_PUBLIC_KEY.addEventListener("change", saveHostPublicKey);
 
 initWasm()
   .then(() => {

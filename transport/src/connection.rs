@@ -53,6 +53,45 @@ impl Default for Policy {
     }
 }
 
+impl Policy {
+    pub fn with_send_mode(mut self, send_mode: SendMode) -> Self {
+        self.send_mode = send_mode;
+        self
+    }
+
+    pub fn with_max_message_size(mut self, max_message_size: u64) -> Self {
+        self.max_message_size = max_message_size;
+        self
+    }
+
+    pub fn with_timeouts(
+        mut self,
+        open_stream_timeout: Duration,
+        write_timeout: Duration,
+        read_timeout: Duration,
+    ) -> Self {
+        self.open_stream_timeout = open_stream_timeout;
+        self.write_timeout = write_timeout;
+        self.read_timeout = read_timeout;
+        self
+    }
+
+    pub fn with_keep_alive(mut self, keep_alive_interval: Option<Duration>) -> Self {
+        self.keep_alive_interval = keep_alive_interval;
+        self
+    }
+
+    pub fn with_max_idle_timeout(mut self, max_idle_timeout: Option<Duration>) -> Self {
+        self.max_idle_timeout = max_idle_timeout;
+        self
+    }
+
+    pub fn with_receiver_queue_capacity(mut self, receiver_queue_capacity: usize) -> Self {
+        self.receiver_queue_capacity = receiver_queue_capacity;
+        self
+    }
+}
+
 enum ReceivedFrame {
     Message(CommunicationValue),
     ClosedByPeer,

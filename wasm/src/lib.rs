@@ -1,7 +1,10 @@
 pub mod client;
+pub mod config;
 pub mod crypto;
 pub mod error;
-pub mod message;
+pub mod frame;
+pub mod logging;
+pub mod subscription;
 pub mod transport;
 
 #[cfg(not(test))]
@@ -11,5 +14,4 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(start)]
 pub fn main() {
     console_error_panic_hook::set_once();
-    web_sys::console::log_1(&"mtp-wasm: module loaded".into());
 }

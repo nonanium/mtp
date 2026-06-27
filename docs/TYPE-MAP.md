@@ -10,7 +10,18 @@ Type names are defined in a YAML config and turned into Rust enums at **compile 
 
 ### Defining Type Maps
 
-An example `type-maps.yaml` is provided in the [`example-type-maps.yaml`](./example-type-maps.yaml) file. Place your own `type-maps.yaml` in your project root and set the `MTP_TYPE_MAPS` environment variable (see [Customizing Type Maps in Downstream Projects](#customizing-type-maps-in-downstream-projects)).
+Place your own `type-maps.yaml` in your project root. Browser apps should use the Vite plugin so the app-specific WASM package is generated into Vite's cache during dev/build:
+
+```typescript
+import { defineConfig } from "vite";
+import { mtp } from "mtp/vite";
+
+export default defineConfig({
+  plugins: [mtp({ typeMaps: "./type-maps.yaml" })],
+});
+```
+
+Rust and manual WASM builds can set `MTP_TYPE_MAPS` directly (see [Customizing Type Maps in Downstream Projects](#customizing-type-maps-in-downstream-projects)).
 
 ### Using Generated Enums
 
@@ -84,7 +95,18 @@ let decoded = codec.decode(&bytes, Version(2, 0)).unwrap();
 
 ## Customizing Type Maps in Downstream Projects
 
-External projects must provide their own type map configuration via the `MTP_TYPE_MAPS` environment variable. There is no bundled default; the build script will error if the variable is not set or points to an invalid file.
+External projects must provide their own type map configuration. Browser projects should install `mtp` and configure `mtp/vite`; they do not need to publish, fork, or copy a generated WASM package.
+
+```typescript
+import { defineConfig } from "vite";
+import { mtp } from "mtp/vite";
+
+export default defineConfig({
+  plugins: [mtp({ typeMaps: "./type-maps.yaml" })],
+});
+```
+
+For Rust builds, or when invoking `wasm-pack` manually, set the `MTP_TYPE_MAPS` environment variable. If the variable points to an invalid file, the build fails. If `MTP_TYPE_MAPS` is not set, the build script emits a warning and generates reserved protocol types only; application-specific communication and data types will not be available.
 
 1. Create a `type-maps.yaml` in your project root
 2. Set the `MTP_TYPE_MAPS` environment variable in `.cargo/config.toml`:

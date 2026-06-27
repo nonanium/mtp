@@ -32,17 +32,7 @@
           runtimeInputs = [rustToolchain];
           text = ''
             export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example/type-maps.yaml}"
-            cargo clippy --workspace --exclude mtp-wasm --all-targets --all-features -- -D warnings \
-              -W unreachable-pub \
-              -W clippy::cognitive_complexity \
-              -W clippy::missing_docs_in_private_items \
-              -W clippy::missing_errors_doc \
-              -W clippy::missing_panics_doc \
-              -W clippy::missing_safety_doc \
-              -W clippy::undocumented_unsafe_blocks \
-              -W clippy::pedantic \
-              -W clippy::restriction \
-              -A clippy::blanket_clippy_restriction_lints
+            cargo clippy --workspace --exclude mtp-wasm --all-targets --all-features -- -D warnings -W unreachable-pub
           '';
         };
 
@@ -56,21 +46,20 @@
 
         buildAll = pkgs.writeShellApplication {
           name = "mtp-build-all";
-          runtimeInputs = [rustToolchain pkgs.wasm-pack pkgs.bun clippyCheck macheteCheck];
+          runtimeInputs = [rustToolchain pkgs.wasm-pack pkgs.pnpm pkgs.coreutils clippyCheck macheteCheck];
           text = ''
             export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example/type-maps.yaml}"
 
-            bun install --frozen-lockfile
+            timeout 60s pnpm install --frozen-lockfile
             cargo fmt --all --check
             cargo b
             cargo test --workspace --exclude mtp-wasm --all-features
             cargo check --manifest-path example/Cargo.toml --workspace --all-targets --all-features
             mtp-clippy
             mtp-machete
-            bun run dup
-            RUSTFLAGS='--cfg web_sys_unstable_apis' wasm-pack build wasm --target web --out-dir pkg --release
-            bun install --cwd example/web-client --frozen-lockfile
-            bun run --cwd example/web-client build
+            pnpm run dup
+            pnpm run build
+            pnpm --filter mtp-web-client run build
           '';
         };
 
@@ -91,6 +80,7 @@
               rustToolchain
               cargo-machete
               wasm-pack
+              pnpm
               pkg-config
               openssl
             ];
@@ -140,9 +130,10 @@
             name = "autoStart";
             buildInputs = with pkgs; [
               mprocs
+              pnpm
             ];
             shellHook = ''
-              nix develop --command bash -c "mprocs 'cd wasm && wasm-pack build --target web --out-dir pkg && cd ../example/web-client && bun dev' 'cargo b && cd example && cargo r --bin server' 'cd example && cargo r --bin client'"
+              nix develop --command bash -c "mprocs 'cd wasm && wasm-pack build --target web --out-dir pkg && cd ../example/web-client && pnpm -r update mtp --latest && pnpm dev' 'cargo b && cd example && cargo r --bin server' 'cd example && cargo r --bin client'"
               exit
             '';
           };

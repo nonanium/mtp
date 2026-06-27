@@ -9,7 +9,6 @@ mtp-codec = { path = "../codec", features = ["registry"] }
 mtp-transport = { path = "../transport", features = ["host"] }
 mtp-crypto = { path = "../crypto", optional = true }
 rand = "0.8"
-log = "0.4"
 
 [features]
 crypto = ["dep:mtp-crypto", "mtp-codec/crypto"]

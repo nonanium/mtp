@@ -1,6 +1,17 @@
 /* tslint:disable */
 /* eslint-disable */
 
+export interface ParsedFrame {
+    id?: number;
+    type: string;
+    sender?: bigint;
+    receiver?: bigint;
+    data: Record<string, unknown>;
+    raw: Uint8Array;
+}
+
+
+
 export class ConnectionConfig {
     free(): void;
     [Symbol.dispose](): void;
@@ -66,7 +77,12 @@ export class WasmClient {
     disconnect(): void;
     static is_supported(): boolean;
     constructor(on_state_change: Function, on_message: Function, on_error: Function);
+    request(frame: Uint8Array, response_type?: string | null): Promise<any>;
     send(frame: Uint8Array): Promise<void>;
+    start_protocol_pings(interval_ms: number, client_id: bigint): void;
+    stop_protocol_pings(): void;
+    subscribe(message_type: string, callback: Function): number;
+    unsubscribe(id: number): boolean;
     readonly state: number;
 }
 
@@ -105,6 +121,15 @@ export class WasmKeyring {
     to_bytes(): Uint8Array;
 }
 
+/**
+ * Log severity used by the public SDK when translating raw WASM events.
+ */
+export enum WasmLogHint {
+    Info = 0,
+    Warning = 1,
+    Error = 2,
+}
+
 export class WasmPublicKeyBundle {
     private constructor();
     free(): void;
@@ -117,24 +142,26 @@ export class WasmPublicKeyBundle {
 }
 
 /**
- * Build a demo Ping frame with encrypted and signed containers
- * (mirrors the Rust client example but uses only reserved data types).
+ * Minimal message router used by higher-level SDK subscription code.
  */
-export function build_demo_message(client_id: bigint, keyring_bytes: Uint8Array, host_bundle_bytes: Uint8Array): Uint8Array;
+export class WasmSubscriptionRouter {
+    free(): void;
+    [Symbol.dispose](): void;
+    dispatch(message_type: string, message: any): boolean;
+    constructor();
+    subscribe(message_type: string, callback: Function): void;
+    unsubscribe(message_type: string): boolean;
+}
 
 /**
- * Build a simple Ping frame with description, timestamp, and optional data.
+ * Build a typed MTP frame using generated communication/data type names.
+ */
+export function build_frame(message_type: string, data: any, options: any): Uint8Array;
+
+/**
+ * Build a protocol-level Ping frame with description, timestamp, and optional data.
  */
 export function build_ping_frame(client_id: bigint, description: string, timestamp: bigint, data: Uint8Array): Uint8Array;
-
-/**
- * Build a request frame with the given communication type name, request ID, and JSON data.
- *
- * - `comm_type`: communication type name (e.g. "get_model", "rank_models") or PascalCase
- * - `id`: request ID for response correlation
- * - `json_data`: JSON-stringified request payload
- */
-export function build_request_frame(comm_type: string, id: number, json_data: string): Uint8Array;
 
 /**
  * Generate a fresh Ed25519 keypair.
@@ -169,9 +196,9 @@ export function main(): void;
 export function parse_auth_response(response: Uint8Array): any;
 
 /**
- * Parse a response frame into a JSON string containing `_id`, `_type`, and data fields.
+ * Parse any MTP frame into structured JavaScript data.
  */
-export function parse_response_frame(frame: Uint8Array): string;
+export function parse_frame(frame: Uint8Array): ParsedFrame;
 
 /**
  * Derive a 32-byte encryption key from `ikm` with `salt` and `context`.
@@ -197,6 +224,11 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly build_frame: (a: number, b: number, c: any, d: any) => [number, number, number, number];
+    readonly build_ping_frame: (a: bigint, b: number, c: number, d: bigint, e: number, f: number) => [number, number, number, number];
+    readonly format_frame: (a: number, b: number) => [number, number, number, number];
+    readonly parse_auth_response: (a: number, b: number) => [number, number, number];
+    readonly parse_frame: (a: number, b: number) => [number, number, number];
     readonly __wbg_wasmchacha20poly1305_free: (a: number, b: number) => void;
     readonly __wbg_wasmed25519signer_free: (a: number, b: number) => void;
     readonly __wbg_wasmkeyring_free: (a: number, b: number) => void;
@@ -222,32 +254,36 @@ export interface InitOutput {
     readonly wasmpublickeybundle_sig_cl_public_key: (a: number) => [number, number];
     readonly wasmpublickeybundle_sig_pq_public_key: (a: number) => [number, number];
     readonly wasmpublickeybundle_to_bytes: (a: number) => [number, number];
-    readonly build_demo_message: (a: bigint, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly build_ping_frame: (a: bigint, b: number, c: number, d: bigint, e: number, f: number) => [number, number, number, number];
-    readonly build_request_frame: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly format_frame: (a: number, b: number) => [number, number, number, number];
-    readonly parse_auth_response: (a: number, b: number) => [number, number, number];
-    readonly parse_response_frame: (a: number, b: number) => [number, number, number, number];
-    readonly __wbg_connectionconfig_free: (a: number, b: number) => void;
     readonly __wbg_wasmclient_free: (a: number, b: number) => void;
-    readonly connectionconfig_client_id: (a: number) => bigint;
-    readonly connectionconfig_new: (a: number, b: number) => number;
-    readonly connectionconfig_set_client_id: (a: number, b: bigint) => void;
-    readonly connectionconfig_set_server_certificate_hashes: (a: number, b: number, c: number) => void;
-    readonly connectionconfig_url: (a: number) => [number, number];
     readonly wasmclient_auth_connect: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint) => any;
     readonly wasmclient_auth_register: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly wasmclient_connect: (a: number, b: number) => any;
     readonly wasmclient_disconnect: (a: number) => void;
     readonly wasmclient_is_supported: () => number;
     readonly wasmclient_new: (a: any, b: any, c: any) => number;
+    readonly wasmclient_request: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly wasmclient_send: (a: number, b: number, c: number) => any;
+    readonly wasmclient_start_protocol_pings: (a: number, b: number, c: bigint) => [number, number];
     readonly wasmclient_state: (a: number) => number;
+    readonly wasmclient_stop_protocol_pings: (a: number) => void;
+    readonly wasmclient_subscribe: (a: number, b: number, c: number, d: any) => number;
+    readonly wasmclient_unsubscribe: (a: number, b: number) => number;
+    readonly __wbg_wasmsubscriptionrouter_free: (a: number, b: number) => void;
     readonly main: () => void;
+    readonly wasmsubscriptionrouter_dispatch: (a: number, b: number, c: number, d: any) => number;
+    readonly wasmsubscriptionrouter_new: () => number;
+    readonly wasmsubscriptionrouter_subscribe: (a: number, b: number, c: number, d: any) => void;
+    readonly wasmsubscriptionrouter_unsubscribe: (a: number, b: number, c: number) => number;
+    readonly __wbg_connectionconfig_free: (a: number, b: number) => void;
+    readonly connectionconfig_client_id: (a: number) => bigint;
+    readonly connectionconfig_new: (a: number, b: number) => number;
+    readonly connectionconfig_set_client_id: (a: number, b: bigint) => void;
+    readonly connectionconfig_set_server_certificate_hashes: (a: number, b: number, c: number) => void;
+    readonly connectionconfig_url: (a: number) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h6588d25cdde23584: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__h2faccefeed15993f: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__h2faccefeed15993f_2: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h4bf2427f775cf424: (a: number, b: number, c: any, d: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h3c511b580d027299: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h99ead69e8d7f5bae: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

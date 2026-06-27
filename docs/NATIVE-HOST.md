@@ -21,25 +21,23 @@ mtp = { path = "/path/to/mtp", features = ["host", "crypto"] }
 use mtp::host::HostConfig;
 use std::net::{IpAddr, Ipv4Addr};
 
-let config = HostConfig {
-    ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-    port: 4433,
-    tls_fullchain: std::fs::read("cert.pem")?,
-    tls_key: std::fs::read("key.pem")?,
-
-    // Crypto fields (required when feature = "crypto"):
-    require_authentication: true,
-    host_id: 1,
-    host_keyring: /* Keyring */,
-    get_existing_user: Box::new(|client_id: u64| -> Option<PublicKeyBundle> {
+let config = HostConfig::new(
+    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    4433,
+    std::fs::read("cert.pem")?,
+    std::fs::read("key.pem")?,
+)
+.with_authentication(
+    /* Keyring */,
+    |client_id: u64| -> Option<PublicKeyBundle> {
         CLIENT_DB.lock().unwrap().get(&client_id).cloned()
-    }),
-    complete_register: Box::new(|bundle: PublicKeyBundle| -> u64 {
+    },
+    |bundle: PublicKeyBundle| -> u64 {
         let id = next_id();
         CLIENT_DB.lock().unwrap().insert(id, bundle);
         id
-    }),
-};
+    },
+);
 ```
 
 | Field                  | Type                                    | Description                                    |
@@ -49,10 +47,9 @@ let config = HostConfig {
 | `tls_fullchain`        | `Vec<u8>`                               | PEM-encoded TLS certificate chain              |
 | `tls_key`              | `Vec<u8>`                               | PEM-encoded TLS private key                    |
 | `require_authentication` | `bool` (crypto)                      | Enable login/register handshake                |
-| `host_id`              | `u64` (crypto)                          | Host identifier                                |
 | `host_keyring`         | `Keyring` (crypto)                      | Host's signing and KEM keys                    |
-| `get_existing_user`    | `Box<dyn Fn(u64) -> Option<PublicKeyBundle> + Send>` (crypto) | Lookup callback for login |
-| `complete_register`    | `Box<dyn Fn(PublicKeyBundle) -> u64 + Send>` (crypto) | Registration callback, returns new client ID |
+| `get_existing_user`    | `Fn(u64) -> Option<PublicKeyBundle> + Send + Sync` (crypto) | Lookup callback for login |
+| `complete_register`    | `Fn(PublicKeyBundle) -> u64 + Send + Sync` (crypto) | Registration callback, returns new client ID |
 
 ### TLS
 
@@ -67,7 +64,7 @@ use mtp::host::MTPHost;
 let mut host = MTPHost::new(config).await?;
 println!("Listening on {}", host.local_addr());
 
-while let Some(conn) = host.accept().await {
+while let Some(conn) = host.accept().await? {
     // conn is an MTPConnection ready for I/O
 }
 ```
@@ -107,12 +104,12 @@ When a client connects, `accept()` performs the following sequence:
 1. Accept the QUIC connection
 2. Read the client's first `CommunicationValue` (always encoded with reserved
    type IDs)
-3. Extract the protocol version from `DataType::Version` (wire ID 3) as a
+3. Extract the protocol version from `DataType::Version` (reserved data type ID 0) as a
    `DataValue::Str("major.minor")`
 4. Call `registry.negotiate(&[client_version])` to find the highest mutually
    supported version
-5. Return `None` (closing the connection) if no compatible version exists
-6. Return an `MTPConnection` with the negotiated version
+5. Return an `AcceptError` (closing the connection) if no compatible version exists
+6. Return `Ok(Some(MTPConnection))` with the negotiated version
 
 The `Registry` is built automatically from all type maps defined in your
 `type-maps.yaml` via `Registry::builtin()`.
@@ -221,14 +218,14 @@ available for verifying subsequent signed messages from the client.
 
 If verification fails or the client is not found (login), the host sends a
 rejection response with `Connected=false` and closes the send stream, returning
-`None` from `accept()`.
+`AcceptError::AuthenticationFailed` from `accept()`.
 
 ## Handling Messages
 
 Use `conn.sender` and `conn.receiver` for bidirectional message exchange:
 
 ```rust
-while let Some(conn) = host.accept().await {
+while let Some(conn) = host.accept().await? {
     tokio::spawn(async move {
         loop {
             match conn.receiver.receive().await {
@@ -265,9 +262,9 @@ verification. Must return `Some(PublicKeyBundle)` if the client ID is known,
 or `None` to reject.
 
 ```rust
-let get_existing_user = Box::new(|id: u64| -> Option<PublicKeyBundle> {
+let get_existing_user = |id: u64| -> Option<PublicKeyBundle> {
     db.lock().unwrap().get(&id).cloned()
-});
+};
 ```
 
 ### complete_register
@@ -277,16 +274,16 @@ assign a client ID. The returned `u64` becomes the client's permanent
 identifier.
 
 ```rust
-let complete_register = Box::new(|bundle: PublicKeyBundle| -> u64 {
+let complete_register = |bundle: PublicKeyBundle| -> u64 {
     let mut db = db.lock().unwrap();
     let id = next_id;
     next_id += 1;
     db.insert(id, bundle);
     id
-});
+};
 ```
 
-Both callbacks are called from within `accept()` and must be `Send`. They are
+Both callbacks are called from within `accept()` and must be `Send + Sync`. They are
 invoked synchronously, so avoid long-running operations (or use `spawn_blocking`
 if needed, though the callbacks are `Fn`, not `AsyncFn`).
 
@@ -338,5 +335,3 @@ let transport = host(ip, port, cert, key, custom_policy).await?;
 
 Drop the `MTPHost` to stop accepting new connections. Active connections
 continue until their `Sender`/`Receiver` are dropped or the peer disconnects.
-
-

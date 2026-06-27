@@ -124,6 +124,10 @@ impl CommunicationValue {
     pub fn get_data(&self, data_type: DataTypeId) -> &DataValue {
         self.data.get(&data_type).unwrap_or(&DataValue::Null)
     }
+
+    pub fn data(&self) -> &BTreeMap<DataTypeId, DataValue> {
+        &self.data
+    }
 }
 
 impl CommunicationValue {

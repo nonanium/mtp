@@ -17,24 +17,22 @@ mtp = { path = "/path/to/mtp", features = ["client", "crypto"] }
 ## ClientConfig
 
 ```rust
-use mtp::client::ClientConfig;
+use mtp::client::{ClientConfig, ClientTlsConfig};
 
-let config = ClientConfig {
-    url: "https://host.example.com:4433".into(),
-    server_cert: None,   // None = use system root certificates
-    client_id: 0,                              // previously assigned ID or 0
-};
+let config = ClientConfig::new("https://host.example.com:4433")
+    .with_tls(ClientTlsConfig::SystemRoots)
+    .with_client_id(0);
 ```
 
 | Field        | Type               | Description                                         |
 |--------------|--------------------|-----------------------------------------------------|
 | `url`        | `String`           | `https://host:port` address of the MTP host         |
-| `server_cert`| `Option<Vec<u8>>`  | `None` to use system roots, `Some(pem_bytes)` to pin |
+| `tls`        | `ClientTlsConfig`  | `SystemRoots` or `PinnedPem(pem_bytes)`              |
 | `client_id`  | `u64`              | Client identifier (ignored during `auth_register`)  |
 
 ### TLS Certificate Handling
 
-When `server_cert` is `None` (the default), the client loads the **system's
+When `tls` is `ClientTlsConfig::SystemRoots` (the default), the client loads the **system's
 native root certificate store** via `rustls_native_certs`. This works with
 publicly-trusted CAs out of the box on Linux (using `openssl-probe`), macOS
 (Keychain), and Windows (Root Store).
@@ -44,10 +42,7 @@ certificates:
 
 ```rust
 let pem = std::fs::read("my-server-cert.pem")?;
-let config = ClientConfig {
-    server_cert: Some(pem),
-    // ...
-};
+let config = ClientConfig::new("https://host.example.com:4433").with_pinned_pem(pem);
 ```
 
 When pinned, **only** the given certificate(s) are trusted for the TLS
@@ -78,13 +73,9 @@ pub struct MTPConnection {
 ### Unauthenticated Connect
 
 ```rust
-use mtp::client::{MTPClient, ClientConfig};
+use mtp::client::{ClientConfig, MTPClient};
 
-let config = ClientConfig {
-    url: "https://host.example.com:4433".into(),
-    server_cert: None,
-    client_id: 42,
-};
+let config = ClientConfig::new("https://host.example.com:4433").with_client_id(42);
 
 let conn = MTPClient::connect(config).await?;
 ```
@@ -101,10 +92,8 @@ use mtp::crypto::{Keyring, PublicKeyBundle};
 let keys = Keyring::from_bytes(&saved_keyring_bytes)?;
 let host_pk = PublicKeyBundle::from_bytes(&saved_host_pk_bytes)?;
 
-let config = ClientConfig {
-    client_id: 42,           // must match the keyring's identity
-    // ...
-};
+let config = ClientConfig::new("https://host.example.com:4433")
+    .with_client_id(42); // must match the keyring's identity
 
 let conn = MTPClient::auth_connect(config, &keys, &host_pk).await?;
 ```
@@ -315,7 +304,11 @@ using `MTPClient`:
 ```rust
 use mtp_transport::{connect, Policy};
 
-let (sender, receiver) = connect(&config.url, config.server_cert, policy).await?;
+let server_cert = match &config.tls {
+    ClientTlsConfig::SystemRoots => None,
+    ClientTlsConfig::PinnedPem(pem) => Some(pem.clone()),
+};
+let (sender, receiver) = connect(&config.url, server_cert, policy).await?;
 ```
 
 Then build and send the initial `Identification` frame manually to complete
@@ -324,7 +317,7 @@ version negotiation.
 ## Version
 
 The client's protocol version is baked in at compile time via the
-`PROTOCOL_VERSION` constant from `mtp_codec`. The version is set by the
+`PROTOCOL_VERSION` constant from `mtp::codec`. The version is set by the
 `protocol_version` field in your `type-maps.yaml`.
 
 The client never imports the `registry` module; it uses a single compiled-in

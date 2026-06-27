@@ -1,5 +1,4 @@
 use crate::{ConnectionHandle, Policy, Receiver, Sender};
-use log;
 use mtp_common::CommunicationError;
 use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
 use std::net::{IpAddr, SocketAddr};
@@ -14,13 +13,7 @@ pub struct Host {
 
 impl Host {
     pub async fn next(&mut self) -> Option<(Sender, Receiver)> {
-        log::warn!("[transport Host::next] waiting on recv...");
-        let result = self.incoming.recv().await;
-        match &result {
-            Some(_) => log::warn!("[transport Host::next] received connection"),
-            None => log::warn!("[transport Host::next] incoming channel closed - sender dropped"),
-        }
-        result
+        self.incoming.recv().await
     }
 
     pub fn local_addr(&self) -> std::net::SocketAddr {
@@ -66,19 +59,13 @@ pub async fn host(
     let policy = Arc::new(policy);
 
     let task = tokio::spawn(async move {
-        log::warn!("[transport bg task] started");
         loop {
-            log::warn!("[transport bg task] waiting for connection...");
             let incoming_session = endpoint.accept().await;
-            log::warn!("[transport bg task] got incoming session");
 
             let request = match incoming_session.await {
-                Ok(req) => {
-                    log::warn!("[transport bg task] got request");
-                    req
-                }
+                Ok(req) => req,
                 Err(e) => {
-                    log::warn!("[transport bg task] incoming session error: {e}");
+                    log::debug!("incoming WebTransport session failed: {e}");
                     continue;
                 }
             };
@@ -87,19 +74,15 @@ pub async fn host(
                 .accept_with_headers([("sec-webtransport-http3-draft02", "1")])
                 .await
             {
-                Ok(conn) => {
-                    log::warn!("[transport bg task] connection accepted");
-                    conn
-                }
+                Ok(conn) => conn,
                 Err(e) => {
-                    log::warn!("[transport bg task] accept error: {e}");
+                    log::debug!("WebTransport request accept failed: {e}");
                     continue;
                 }
             };
 
             let incoming_tx = incoming_tx.clone();
             let policy = policy.clone();
-            eprintln!("[transport bg task] spawning handle_connection");
             tokio::spawn(handle_connection(connection, incoming_tx, policy));
         }
     });

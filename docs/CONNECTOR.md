@@ -33,16 +33,17 @@ The host creates a QUIC server, manages the registry, and handles version negoti
 
 ### Initialization
 
-The host binds to the address from the `mtp_BIND` environment variable (defaults to `::`) on the specified port:
+The host binds to the address and port supplied in `HostConfig`:
 
 ```rust
-use mtp::host::{MTPHost, HostConfig};
+use mtp::host::{HostConfig, MTPHost};
 
-let config = HostConfig {
-    port: 4433,
-    tls_fullchain: std::fs::read("cert.pem")?,
-    tls_key: std::fs::read("key.pem")?,
-};
+let config = HostConfig::new(
+    "0.0.0.0".parse()?,
+    4433,
+    std::fs::read("cert.pem")?,
+    std::fs::read("key.pem")?,
+);
 
 let mut host = MTPHost::new(config).await?;
 ```
@@ -50,7 +51,7 @@ let mut host = MTPHost::new(config).await?;
 ### Accepting Connections with Version Negotiation
 
 ```rust
-while let Some(conn) = host.accept().await {
+while let Some(conn) = host.accept().await? {
     // conn.version is the negotiated version
     // conn.codec is a VersionedCodec scoped to that version
     // conn.sender / conn.receiver for raw CommunicationValue I/O
@@ -63,23 +64,23 @@ The host's `accept()` method:
 1. Accepts a QUIC connection
 2. If authentication is required (crypto feature): performs login/register handshake
 3. Reads the first `CommunicationValue` (always encoded with reserved type IDs)
-4. Extracts the client's protocol version from `DataType::Version` (wire ID 3)
+4. Extracts the client's protocol version from `DataType::Version` (reserved data type ID 0)
 5. Calls `registry.negotiate(&[client_version])`
-6. Returns `None` if the version is unsupported
-7. Returns an `MTPConnection` with the negotiated version otherwise
+6. Returns an `AcceptError` if the version is unsupported
+7. Returns `Ok(Some(MTPConnection))` with the negotiated version otherwise
 
 ### Login/Register Handshake
 
 When `require_authentication` is set, the parties run a mutually-authenticated
 **challenge-response**. The client speaks first with an *unsigned* hello:
 
-- **Login** (`CommunicationType::Identification`, ID 15): version, client ID
-- **Register** (`CommunicationType::Register`, ID 17): version, public keys
+- **Login** (`CommunicationType::Identification`, reserved ID 0): version, client ID
+- **Register** (`CommunicationType::Register`, reserved ID 2): version, public keys
 
 The host then issues a fresh random `server_challenge` in a signed `Challenge`
-(`CommunicationType::Challenge`, ID 21, carrying `ServerNonce`). The client signs
+(`CommunicationType::Challenge`, reserved ID 4, carrying `ServerNonce`). The client signs
 that challenge, binding its id (login) or public keys (register), and returns a
-`ChallengeResponse` (ID 22). The host verifies the proof against the challenge it
+`ChallengeResponse` (reserved ID 5). The host verifies the proof against the challenge it
 issued and sends a signed final response, which the client verifies.
 
 Because the client's proof covers the host-issued `server_challenge` (a one-time
@@ -94,21 +95,19 @@ replayed on another connection. All signed payloads are domain-separated; see
 The client connects to a host and uses a single compiled-in protocol version.
 
 ```rust
-use mtp::client::{MTPClient, ClientConfig};
+use mtp::client::{ClientConfig, MTPClient};
 
-let config = ClientConfig {
-    url: "https://host.example.com:4433".into(),
-    server_cert: None, // or Some(cert_pem_bytes)
-};
+let config = ClientConfig::new("https://host.example.com:4433");
+let pinned = config.clone().with_pinned_pem(cert_pem_bytes);
 
 // Connect (unauthenticated, existing client)
-let conn = MTPClient::connect(config, 8765).await?;
+let conn = MTPClient::connect(config.clone().with_client_id(8765)).await?;
 
 // Authenticated login
-let conn = MTPClient::auth_connect(config, 8765, keys, host_pk).await?;
+let conn = MTPClient::auth_connect(pinned.with_client_id(8765), &keys, &host_pk).await?;
 
 // Registration (new client)
-let conn = MTPClient::auth_register(config, keys, host_pk).await?;
+let conn = MTPClient::auth_register(config, &keys, &host_pk).await?;
 ```
 
 The client's `PROTOCOL_VERSION` constant is set by `protocol_version` in `type-maps.yaml` and baked in at compile time. The client never imports the `registry` crate; it only uses `mtp::type_map` for enum types and `mtp::codec` for encoding.

@@ -2,7 +2,43 @@
 
 MTP is a modular transport protocol built on QUIC. It provides version-negotiable type maps, a binary codec, cryptographic primitives (classical and post-quantum), and host/client connection management with mutual authentication.
 
-See the area-specific docs for [Native Client](./NATIVE-CLIENT.md), [WASM Client](./WASM-CLIENT.md), and [Host](./NATIVE-HOST.md)
+See the area-specific docs for [Native Client](./docs/NATIVE-CLIENT.md), [WASM Client](./docs/WASM-CLIENT.md), [Host](./docs/NATIVE-HOST.md), and [Type Maps](./docs/TYPE-MAP.md).
+
+## Browser SDK
+
+The JavaScript package is `mtp`:
+
+```typescript
+import { MTPClient } from "mtp";
+import { mtp } from "mtp/vite";
+```
+
+Use `mtp` for the SDK-first API, `mtp/raw` for generated WASM bindings, and `mtp/vite` for the Vite integration.
+
+```typescript
+// vite.config.ts
+import { defineConfig } from "vite";
+import { mtp } from "mtp/vite";
+
+export default defineConfig({
+  plugins: [mtp({ typeMaps: "./type-maps.yaml" })],
+});
+```
+
+```typescript
+const client = await MTPClient.create({
+  url: "https://localhost:4433",
+  hostPublicKey,
+  credentials,
+  storage,
+  pings: true,
+  logger: (event) => console.log(event),
+});
+
+client.subscribe("SomeType", (message) => console.log(message));
+await client.connectOrRegister();
+await client.send("SomeType", { value: "hello" });
+```
 
 ## Getting Started
 

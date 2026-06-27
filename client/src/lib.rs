@@ -18,8 +18,45 @@ fn unexpected_response_type_error(
 
 pub struct ClientConfig {
     pub url: String,
-    pub server_cert: Option<Vec<u8>>,
+    pub tls: ClientTlsConfig,
     pub client_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientTlsConfig {
+    SystemRoots,
+    PinnedPem(Vec<u8>),
+}
+
+impl ClientConfig {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            tls: ClientTlsConfig::SystemRoots,
+            client_id: 0,
+        }
+    }
+
+    pub fn with_tls(mut self, tls: ClientTlsConfig) -> Self {
+        self.tls = tls;
+        self
+    }
+
+    pub fn with_pinned_pem(self, cert_pem: Vec<u8>) -> Self {
+        self.with_tls(ClientTlsConfig::PinnedPem(cert_pem))
+    }
+
+    pub fn with_client_id(mut self, client_id: u64) -> Self {
+        self.client_id = client_id;
+        self
+    }
+
+    fn server_cert(&self) -> Option<Vec<u8>> {
+        match &self.tls {
+            ClientTlsConfig::SystemRoots => None,
+            ClientTlsConfig::PinnedPem(cert) => Some(cert.clone()),
+        }
+    }
 }
 
 /* Established MTP connection with a single negotiated version. */
@@ -52,7 +89,7 @@ impl MTPClient {
      */
     pub async fn connect(config: ClientConfig) -> Result<MTPConnection, CommunicationError> {
         let (sender, receiver) =
-            mtp_transport::connect(&config.url, config.server_cert, Policy::default()).await?;
+            mtp_transport::connect(&config.url, config.server_cert(), Policy::default()).await?;
 
         // Build the initial identification message with the protocol version.
         let version_str = format!("{}", PROTOCOL_VERSION);
@@ -264,7 +301,7 @@ impl MTPClient {
         use mtp_crypto::auth;
 
         let (sender, receiver) =
-            mtp_transport::connect(&config.url, config.server_cert, Policy::default()).await?;
+            mtp_transport::connect(&config.url, config.server_cert(), Policy::default()).await?;
 
         let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
@@ -337,7 +374,7 @@ impl MTPClient {
         use mtp_crypto::auth;
 
         let (sender, receiver) =
-            mtp_transport::connect(&config.url, config.server_cert, Policy::default()).await?;
+            mtp_transport::connect(&config.url, config.server_cert(), Policy::default()).await?;
 
         let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
@@ -414,23 +451,20 @@ mod tests {
 
     #[test]
     fn test_client_config_url() {
-        let config = ClientConfig {
-            url: "https://example.com:4433".into(),
-            server_cert: None,
-            client_id: 0,
-        };
+        let config = ClientConfig::new("https://example.com:4433");
         assert_eq!(config.url, "https://example.com:4433");
-        assert!(config.server_cert.is_none());
+        assert_eq!(config.tls, ClientTlsConfig::SystemRoots);
     }
 
     #[test]
     fn test_client_config_with_cert() {
-        let config = ClientConfig {
-            url: "https://localhost:4433".into(),
-            server_cert: Some(vec![0x01, 0x02, 0x03]),
-            client_id: 42,
-        };
-        assert_eq!(config.server_cert, Some(vec![0x01, 0x02, 0x03]));
+        let config = ClientConfig::new("https://localhost:4433")
+            .with_pinned_pem(vec![0x01, 0x02, 0x03])
+            .with_client_id(42);
+        assert_eq!(
+            config.tls,
+            ClientTlsConfig::PinnedPem(vec![0x01, 0x02, 0x03])
+        );
         assert_eq!(config.client_id, 42);
     }
 

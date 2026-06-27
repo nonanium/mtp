@@ -1,291 +1,282 @@
 # MTP WASM Client
 
-The WASM client is a browser-compatible MTP implementation that uses the **WebTransport** API to communicate with an MTP host over QUIC (HTTP/3). It compiles from Rust to WebAssembly via `wasm-bindgen` and exposes a JavaScript/TypeScript API through the `mtp-wasm` npm package.
+The browser client is exposed through the `mtp` npm package. Most applications should use the SDK-first `MTPClient` API; direct generated WASM bindings remain available from `mtp/raw` for advanced integrations.
 
-## Package
-
-The compiled package lives in `wasm/pkg/` and contains:
-
-- `mtp_wasm.js` -- generated JS glue
-- `mtp_wasm_bg.wasm` -- the WebAssembly binary
-- `mtp_wasm.d.ts` -- TypeScript type declarations
-- `package.json` -- npm package definition
-
-Install or copy these files into your web project. Then initialise the module:
+## Package Entry Points
 
 ```typescript
-import init, { WasmClient } from 'mtp-wasm';
-
-await init();
+import { MTPClient } from "mtp";
+import init, { WasmClient } from "mtp/raw";
+import { mtp } from "mtp/vite";
 ```
 
-## Browser Support
+- `mtp` exports the SDK-first `MTPClient` wrapper.
+- `mtp/raw` exports the generated `wasm-bindgen` module and raw classes/functions.
+- `mtp/vite` exports the Vite plugin that builds app-specific WASM bindings from your `type-maps.yaml`.
+- `mtp/type-map` exports generated TypeScript unions for communication and data type names.
 
-WebTransport is required. Check availability at runtime:
+## Vite Type-Map Workflow
+
+Browser apps provide their own type map. The Vite plugin runs `wasm-pack` during dev/build with `MTP_TYPE_MAPS` set, writes generated output under `node_modules/.vite/mtp/` by default, and aliases `mtp/raw` plus `mtp/type-map` to that generated output.
 
 ```typescript
-if (!WasmClient.is_supported()) {
-  // fall back or show an error
-}
+// vite.config.ts
+import { defineConfig } from "vite";
+import { mtp } from "mtp/vite";
+
+export default defineConfig({
+  plugins: [mtp({ typeMaps: "./type-maps.yaml" })],
+});
 ```
 
-## Connecting to a Host
+You do not need to publish, fork, or copy an app-specific generated WASM package.
 
-### ConnectionConfig
-
-```typescript
-const config = new ConnectionConfig("https://host.example.com:4433");
-config.client_id = 12345n;                    // optional, for re-authentication
-config.server_certificate_hashes = [           // optional, for certificate pinning
-  "sha-256:abc123...",
-];
-```
-
-`client_id` is only needed for authenticated login (`auth_connect`). For registration (`auth_register`) it is ignored.
-
-### TLS Certificate Handling
-
-By default, when `server_certificate_hashes` is not set, the browser uses its
-**built-in root certificate store** to verify the server's TLS certificate,
-just like any other HTTPS/WebSocket connection. This works with publicly-trusted
-certificate authorities automatically.
-
-For development or self-signed certificates, pin the server certificate by
-providing its hash:
+## SDK Quick Start
 
 ```typescript
-config.server_certificate_hashes = [
-  "sha-256:abcd1234...",  // hex-encoded hash value
-];
-```
+import { MTPClient } from "mtp";
 
-The hash format is `"<algorithm>:<hex-encoded-hash>"`, where the only algorithm
-the browser's WebTransport API currently accepts is `sha-256`. When hashes are
-provided, the browser **only** trusts certificates matching one of the given
-hashes and ignores its root store for this connection.
+const client = await MTPClient.create({
+  url: "https://host.example.com:4433",
+  hostPublicKey,
+  credentials,
+  storage,
+  serverCertificateHashes: ["sha-256:abcd1234..."],
+  pings: true,
+  logger: (event) => console.log(event),
+});
 
-### Callbacks
+const unsubscribe = client.subscribe("SomeType", (message) => {
+  console.log(message.type, message.data);
+});
 
-The client uses three callbacks for state, messages, and errors:
+await client.connectOrRegister();
+await client.send("SomeType", { value: "hello" });
 
-```typescript
-const client = new WasmClient(
-  (state: number) => console.log("state", state),   // ConnectionState enum
-  (data: Uint8Array) => console.log("msg", data),    // raw frame bytes
-  (err: any) => console.error("err", err),           // error description
+const response = await client.request(
+  "SomeRequestType",
+  { id: "abc" },
+  { responseType: "SomeResponseType" },
 );
-```
 
-### Connection States
+client.raw.client;   // underlying WasmClient instance
+client.raw.bindings; // generated raw WASM module exports
 
-| Value | Name         |
-|-------|--------------|
-| 0     | Disconnected |
-| 1     | Connecting   |
-| 2     | Connected    |
-| 3     | Failed       |
-
-Poll `client.state` at any time.
-
-## Connection Methods
-
-### Unauthenticated Connect
-
-```typescript
-await client.connect(config);
-```
-
-Sends an `Identification` frame with the protocol version and client ID. The host may accept or reject. No cryptographic handshake occurs.
-
-### Authenticated Login
-
-```typescript
-const confirmedId = await client.auth_connect(
-  config,
-  hostPublicKeyBytes,   // Uint8Array: serialized PublicKeyBundle from the host
-  keyringBytes,         // Uint8Array: serialized Keyring matching the client ID
-  clientId,             // bigint: previously assigned client ID
-);
-```
-
-Exchange (challenge-response): the client sends an unsigned `Identification`
-hello, the host replies with a signed `Challenge` carrying a fresh
-`server_challenge`, the client signs that challenge in a `ChallengeResponse`, and
-the host verifies it and replies with a signed `IdentificationResponse`. Signing
-over the host-issued challenge is what prevents a captured proof from being
-replayed on another connection. Returns the confirmed client ID.
-
-### Registration
-
-```typescript
-const newId = await client.auth_register(
-  config,
-  hostPublicKeyBytes,   // Uint8Array: serialized PublicKeyBundle from the host
-  keyringBytes,         // Uint8Array: serialized Keyring for the new identity
-);
-```
-
-Exchange (challenge-response): the client sends an unsigned `Register` hello with
-its public keys, the host replies with a signed `Challenge`, the client signs it
-(binding the public-key bundle) in a `ChallengeResponse`, and the host verifies
-it, assigns a new ID, and responds with a signed `RegisterResponse`. Returns the
-newly assigned client ID.
-
-## Sending and Receiving Messages
-
-### Send
-
-```typescript
-const frame = build_ping_frame(clientId, "hello", timestamp, data);
-await client.send(frame);
-```
-
-`send()` takes raw frame bytes (a serialized `CommunicationValue`). Build frames
-with the provided helper functions or construct them manually.
-
-### Receive
-
-Incoming frames arrive on the `on_message` callback registered in the constructor.
-The callback receives a `Uint8Array` of raw frame bytes. Parse with
-`CommunicationValue.from_bytes()` on the Rust side or handle the bytes in JS.
-
-### Disconnect
-
-```typescript
+unsubscribe();
 client.disconnect();
 ```
 
-Gracefully closes the WebTransport session.
-
-## Building Frames
-
-### `build_ping_frame`
+`MTPClient.isSupported()` checks whether the current browser exposes WebTransport:
 
 ```typescript
-function build_ping_frame(
-  clientId: bigint,
-  description: string,
-  timestamp: bigint,
-  data: Uint8Array,
-): Uint8Array;
-```
-
-Constructs a basic `Ping` message with description, timestamp, and optional
-binary payload. Useful for health checks and simple messaging.
-
-### `build_demo_message`
-
-```typescript
-function build_demo_message(
-  clientId: bigint,
-  keyringBytes: Uint8Array,
-  hostBundleBytes: Uint8Array,
-): Uint8Array;
-```
-
-Constructs a `Ping` frame that demonstrates encrypted, signed, and
-signed+encrypted containers. The containers are ML-KEM-encrypted to the host's
-`PublicKeyBundle` (`hostBundleBytes`, the same bytes passed to `auth_connect` /
-`auth_register`), so the host decrypts them with its own keyring; signatures use
-the client keyring's Ed25519 key. The client keyring only needs its Ed25519
-signing key for this demo.
-
-### `parse_auth_response`
-
-```typescript
-function parse_auth_response(response: Uint8Array): any;
-```
-
-Parses an `IdentificationResponse` or `RegisterResponse` frame into a JS object:
-
-```typescript
-{
-  connected: boolean,
-  clientNonce?: Uint8Array,
-  assignedId?: number,
-  timestamp?: number,
-  signature?: Uint8Array,
+if (!MTPClient.isSupported()) {
+  throw new Error("WebTransport is not available in this browser");
 }
 ```
 
-## Crypto Primitives
+## Credentials And Storage
 
-### Key Generation
-
-```typescript
-const result = ed25519_generate();
-// result.signer      -> WasmEd25519Signer
-// result.secretKey   -> Uint8Array (32 bytes)
-// result.publicKey   -> Uint8Array (32 bytes)
-```
-
-### Keyring
-
-A `Keyring` bundles all key material for an identity. For Ed25519-only setups:
+Authenticated connections need stable key material. Pass `credentials` when you already have a client ID and serialized keyring, or pass a small `storage` object and let the SDK persist credentials after registration.
 
 ```typescript
-const keyringBytes = keyring_from_ed25519(secretKey, publicKey);
-// keyringBytes is ready for WasmClient.auth_register or WasmClient.auth_connect
+const storage = {
+  getItem: (key: string) => localStorage.getItem(key),
+  setItem: (key: string, value: string) => localStorage.setItem(key, value),
+  removeItem: (key: string) => localStorage.removeItem(key),
+};
+
+const client = await MTPClient.create({
+  url: "https://host.example.com:4433",
+  hostPublicKey,
+  storage,
+});
+
+const clientId = await client.connectOrRegister();
 ```
 
-Full keyring with KEM + ML-DSA requires constructing on the Rust side. The
-serialized bytes are portable:
+The storage contract is intentionally small and may be sync or async:
 
 ```typescript
-const keyring = WasmKeyring.from_bytes(keyringBytes);
-const bundle = keyring.public_key_bundle();
-// bundle.kem_public_key   -> Uint8Array
-// bundle.sig_cl_public_key -> Uint8Array
-// bundle.sig_pq_public_key -> Uint8Array
+interface MTPCredentialStorage {
+  getItem(key: string): string | null | Promise<string | null>;
+  setItem(key: string, value: string): void | Promise<void>;
+  removeItem(key: string): void | Promise<void>;
+}
 ```
 
-### Signing and Verification
+`credentials` can also be supplied directly:
 
 ```typescript
-const signer = new WasmEd25519Signer(secretKey);
-const sig = signer.sign(message);            // Uint8Array
-signer.verify(message, sig);                 // throws on mismatch
+const client = await MTPClient.create({
+  url: "https://host.example.com:4433",
+  hostPublicKey,
+  credentials: {
+    clientId: 42n,
+    keyring: savedKeyringBytes,
+  },
+});
 
-// Standalone verification (no signer object needed):
-ed25519_verify(publicKey, message, signature);
+await client.connect();
 ```
 
-### Symmetric Encryption
+`client.credentials` returns the current public credential object. Call `clearCredentials()` to remove in-memory credentials and delete the configured storage key.
+
+## Connection Methods
+
+- `connect()` opens a connection. If credentials include a `clientId` and `hostPublicKey` is available, it uses authenticated login; otherwise it uses unauthenticated connect.
+- `register()` performs authenticated registration and persists the assigned client ID when storage is configured.
+- `connectOrRegister()` registers when no client ID is present, otherwise performs authenticated login.
+- `disconnect()` stops protocol pings and closes the underlying WebTransport session.
+
+For certificate pinning, pass WebTransport certificate hashes:
 
 ```typescript
-const cipher = new WasmChaCha20Poly1305(key); // 32-byte key
-const encrypted = cipher.encrypt(plaintext, aad); // nonce || ciphertext
-const decrypted = cipher.decrypt(encrypted, aad);
+await MTPClient.create({
+  url: "https://host.example.com:4433",
+  serverCertificateHashes: ["sha-256:abcd1234..."],
+});
 ```
 
-### Hashing and KDF
+If hashes are omitted, the browser uses its normal TLS root store.
+
+## Sending, Requests, Subscriptions, And Pings
+
+`send` accepts either a typed message or a prebuilt raw frame:
 
 ```typescript
-const hash = wasm_sha256(data);                        // 32 bytes
-const double = wasm_sha256_double(data);               // SHA-256(SHA-256(data))
-
-const derived = wasm_hkdf_expand(ikm, salt, info, len);
-const encKey = wasm_derive_encryption_key(ikm, salt, context); // 32 bytes
+await client.send("SomeType", { value: "hello" });
+await client.send(rawFrameBytes);
 ```
 
-## Lifecycle and Best Practices
+Typed sends are encoded by the generated WASM binding using the app type map. Optional frame metadata can be passed as the third argument:
 
-1. **Key persistence** -- serialise keyring bytes after registration and store
-   them (e.g. in `localStorage`). On next visit, load the saved keyring and
-   call `auth_connect` instead of registering again.
+```typescript
+await client.send("SomeType", { value: "hello" }, {
+  id: 7,
+  sender: client.credentials?.clientId ?? 0n,
+});
+```
 
-2. **Ownership** -- call `config.free()` after connecting if the config object
-   is no longer needed. WASM objects (`WasmClient`, `WasmKeyring`, etc.) are
-   garbage-collected, but explicit `free()` or `dispose()` reclaims memory
-   sooner.
+`request` sends one frame and resolves with the matching parsed response from the WASM layer:
 
-3. **Receive loop** -- once `connect`, `auth_connect`, or `auth_register`
-   resolves, the receive loop is running in the background. Incoming frames
-   arrive on the `on_message` callback. There is no need to poll.
+```typescript
+const response = await client.request(
+  "SomeRequestType",
+  { id: "abc" },
+  { responseType: "SomeResponseType" },
+);
+```
 
-4. **Single active client** -- a `WasmClient` manages one WebTransport session.
-   Create a new instance for each connection.
+`subscribe` registers a message-type handler and returns an unsubscribe function:
 
-5. **State transitions** -- after `disconnect()` the client transitions to
-   `Disconnected`. The instance is reusable; call a connect method again to
-   open a new session.
+```typescript
+const unsubscribe = client.subscribe("SomeType", (message) => {
+  console.log(message.id, message.sender, message.data);
+});
+
+unsubscribe();
+```
+
+Protocol pings are real MTP `Ping` frames sent by the WASM client, not just transport keepalives:
+
+```typescript
+await MTPClient.create({
+  url: "https://host.example.com:4433",
+  pings: { intervalMs: 30_000 },
+});
+```
+
+Use `pings: true` for the default interval.
+
+## Logger Events
+
+The SDK logger receives parsed events:
+
+```typescript
+type MTPLogEvent =
+  | { hint: "info" | "warning"; type: string; data: unknown }
+  | { hint: "error"; type: string | "error"; error: string };
+```
+
+Incoming non-error frames and sent frames are logged as `info`. Error frames and transport errors are logged as `error`.
+
+## Advanced Raw Bindings
+
+Use `mtp/raw` when you need direct access to the generated `wasm-bindgen` API:
+
+```typescript
+import init, {
+  ConnectionConfig,
+  WasmClient,
+  ed25519_generate,
+  keyring_from_ed25519,
+} from "mtp/raw";
+
+await init();
+
+const rawClient = new WasmClient(
+  (state) => console.log("state", state),
+  (frame) => console.log("message", frame),
+  (error) => console.error(error),
+);
+
+const config = new ConnectionConfig("https://host.example.com:4433");
+config.client_id = 42n;
+
+await rawClient.connect(config);
+config.free();
+```
+
+Raw callbacks receive parsed frames, not application-specific SDK objects:
+
+```typescript
+interface ParsedFrame {
+  id?: number;
+  type: string;
+  sender?: bigint;
+  receiver?: bigint;
+  data: Record<string, unknown>;
+  raw: Uint8Array;
+}
+```
+
+Raw message helpers that remain available include:
+
+- `build_frame(messageType, data, options?)`
+- `build_ping_frame(clientId, description, timestamp, data)`
+- `parse_frame(frame)`
+- `format_frame(frame)`
+- `parse_auth_response(frame)`
+
+Raw crypto and key helpers include:
+
+- `ed25519_generate()`
+- `ed25519_verify(publicKey, message, signature)`
+- `keyring_from_ed25519(secretKey, publicKey)`
+- `WasmKeyring.from_bytes(bytes)` and `keyring.to_bytes()`
+- `WasmPublicKeyBundle.from_bytes(bytes)` and `bundle.to_bytes()`
+- `WasmEd25519Signer`
+- `WasmChaCha20Poly1305`
+- `wasm_sha256`, `wasm_sha256_double`, `wasm_hkdf_expand`, and `wasm_derive_encryption_key`
+
+Raw authenticated login and registration map directly to the Rust WASM layer:
+
+```typescript
+const generated = ed25519_generate();
+const keyringBytes = keyring_from_ed25519(generated.secretKey, generated.publicKey);
+
+const registeredId = await rawClient.auth_register(
+  config,
+  hostPublicKeyBytes,
+  keyringBytes,
+);
+
+const confirmedId = await rawClient.auth_connect(
+  config,
+  hostPublicKeyBytes,
+  keyringBytes,
+  registeredId,
+);
+```
+
+A `WasmClient` manages one active WebTransport session. Create a new instance for independent connections, and call `free()` or `[Symbol.dispose]()` on raw WASM objects when you want to release memory eagerly.

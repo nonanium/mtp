@@ -8,11 +8,7 @@
     "isolatedModules": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "paths": {
-      "mtp-wasm": ["../../wasm/pkg"]
-    },
-    "rootDir": "../.."
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "../../wasm/pkg"]
+  "include": ["src"]
 }

@@ -4,9 +4,9 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{WebTransport, WebTransportHash, WebTransportOptions};
 
 use crate::error::js_error;
+use crate::frame::parse_frame_value;
 
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 
@@ -41,42 +41,6 @@ enum FrameOutcome {
 }
 
 /*
- * Debug-log the exact bytes about to be written to the WebTransport stream.
- *
- * Wire layout (note the DOUBLE length prefix):
- *   [0..4]   outer_len  u32 BE  - added by send_frame (= inner frame length)
- *   [4..8]   inner_len  u32 BE  - added by CommunicationValue::to_bytes
- *   [8..10]  comm_type  u16 BE  - e.g. Identification
- *   [10]     flags      u8
- *   [11..]   id/sender/receiver/signature/data, gated by `flags`
- */
-fn log_frame_bytes(wire: &[u8]) {
-    let hex: String = wire
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let outer_len = wire
-        .get(0..4)
-        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
-    let inner_len = wire
-        .get(4..8)
-        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
-    let comm_type = wire.get(8..10).map(|b| u16::from_be_bytes([b[0], b[1]]));
-    let flags = wire.get(10).copied();
-
-    web_sys::console::log_1(
-        &format!(
-            "mtp-wasm send_frame: {len} bytes | outer_len={outer_len:?} inner_len={inner_len:?} \
-             comm_type={comm_type:?} flags={flags:?}\n{hex}",
-            len = wire.len(),
-        )
-        .into(),
-    );
-}
-
-/*
  * WebTransport client transport.
  *
  * The native host sends with a *persistent* uni-directional stream: the auth
@@ -90,7 +54,7 @@ fn log_frame_bytes(wire: &[u8]) {
  */
 #[derive(Clone)]
 pub struct WasmTransport {
-    inner: WebTransport,
+    inner: JsValue,
     /// Reader over `incoming_unidirectional_streams()` (a singleton stream of streams).
     streams_reader: Rc<RefCell<Option<JsValue>>>,
     /// Reader over the host's current uni-directional stream, if one is open.
@@ -101,28 +65,48 @@ pub struct WasmTransport {
 
 impl WasmTransport {
     pub async fn connect(url: &str, cert_hashes: Option<Vec<String>>) -> Result<Self, JsValue> {
-        let transport = match cert_hashes {
-            Some(hashes) => {
-                let opts = WebTransportOptions::new();
-                let mut wt_hashes = Vec::new();
-                for h in hashes {
-                    if let Some((algo, hex_val)) = h.split_once(':') {
-                        if let Ok(bytes) = hex::decode(hex_val) {
-                            let hash = WebTransportHash::new();
-                            hash.set_algorithm(algo);
-                            hash.set_value_u8_array(&js_sys::Uint8Array::from(&bytes[..]));
-                            wt_hashes.push(hash);
-                        }
+        let ctor = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("WebTransport"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("WebTransport not available"))?;
+        let args = js_sys::Array::new();
+        args.push(&JsValue::from_str(url));
+
+        if let Some(hashes) = cert_hashes {
+            let wt_hashes = js_sys::Array::new();
+            for h in hashes {
+                if let Some((algo, hex_val)) = h.split_once(':') {
+                    if let Ok(bytes) = hex::decode(hex_val) {
+                        let hash = js_sys::Object::new();
+                        js_sys::Reflect::set(
+                            &hash,
+                            &JsValue::from_str("algorithm"),
+                            &JsValue::from_str(algo),
+                        )?;
+                        js_sys::Reflect::set(
+                            &hash,
+                            &JsValue::from_str("value"),
+                            &js_sys::Uint8Array::from(&bytes[..]),
+                        )?;
+                        wt_hashes.push(&hash);
                     }
                 }
-                if !wt_hashes.is_empty() {
-                    opts.set_server_certificate_hashes(&wt_hashes);
-                }
-                WebTransport::new_with_options(url, &opts)?
             }
-            None => WebTransport::new(url)?,
+            if wt_hashes.length() > 0 {
+                let opts = js_sys::Object::new();
+                js_sys::Reflect::set(
+                    &opts,
+                    &JsValue::from_str("serverCertificateHashes"),
+                    &wt_hashes,
+                )?;
+                args.push(&opts);
+            }
         };
-        JsFuture::from(transport.ready())
+
+        let transport = js_sys::Reflect::construct(&ctor, &args)?;
+        let ready = js_sys::Reflect::get(&transport, &JsValue::from_str("ready"))?
+            .dyn_into::<js_sys::Promise>()
+            .map_err(|_| js_error("WebTransport.ready is not a Promise"))?;
+        JsFuture::from(ready)
             .await
             .map_err(|e| js_error(&format!("WebTransport ready failed: {:?}", e)))?;
         Ok(Self {
@@ -133,12 +117,21 @@ impl WasmTransport {
         })
     }
 
-    pub fn inner(&self) -> &WebTransport {
+    pub fn inner(&self) -> &JsValue {
         &self.inner
     }
 
     pub async fn send_frame(&self, frame: &[u8]) -> Result<(), JsValue> {
-        let stream_promise = self.inner.create_unidirectional_stream();
+        let create_stream = js_sys::Reflect::get(
+            &self.inner,
+            &JsValue::from_str("createUnidirectionalStream"),
+        )?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| js_error("createUnidirectionalStream not a function"))?;
+        let stream_promise = create_stream
+            .call0(&self.inner)?
+            .dyn_into::<js_sys::Promise>()
+            .map_err(|_| js_error("createUnidirectionalStream did not return a Promise"))?;
         let stream = JsFuture::from(stream_promise).await?;
 
         let writable_or_stream = resolve_stream_writable(&stream)?;
@@ -154,8 +147,6 @@ impl WasmTransport {
         let mut wire = Vec::with_capacity(4 + frame.len());
         wire.extend_from_slice(&len.to_be_bytes());
         wire.extend_from_slice(frame);
-
-        log_frame_bytes(&wire);
 
         let chunk = js_sys::Uint8Array::from(&wire[..]);
 
@@ -185,7 +176,10 @@ impl WasmTransport {
         if let Some(reader) = self.streams_reader.borrow().clone() {
             return Ok(reader);
         }
-        let incoming = self.inner.incoming_unidirectional_streams();
+        let incoming = js_sys::Reflect::get(
+            &self.inner,
+            &JsValue::from_str("incomingUnidirectionalStreams"),
+        )?;
         let reader = js_sys::Reflect::get(&incoming, &JsValue::from_str("getReader"))
             .map_err(|_| js_error("missing getReader"))?
             .dyn_into::<js_sys::Function>()
@@ -341,10 +335,15 @@ impl WasmTransport {
     pub async fn receive_loop(&self, on_message: js_sys::Function, on_error: js_sys::Function) {
         loop {
             match self.next_frame().await {
-                Ok(FrameOutcome::Frame(frame)) => {
-                    let arr = js_sys::Uint8Array::from(&frame[..]);
-                    let _ = on_message.call1(&JsValue::NULL, &arr);
-                }
+                Ok(FrameOutcome::Frame(frame)) => match parse_frame_value(&frame) {
+                    Ok(parsed) => {
+                        let _ = on_message.call1(&JsValue::NULL, &parsed);
+                    }
+                    Err(e) => {
+                        let message = e.as_string().unwrap_or_else(|| format!("{:?}", e));
+                        let _ = on_error.call1(&JsValue::NULL, &JsValue::from_str(&message));
+                    }
+                },
                 Ok(FrameOutcome::Closed) | Ok(FrameOutcome::Ended) => break,
                 Err(e) => {
                     let _ = on_error.call1(&JsValue::NULL, &e);
@@ -355,7 +354,10 @@ impl WasmTransport {
     }
 
     pub fn close(&self) {
-        let info = web_sys::WebTransportCloseInfo::new();
-        let _ = self.inner.close_with_close_info(&info);
+        if let Ok(close) = js_sys::Reflect::get(&self.inner, &JsValue::from_str("close"))
+            .and_then(|value| value.dyn_into::<js_sys::Function>().map_err(Into::into))
+        {
+            let _ = close.call1(&self.inner, &js_sys::Object::new());
+        }
     }
 }

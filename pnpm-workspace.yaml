@@ -1,0 +1,8 @@
+packages:
+  - .
+  - example/web-client
+
+onlyBuiltDependencies:
+  - esbuild
+allowBuilds:
+  esbuild: true

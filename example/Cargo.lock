@@ -952,7 +952,6 @@ dependencies = [
 name = "mtp-host"
 version = "0.1.0"
 dependencies = [
- "log",
  "mtp-codec",
  "mtp-common",
  "mtp-crypto",

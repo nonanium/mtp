@@ -5,6 +5,7 @@ use mtp_codec::{
 use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
 use std::net::IpAddr;
+use std::{error::Error, fmt};
 
 /* Host configuration. */
 pub struct HostConfig {
@@ -16,14 +17,80 @@ pub struct HostConfig {
     #[cfg(feature = "crypto")]
     pub require_authentication: bool,
     #[cfg(feature = "crypto")]
-    pub host_id: u64,
-    #[cfg(feature = "crypto")]
     pub host_keyring: mtp_crypto::Keyring,
     #[cfg(feature = "crypto")]
-    pub get_existing_user: Box<dyn Fn(u64) -> Option<mtp_crypto::PublicKeyBundle> + Send>,
+    pub get_existing_user: Box<dyn Fn(u64) -> Option<mtp_crypto::PublicKeyBundle> + Send + Sync>,
     #[cfg(feature = "crypto")]
-    pub complete_register: Box<dyn Fn(mtp_crypto::PublicKeyBundle) -> u64 + Send>,
+    pub complete_register: Box<dyn Fn(mtp_crypto::PublicKeyBundle) -> u64 + Send + Sync>,
 }
+
+impl HostConfig {
+    pub fn new(ip: IpAddr, port: u16, tls_fullchain: Vec<u8>, tls_key: Vec<u8>) -> Self {
+        Self {
+            ip,
+            port,
+            tls_fullchain,
+            tls_key,
+            #[cfg(feature = "crypto")]
+            require_authentication: false,
+            #[cfg(feature = "crypto")]
+            host_keyring: mtp_crypto::Keyring::new(
+                mtp_crypto::KemPublicKey::new(Vec::new()),
+                mtp_crypto::KemPrivateKey::new(Vec::new()),
+                mtp_crypto::SignaturePqPublicKey::new(Vec::new()),
+                mtp_crypto::SignaturePqPrivateKey::new(Vec::new()),
+                mtp_crypto::SignaturePublicKey::new(Vec::new()),
+                mtp_crypto::SignaturePrivateKey::new(Vec::new()),
+            ),
+            #[cfg(feature = "crypto")]
+            get_existing_user: Box::new(|_| None),
+            #[cfg(feature = "crypto")]
+            complete_register: Box::new(|_| 0),
+        }
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn with_authentication(
+        mut self,
+        host_keyring: mtp_crypto::Keyring,
+        get_existing_user: impl Fn(u64) -> Option<mtp_crypto::PublicKeyBundle> + Send + Sync + 'static,
+        complete_register: impl Fn(mtp_crypto::PublicKeyBundle) -> u64 + Send + Sync + 'static,
+    ) -> Self {
+        self.require_authentication = true;
+        self.host_keyring = host_keyring;
+        self.get_existing_user = Box::new(get_existing_user);
+        self.complete_register = Box::new(complete_register);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptError {
+    Receive(CommunicationError),
+    MissingVersion,
+    UnsupportedVersion(Version),
+    AuthenticationFailed(String),
+    Send(CommunicationError),
+}
+
+impl fmt::Display for AcceptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Receive(error) => write!(f, "failed to receive opening message: {error}"),
+            Self::MissingVersion => write!(
+                f,
+                "opening message did not include a valid protocol version"
+            ),
+            Self::UnsupportedVersion(version) => {
+                write!(f, "unsupported protocol version: {version}")
+            }
+            Self::AuthenticationFailed(reason) => write!(f, "authentication failed: {reason}"),
+            Self::Send(error) => write!(f, "failed to send handshake message: {error}"),
+        }
+    }
+}
+
+impl Error for AcceptError {}
 
 #[cfg(feature = "crypto")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,16 +147,13 @@ impl MTPHost {
      * Accept an incoming connection, negotiate the protocol version,
      * and return a ready-to-use `MTPConnection`.
      *
-     * Returns `None` if the connection is closed or the version is
-     * incompatible.
+     * Returns `Ok(None)` if the listener is closed. Handshake and version
+     * negotiation failures are returned explicitly.
      */
-    pub async fn accept(&mut self) -> Option<MTPConnection> {
+    pub async fn accept(&mut self) -> Result<Option<MTPConnection>, AcceptError> {
         let (sender, receiver) = match self.transport.next().await {
             Some(pair) => pair,
-            None => {
-                log::warn!("accept: transport.next() returned None (listener closed)");
-                return None;
-            }
+            None => return Ok(None),
         };
 
         #[cfg(feature = "crypto")]
@@ -100,10 +164,7 @@ impl MTPHost {
         // Read the first message (always encoded with reserved types).
         let first_msg = match receiver.receive().await {
             Ok(m) => m,
-            Err(e) => {
-                log::warn!("accept: receive failed: {e:?}");
-                return None;
-            }
+            Err(e) => return Err(AcceptError::Receive(e)),
         };
 
         /*
@@ -115,13 +176,7 @@ impl MTPHost {
          */
         let client_version = match extract_version(&first_msg) {
             Some(v) => v,
-            None => {
-                log::warn!(
-                    "accept: extract_version failed on msg type {:?}",
-                    first_msg.get_type()
-                );
-                return None;
-            }
+            None => return Err(AcceptError::MissingVersion),
         };
 
         let negotiated = match self
@@ -129,15 +184,12 @@ impl MTPHost {
             .negotiate(std::slice::from_ref(&client_version))
         {
             Some(v) => v,
-            None => {
-                log::warn!("accept: negotiate failed for client version {client_version:?}");
-                return None;
-            }
+            None => return Err(AcceptError::UnsupportedVersion(client_version)),
         };
 
         let codec = VersionedCodec::new(self.registry.clone());
 
-        Some(MTPConnection {
+        Ok(Some(MTPConnection {
             version: negotiated,
             codec,
             sender,
@@ -148,7 +200,7 @@ impl MTPHost {
             client_id: 0,
             #[cfg(feature = "crypto")]
             client_public_key: None,
-        })
+        }))
     }
 
     pub fn local_addr(&self) -> std::net::SocketAddr {
@@ -180,7 +232,7 @@ impl MTPHost {
         &mut self,
         sender: Sender,
         receiver: Receiver,
-    ) -> Option<MTPConnection> {
+    ) -> Result<Option<MTPConnection>, AcceptError> {
         use mtp_crypto::{
             Ed25519Signer, MlDsaSigner, PublicKeyBundle, SignatureScheme, auth, verify_ed25519,
             verify_ml_dsa,
@@ -207,32 +259,36 @@ impl MTPHost {
             .is_empty();
 
         // Sign `payload` with the host keys (Ed25519 always, ML-DSA when configured).
-        let host_sign = |payload: &[u8]| -> Option<(Vec<u8>, Vec<u8>)> {
-            let signer = Ed25519Signer::new(&self.config.host_keyring.sig_cl_secret_key).ok()?;
-            let sig = signer.sign(payload).ok()?;
+        let host_sign = |payload: &[u8]| -> Result<(Vec<u8>, Vec<u8>), AcceptError> {
+            let signer = Ed25519Signer::new(&self.config.host_keyring.sig_cl_secret_key)
+                .map_err(|e| AcceptError::AuthenticationFailed(e.to_string()))?;
+            let sig = signer
+                .sign(payload)
+                .map_err(|e| AcceptError::AuthenticationFailed(e.to_string()))?;
             let pq_sig = if pq_enabled {
                 let pq = MlDsaSigner::new(
                     &self.config.host_keyring.sig_pq_secret_key,
                     &self.config.host_keyring.sig_pq_public_key,
                 )
-                .ok()?;
-                pq.sign(payload).ok()?
+                .map_err(|e| AcceptError::AuthenticationFailed(e.to_string()))?;
+                pq.sign(payload)
+                    .map_err(|e| AcceptError::AuthenticationFailed(e.to_string()))?
             } else {
                 Vec::new()
             };
-            Some((sig, pq_sig))
+            Ok((sig, pq_sig))
         };
 
         // ===== Step 1: receive the client's unsigned hello =====
-        let hello = receiver.receive().await.ok()?;
+        let hello = receiver.receive().await.map_err(AcceptError::Receive)?;
         let version_str = match hello.get_data(DataType::Version.to_id(&tm)) {
             DataValue::Str(s) => s.clone(),
             _ => {
                 sender.close();
-                return None;
+                return Err(AcceptError::MissingVersion);
             }
         };
-        let client_version = Version::parse(&version_str)?;
+        let client_version = Version::parse(&version_str).ok_or(AcceptError::MissingVersion)?;
 
         let (flow, response_type) =
             if hello.get_type() == mtp_codec::CommunicationType::Identification.to_id(&tm) {
@@ -241,7 +297,9 @@ impl MTPHost {
                     DataValue::UnsignedNumber(n) => *n as u64,
                     _ => {
                         sender.close();
-                        return None;
+                        return Err(AcceptError::AuthenticationFailed(
+                            "missing client id".into(),
+                        ));
                     }
                 };
                 let bundle = match (self.config.get_existing_user)(cid) {
@@ -253,7 +311,9 @@ impl MTPHost {
                         .add_typed_default(DataType::Connected, DataValue::BoolFalse);
                         let _ = sender.send(&rejection).await;
                         sender.close();
-                        return None;
+                        return Err(AcceptError::AuthenticationFailed(
+                            "unknown client id".into(),
+                        ));
                     }
                 };
                 (
@@ -263,10 +323,14 @@ impl MTPHost {
             } else if hello.get_type() == mtp_codec::CommunicationType::Register.to_id(&tm) {
                 // REGISTER: the client presents the bundle it wants to register.
                 let bundle = match hello.get_data(DataType::PublicKeys.to_id(&tm)) {
-                    DataValue::Bytes(b) => PublicKeyBundle::from_bytes(b).ok()?,
+                    DataValue::Bytes(b) => PublicKeyBundle::from_bytes(b).map_err(|_| {
+                        AcceptError::AuthenticationFailed("invalid public key bundle".into())
+                    })?,
                     _ => {
                         sender.close();
-                        return None;
+                        return Err(AcceptError::AuthenticationFailed(
+                            "missing public keys".into(),
+                        ));
                     }
                 };
                 let pk_bytes = bundle.as_bytes();
@@ -276,7 +340,9 @@ impl MTPHost {
                 )
             } else {
                 sender.close();
-                return None;
+                return Err(AcceptError::AuthenticationFailed(
+                    "unexpected authentication message".into(),
+                ));
             };
 
         // The id bound into the challenge (0 for register: none assigned yet).
@@ -300,26 +366,35 @@ impl MTPHost {
             challenge_msg = challenge_msg
                 .add_typed_default(DataType::PqSignature, DataValue::Bytes(chal_pq_sig));
         }
-        sender.send(&challenge_msg).await.ok()?;
+        sender
+            .send(&challenge_msg)
+            .await
+            .map_err(AcceptError::Send)?;
 
         // ===== Step 3: receive and verify the client's proof =====
-        let proof = receiver.receive().await.ok()?;
+        let proof = receiver.receive().await.map_err(AcceptError::Receive)?;
         if proof.get_type() != mtp_codec::CommunicationType::ChallengeResponse.to_id(&tm) {
             sender.close();
-            return None;
+            return Err(AcceptError::AuthenticationFailed(
+                "missing challenge response".into(),
+            ));
         }
         let client_nonce = match proof.get_data(DataType::ClientNonce.to_id(&tm)) {
             DataValue::UnsignedNumber(n) => *n,
             _ => {
                 sender.close();
-                return None;
+                return Err(AcceptError::AuthenticationFailed(
+                    "missing client nonce".into(),
+                ));
             }
         };
         let sig_bytes = match proof.get_data(DataType::Signature.to_id(&tm)) {
             DataValue::Bytes(b) => b.clone(),
             _ => {
                 sender.close();
-                return None;
+                return Err(AcceptError::AuthenticationFailed(
+                    "missing challenge signature".into(),
+                ));
             }
         };
         let pq_sig_bytes: Vec<u8> = match proof.get_data(DataType::PqSignature.to_id(&tm)) {
@@ -355,7 +430,9 @@ impl MTPHost {
                 .add_typed_default(DataType::Connected, DataValue::BoolFalse);
             let _ = sender.send(&rejection).await;
             sender.close();
-            return None;
+            return Err(AcceptError::AuthenticationFailed(
+                "client proof signature invalid".into(),
+            ));
         }
 
         // Proof verified: resolve the assigned id and retain the client's bundle.
@@ -387,14 +464,17 @@ impl MTPHost {
                 response.add_typed_default(DataType::PqSignature, DataValue::Bytes(host_pq_sig));
         }
 
-        sender.send(&response).await.ok()?;
-        sender.finish_stream().await.ok()?;
+        sender.send(&response).await.map_err(AcceptError::Send)?;
+        sender.finish_stream().await.map_err(AcceptError::Send)?;
 
         // ===== Version negotiation =====
-        let negotiated = self.registry.negotiate(&[client_version])?;
+        let negotiated = self
+            .registry
+            .negotiate(std::slice::from_ref(&client_version))
+            .ok_or(AcceptError::UnsupportedVersion(client_version))?;
         let codec = VersionedCodec::new(self.registry.clone());
 
-        Some(MTPConnection {
+        Ok(Some(MTPConnection {
             version: negotiated,
             codec,
             sender,
@@ -402,7 +482,7 @@ impl MTPHost {
             auth_state: AuthState::Authenticated,
             client_id: assigned_id,
             client_public_key: Some(client_bundle),
-        })
+        }))
     }
 }
 

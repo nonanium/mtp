@@ -41,11 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Connecting to 127.0.0.1:8080 ...");
 
-    let config = ClientConfig {
-        url: "https://127.0.0.1:8080".into(),
-        server_cert: Some(cert_pem),
-        client_id: 0,
-    };
+    let config = ClientConfig::new("https://127.0.0.1:8080").with_pinned_pem(cert_pem);
 
     let server_bundle = host_public_key.clone();
     let (conn, keyring) =
