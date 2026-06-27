@@ -3,6 +3,9 @@ name = "mtp-crypto"
 version = "0.1.0"
 edition = "2024"
 
+[package.metadata.cargo-machete]
+ignored = ["getrandom"]
+
 [dependencies]
 chacha20poly1305 = { version = "0.10", optional = true }
 aes-gcm = { version = "0.10", optional = true }

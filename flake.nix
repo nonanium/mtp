@@ -26,6 +26,52 @@
           ];
           targets = ["wasm32-unknown-unknown"];
         };
+
+        clippyCheck = pkgs.writeShellApplication {
+          name = "mtp-clippy";
+          runtimeInputs = [rustToolchain];
+          text = ''
+            export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example-usage/type-maps.yaml}"
+            cargo clippy --workspace --exclude mtp-wasm --all-targets --all-features -- -D warnings -W unreachable-pub
+          '';
+        };
+
+        macheteCheck = pkgs.writeShellApplication {
+          name = "mtp-machete";
+          runtimeInputs = [pkgs.cargo-machete];
+          text = ''
+            cargo machete "$@"
+          '';
+        };
+
+        buildAll = pkgs.writeShellApplication {
+          name = "mtp-build-all";
+          runtimeInputs = [rustToolchain pkgs.wasm-pack pkgs.bun clippyCheck macheteCheck];
+          text = ''
+            export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example-usage/type-maps.yaml}"
+
+            bun install --frozen-lockfile
+            cargo fmt --all --check
+            cargo b
+            cargo test --workspace --exclude mtp-wasm --all-features
+            cargo check --manifest-path example-usage/Cargo.toml --workspace --all-targets --all-features
+            mtp-clippy
+            mtp-machete
+            bun run dup
+            RUSTFLAGS='--cfg web_sys_unstable_apis' wasm-pack build wasm --target web --out-dir pkg --release
+            bun --cwd example-usage/web-client install --frozen-lockfile
+            bun --cwd example-usage/web-client run build
+          '';
+        };
+
+        healthCheck = pkgs.writeShellApplication {
+          name = "mtp-health";
+          runtimeInputs = [clippyCheck macheteCheck];
+          text = ''
+            mtp-clippy
+            mtp-machete
+          '';
+        };
       in {
         devShells = {
           default = pkgs.mkShell {
@@ -33,6 +79,7 @@
 
             buildInputs = with pkgs; [
               rustToolchain
+              cargo-machete
               wasm-pack
               pkg-config
               openssl
@@ -77,15 +124,6 @@
               export MTP_DEV_CERT="$cert_pem"
               export MTP_DEV_KEY="$cert_key"
               export MTP_DEV_CERT_HASH="$(cat "$cert_hash")"
-
-              echo "MTP dev shell"
-              echo "  rustc  : $(rustc --version)"
-              echo "  cargo  : $(cargo --version)"
-              echo "  wasm-pack : $(wasm-pack --version 2>/dev/null || echo 'not found')"
-              echo "  targets: $(rustc --print target-list | grep wasm32 | tr '\n' ' ')"
-              echo "  MTP_TYPE_MAPS = $MTP_TYPE_MAPS"
-              echo "  dev cert: $MTP_DEV_CERT ($cert_status)"
-              echo "  cert sha256: $MTP_DEV_CERT_HASH"
             '';
           };
           autoStart = pkgs.mkShell {
@@ -101,15 +139,33 @@
         };
 
         # Ad-hoc WASM build using wasm-pack
-        apps.wasm-build = {
-          type = "app";
-          program = "${pkgs.wasm-pack}/bin/wasm-pack";
-          args = [
-            "build"
-            "wasm"
-            "--target"
-            "web"
-          ];
+        apps = {
+          clippy = {
+            type = "app";
+            program = "${clippyCheck}/bin/mtp-clippy";
+          };
+          machete = {
+            type = "app";
+            program = "${macheteCheck}/bin/mtp-machete";
+          };
+          build-all = {
+            type = "app";
+            program = "${buildAll}/bin/mtp-build-all";
+          };
+          health = {
+            type = "app";
+            program = "${healthCheck}/bin/mtp-health";
+          };
+          wasm-build = {
+            type = "app";
+            program = "${pkgs.wasm-pack}/bin/wasm-pack";
+            args = [
+              "build"
+              "wasm"
+              "--target"
+              "web"
+            ];
+          };
         };
       }
     );

@@ -8,7 +8,6 @@ mtp-common = { path = "../common" }
 mtp-codec = { path = "../codec", features = ["registry"] }
 mtp-transport = { path = "../transport", features = ["host"] }
 mtp-crypto = { path = "../crypto", optional = true }
-tokio = { version = "1", features = ["full"] }
 rand = "0.8"
 log = "0.4"
 

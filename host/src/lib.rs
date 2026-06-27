@@ -124,7 +124,7 @@ impl MTPHost {
             }
         };
 
-        let negotiated = match self.registry.negotiate(&[client_version.clone()]) {
+        let negotiated = match self.registry.negotiate(std::slice::from_ref(&client_version)) {
             Some(v) => v,
             None => {
                 log::warn!("accept: negotiate failed for client version {client_version:?}");
