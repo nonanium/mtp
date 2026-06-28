@@ -186,7 +186,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>, crate::error::CryptoError> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(crate::error::CryptoError::InvalidHex);
     }
     (0..s.len())

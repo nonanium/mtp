@@ -26,19 +26,53 @@ export default defineConfig({
 ```
 
 ```typescript
+import { MTPClient, type MTPCredentials } from "mtp";
+
+const credentialsStorageKey = "mtpCredentialsForMyApp";
+
+function loadCredentials(): MTPCredentials {
+  const saved = localStorage.getItem(credentialsStorageKey);
+  if (saved) {
+    return JSON.parse(saved) as MTPCredentials;
+  }
+
+  return {
+    clientId: null,
+    keyring: MTPClient.crypto.generateKeyring(),
+  };
+}
+
+await MTPClient.init();
+
+// Example-looking host public key bundle bytes. Replace this with the public
+// key bundle published by your MTP host before connecting to a real service.
+const hostPublicKey = Uint8Array.from({ length: 128 }, (_, index) => (
+  [0xb6, 0x4f, 0x7d, 0x9a, 0x3c, 0x21, 0xe8, 0x05][index % 8] ^ index
+));
+
 const client = await MTPClient.create({
   url: "https://localhost:4433",
   hostPublicKey,
-  credentials,
-  storage,
+  credentials: loadCredentials(),
+  storage: window.localStorage, // Same API as localStorage for convenience
+  credentialsStorageKey,
   pings: true,
-  logger: (event) => console.log(event),
+  logger: (event) => console.log("[MTP]: " + event),
 });
 
 client.subscribe("SomeType", (message) => console.log(message));
-await client.connectOrRegister();
+
+const clientId = client.credentials?.clientId == null
+  ? await client.register()
+  : (await client.connect(), client.credentials.clientId);
+
 await client.send("SomeType", { value: "hello" });
+console.log("Connected MTP client", clientId, client.state);
 ```
+
+`client.raw` exposes the lower-level WASM client and generated binding module for advanced integrations. Prefer the SDK methods unless you specifically need an API the wrapper does not expose; raw calls bypass SDK validation, credential persistence, logging, timeout handling, frame helpers, and lifecycle safeguards.
+
+Use `MTPClient.crypto` for SDK-level crypto helpers such as `generateKeyring()`, `generateEd25519()`, `keyringFromEd25519()`, `verifyEd25519()`, `sha256()`, `sha256Double()`, `hkdfExpand()`, and `deriveEncryptionKey()`.
 
 ## Getting Started
 

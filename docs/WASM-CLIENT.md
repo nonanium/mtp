@@ -52,7 +52,11 @@ const unsubscribe = client.subscribe("SomeType", (message) => {
   console.log(message.type, message.data);
 });
 
-await client.connectOrRegister();
+if (client.credentials?.clientId == null) {
+  await client.register();
+} else {
+  await client.connect();
+}
 await client.send("SomeType", { value: "hello" });
 
 const response = await client.request(
@@ -93,7 +97,9 @@ const client = await MTPClient.create({
   storage,
 });
 
-const clientId = await client.connectOrRegister();
+const clientId = client.credentials?.clientId == null
+  ? await client.register()
+  : (await client.connect(), client.credentials.clientId);
 ```
 
 The storage contract is intentionally small and may be sync or async:
@@ -127,7 +133,6 @@ await client.connect();
 
 - `connect()` opens a connection. If credentials include a `clientId` and `hostPublicKey` is available, it uses authenticated login; otherwise it uses unauthenticated connect.
 - `register()` performs authenticated registration and persists the assigned client ID when storage is configured.
-- `connectOrRegister()` registers when no client ID is present, otherwise performs authenticated login.
 - `disconnect()` stops protocol pings and closes the underlying WebTransport session.
 
 For certificate pinning, pass WebTransport certificate hashes:

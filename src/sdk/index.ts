@@ -24,6 +24,55 @@ export type MTPLogEvent =
 
 export type ParsedFrame = RawBindings.ParsedFrame;
 
+export type Ed25519GenerateResult = ReturnType<typeof bindings.ed25519_generate>;
+
+export interface MTPCrypto {
+  generateKeyring(): Uint8Array;
+  generateEd25519(): Ed25519GenerateResult;
+  keyringFromEd25519(secretKey: Uint8Array, publicKey: Uint8Array): Uint8Array;
+  verifyEd25519(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): void;
+  deriveEncryptionKey(ikm: Uint8Array, salt: Uint8Array, context: Uint8Array): Uint8Array;
+  hkdfExpand(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, len: number): Uint8Array;
+  sha256(data: Uint8Array): Uint8Array;
+  sha256Double(data: Uint8Array): Uint8Array;
+}
+
+export const crypto: MTPCrypto = {
+  generateKeyring: () => bindings.keyring_generate(),
+  generateEd25519: () => bindings.ed25519_generate(),
+  keyringFromEd25519: (secretKey, publicKey) => bindings.keyring_from_ed25519(secretKey, publicKey),
+  verifyEd25519: (publicKey, message, signature) => bindings.ed25519_verify(publicKey, message, signature),
+  deriveEncryptionKey: (ikm, salt, context) => bindings.wasm_derive_encryption_key(ikm, salt, context),
+  hkdfExpand: (ikm, salt, info, len) => bindings.wasm_hkdf_expand(ikm, salt, info, len),
+  sha256: (data) => bindings.wasm_sha256(data),
+  sha256Double: (data) => bindings.wasm_sha256_double(data),
+};
+
+export type MTPRawBindings = typeof bindings;
+
+export interface MTPRaw {
+  /**
+   * Underlying generated WASM client instance.
+   *
+   * Prefer the `MTPClient` methods for application code. Calling the raw client
+   * bypasses SDK-level validation, credential persistence, logging, timeout
+   * handling, frame parsing helpers, and ping lifecycle management. Use this
+   * escape hatch only when integrating a feature that the SDK wrapper does not
+   * expose yet.
+   */
+  client: RawBindings.WasmClient;
+
+  /**
+   * Generated WASM binding module exported by `mtp/raw`.
+   *
+   * These bindings mirror the lower-level WASM API and can change shape as the
+   * generated interface evolves. Prefer the SDK wrapper where possible so your
+   * code keeps the safer, typed MTPClient flow instead of depending directly on
+   * transport internals.
+   */
+  bindings: MTPRawBindings;
+}
+
 export interface MTPCredentials {
   clientId: bigint | string | number | null;
   keyring: Uint8Array | number[];
@@ -270,12 +319,13 @@ async function withTimeout(promise, timeoutMs, message) {
 }
 
 export class MTPClient {
+  static readonly crypto = crypto;
+
   #credentials: InternalCredentials | null;
   #options: NormalizedMTPClientOptions;
-  readonly raw: {
-    client: RawBindings.WasmClient;
-    bindings: typeof RawBindings;
-  };
+  readonly raw: MTPRaw;
+
+  readonly crypto = MTPClient.crypto;
 
   private constructor(options: NormalizedMTPClientOptions, client: RawBindings.WasmClient) {
     this.#options = options;
@@ -285,7 +335,7 @@ export class MTPClient {
 
   static async create(options: MTPClientOptions = {} as MTPClientOptions): Promise<MTPClient> {
     validateOptions(options);
-    await initWasm(options.wasm);
+    await MTPClient.init(options.wasm);
 
     const normalizedOptions = {
       ...options,
@@ -333,8 +383,16 @@ export class MTPClient {
     return WasmClient.is_supported();
   }
 
+  static async init(wasm?: MTPClientOptions["wasm"]): Promise<Awaited<ReturnType<typeof initWasm>>> {
+    return await initWasm(wasm);
+  }
+
   get credentials(): MTPCredentials | null {
     return publicCredentials(this.#credentials);
+  }
+
+  get state(): RawBindings.ConnectionState {
+    return this.raw.client.state;
   }
 
   async #loadStoredCredentials() {
@@ -440,12 +498,6 @@ export class MTPClient {
     }
   }
 
-  async connectOrRegister(): Promise<bigint> {
-    return this.#credentials?.clientId == null
-      ? await this.register()
-      : await this.#connectAuthenticated();
-  }
-
   async #persistCredentials() {
     await storageSet(
       this.#options.storage,
@@ -546,4 +598,4 @@ export class MTPClient {
   }
 }
 
-export { bindings as raw };
+export { ConnectionState, bindings as raw };
