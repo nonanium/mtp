@@ -159,11 +159,11 @@ fn verify_host_challenge(
     id: u64,
     server_challenge: u128,
 ) -> Result<(), JsValue> {
-    let sig = match challenge.get_data(DataType::Signature.to_id(tm)) {
+    let sig = match challenge.get_data(DataType::Signature) {
         DataValue::Bytes(b) => b.clone(),
         _ => return Err(js_error("missing host challenge signature")),
     };
-    let pq_sig = match challenge.get_data(DataType::PqSignature.to_id(tm)) {
+    let pq_sig = match challenge.get_data(DataType::PqSignature) {
         DataValue::Bytes(b) => b.clone(),
         _ => vec![],
     };
@@ -191,14 +191,14 @@ fn verify_host_final(
     client_nonce: u128,
     server_challenge: u128,
 ) -> Result<(), JsValue> {
-    if *resp.get_data(DataType::ClientNonce.to_id(tm)) != DataValue::UnsignedNumber(client_nonce) {
+    if *resp.get_data(DataType::ClientNonce) != DataValue::UnsignedNumber(client_nonce) {
         return Err(js_error("nonce mismatch"));
     }
-    let host_sig = match resp.get_data(DataType::Signature.to_id(tm)) {
+    let host_sig = match resp.get_data(DataType::Signature) {
         DataValue::Bytes(b) => b.clone(),
         _ => return Err(js_error("missing host signature")),
     };
-    let host_pq_sig = match resp.get_data(DataType::PqSignature.to_id(tm)) {
+    let host_pq_sig = match resp.get_data(DataType::PqSignature) {
         DataValue::Bytes(b) => b.clone(),
         _ => vec![],
     };
@@ -393,7 +393,7 @@ impl WasmClient {
             ));
         }
 
-        if resp_comm.get_data(DataType::Connected.to_id(&tm)) != &DataValue::BoolTrue {
+        if resp_comm.get_data(DataType::Connected) != &DataValue::BoolTrue {
             self.set_state(ConnectionState::Disconnected);
             return Err(js_error("host rejected authentication"));
         }
@@ -412,7 +412,7 @@ impl WasmClient {
         }
 
         // Extract assigned ID
-        let assigned_id = match resp_comm.get_data(DataType::Id.to_id(&tm)) {
+        let assigned_id = match resp_comm.get_data(DataType::Id) {
             DataValue::UnsignedNumber(n) => *n as u64,
             _ => {
                 self.set_state(ConnectionState::Disconnected);
@@ -495,12 +495,12 @@ impl WasmClient {
             ));
         }
 
-        if resp_comm.get_data(DataType::Connected.to_id(&tm)) != &DataValue::BoolTrue {
+        if resp_comm.get_data(DataType::Connected) != &DataValue::BoolTrue {
             self.set_state(ConnectionState::Disconnected);
             return Err(js_error("host rejected registration"));
         }
 
-        let assigned_id = match resp_comm.get_data(DataType::Id.to_id(&tm)) {
+        let assigned_id = match resp_comm.get_data(DataType::Id) {
             DataValue::UnsignedNumber(n) => *n as u64,
             _ => {
                 self.set_state(ConnectionState::Disconnected);
@@ -731,7 +731,7 @@ impl WasmClient {
             ));
         }
 
-        let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(tm)) {
+        let server_challenge = match challenge.get_data(DataType::ServerNonce) {
             DataValue::UnsignedNumber(n) => *n,
             _ => {
                 self.set_state(ConnectionState::Disconnected);

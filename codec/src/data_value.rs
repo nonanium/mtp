@@ -39,6 +39,28 @@ pub enum DataKind {
     Null,
 }
 
+impl fmt::Display for DataKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataKind::Bool => f.write_str("Bool"),
+            DataKind::SignedNumber => f.write_str("SignedNumber"),
+            DataKind::UnsignedNumber => f.write_str("UnsignedNumber"),
+            DataKind::Float => f.write_str("Float"),
+            DataKind::Str => f.write_str("Str"),
+            DataKind::Bytes => f.write_str("Bytes"),
+            DataKind::Array(inner) => write!(f, "Array<{}>", inner),
+            DataKind::Container => f.write_str("Container"),
+            #[cfg(feature = "crypto")]
+            DataKind::EncryptedContainer => f.write_str("EncryptedContainer"),
+            #[cfg(feature = "crypto")]
+            DataKind::SignedContainer => f.write_str("SignedContainer"),
+            #[cfg(feature = "crypto")]
+            DataKind::SignedEncryptedContainer => f.write_str("SignedEncryptedContainer"),
+            DataKind::Null => f.write_str("Null"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq)]
 pub enum DataValue {
     BoolTrue,
@@ -259,6 +281,77 @@ impl DataValue {
         }
     }
 
+    pub fn as_number(&self) -> Option<i128> {
+        match self {
+            DataValue::SignedNumber(n) => Some(*n),
+            DataValue::UnsignedNumber(n) => Some(*n as i128),
+            _ => None,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, DataValue::Null)
+    }
+
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            DataValue::BoolTrue | DataValue::Bool(true) => true,
+            DataValue::BoolFalse | DataValue::Bool(false) | DataValue::Null => false,
+            DataValue::UnsignedNumber(0) | DataValue::SignedNumber(0) => false,
+            _ => true,
+        }
+    }
+
+    pub fn get_field(&self, key: DataTypeId) -> Option<&DataValue> {
+        match self {
+            DataValue::Container(entries) => {
+                entries.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_container_map(&self) -> Option<BTreeMap<DataTypeId, DataValue>> {
+        match self {
+            DataValue::Container(entries) => Some(entries.iter().cloned().collect()),
+            _ => None,
+        }
+    }
+
+    pub fn as_bytes_slice(&self) -> Option<&[u8]> {
+        match self {
+            DataValue::Bytes(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    pub fn as_array_slice(&self) -> Option<&[DataValue]> {
+        match self {
+            DataValue::Array(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            DataValue::Bool(_) | DataValue::BoolTrue | DataValue::BoolFalse => "Bool",
+            DataValue::SignedNumber(_) => "SignedNumber",
+            DataValue::UnsignedNumber(_) => "UnsignedNumber",
+            DataValue::Float(_, _) => "Float",
+            DataValue::Str(_) => "Str",
+            DataValue::Bytes(_) => "Bytes",
+            DataValue::Array(_) => "Array",
+            DataValue::Container(_) => "Container",
+            #[cfg(feature = "crypto")]
+            DataValue::EncryptedContainer(_) => "EncryptedContainer",
+            #[cfg(feature = "crypto")]
+            DataValue::SignedContainer(_) => "SignedContainer",
+            #[cfg(feature = "crypto")]
+            DataValue::SignedEncryptedContainer(_) => "SignedEncryptedContainer",
+            DataValue::Null => "Null",
+        }
+    }
+
     #[cfg(feature = "crypto")]
     pub fn as_encrypted_container(&self) -> Option<Vec<u8>> {
         match self {
@@ -372,6 +465,60 @@ impl DataValue {
         let entries = DataValue::from_bytes(container_bytes)?.as_container()?;
         *self = DataValue::Container(entries);
         Some(())
+    }
+
+    /*
+     * Verify a `SignedContainer` without mutating self. Dispatches to
+     * Ed25519, ML-DSA-65, or both (DUAL) based on the algorithm byte
+     * embedded in the blob. Returns `false` for any other variant.
+     */
+    #[cfg(feature = "crypto")]
+    pub fn validate_signature(&self, pk: &PublicKeyBundle) -> bool {
+        let blob = match self {
+            DataValue::SignedContainer(b) => b,
+            _ => return false,
+        };
+        if blob.is_empty() {
+            return false;
+        }
+        let alg = blob[0];
+        let sig_len = match SigAlgorithm::length(alg) {
+            Some(n) => n,
+            None => return false,
+        };
+        if blob.len() < 1 + sig_len + 2 {
+            return false;
+        }
+        let signature = &blob[1..1 + sig_len];
+        let container_bytes = &blob[1 + sig_len..];
+        match alg {
+            SigAlgorithm::ED25519 => {
+                mtp_crypto::verify_ed25519(&pk.sig_cl_public_key, container_bytes, signature).is_ok()
+            }
+            SigAlgorithm::ML_DSA_65 => {
+                mtp_crypto::verify_ml_dsa(&pk.sig_pq_public_key, container_bytes, signature).is_ok()
+            }
+            SigAlgorithm::DUAL => {
+                const ED_LEN: usize = 64;
+                if signature.len() < ED_LEN {
+                    return false;
+                }
+                let ed_ok = mtp_crypto::verify_ed25519(
+                    &pk.sig_cl_public_key,
+                    container_bytes,
+                    &signature[..ED_LEN],
+                )
+                .is_ok();
+                let ml_ok = mtp_crypto::verify_ml_dsa(
+                    &pk.sig_pq_public_key,
+                    container_bytes,
+                    &signature[ED_LEN..],
+                )
+                .is_ok();
+                ed_ok && ml_ok
+            }
+            _ => false,
+        }
     }
 
     /*
@@ -895,6 +1042,133 @@ impl Hash for DataValue {
     }
 }
 
+/* ================================ FROM / TRY-FROM ================================ */
+
+impl From<bool> for DataValue {
+    fn from(v: bool) -> Self {
+        if v { DataValue::BoolTrue } else { DataValue::BoolFalse }
+    }
+}
+
+impl From<&str> for DataValue {
+    fn from(s: &str) -> Self {
+        DataValue::Str(s.to_string())
+    }
+}
+
+impl From<String> for DataValue {
+    fn from(s: String) -> Self {
+        DataValue::Str(s)
+    }
+}
+
+impl From<i64> for DataValue {
+    fn from(n: i64) -> Self {
+        DataValue::SignedNumber(n as i128)
+    }
+}
+
+impl From<i128> for DataValue {
+    fn from(n: i128) -> Self {
+        DataValue::SignedNumber(n)
+    }
+}
+
+impl From<u64> for DataValue {
+    fn from(n: u64) -> Self {
+        DataValue::UnsignedNumber(n as u128)
+    }
+}
+
+impl From<u128> for DataValue {
+    fn from(n: u128) -> Self {
+        DataValue::UnsignedNumber(n)
+    }
+}
+
+impl From<Vec<u8>> for DataValue {
+    fn from(b: Vec<u8>) -> Self {
+        DataValue::Bytes(b)
+    }
+}
+
+impl From<&[u8]> for DataValue {
+    fn from(b: &[u8]) -> Self {
+        DataValue::Bytes(b.to_vec())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataValueTypeMismatch {
+    pub expected: &'static str,
+    pub got: &'static str,
+}
+
+impl fmt::Display for DataValueTypeMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "expected {}, got {}", self.expected, self.got)
+    }
+}
+
+impl std::error::Error for DataValueTypeMismatch {}
+
+impl TryFrom<DataValue> for bool {
+    type Error = DataValueTypeMismatch;
+    fn try_from(v: DataValue) -> Result<Self, Self::Error> {
+        v.as_bool().ok_or(DataValueTypeMismatch { expected: "Bool", got: v.type_name() })
+    }
+}
+
+impl TryFrom<DataValue> for String {
+    type Error = DataValueTypeMismatch;
+    fn try_from(v: DataValue) -> Result<Self, Self::Error> {
+        match v {
+            DataValue::Str(s) => Ok(s),
+            other => Err(DataValueTypeMismatch { expected: "Str", got: other.type_name() }),
+        }
+    }
+}
+
+impl TryFrom<DataValue> for i128 {
+    type Error = DataValueTypeMismatch;
+    fn try_from(v: DataValue) -> Result<Self, Self::Error> {
+        v.as_signed_number().ok_or(DataValueTypeMismatch { expected: "SignedNumber", got: v.type_name() })
+    }
+}
+
+impl TryFrom<DataValue> for i64 {
+    type Error = DataValueTypeMismatch;
+    fn try_from(v: DataValue) -> Result<Self, Self::Error> {
+        let n = v.as_signed_number().ok_or(DataValueTypeMismatch { expected: "SignedNumber", got: v.type_name() })?;
+        Ok(n as i64)
+    }
+}
+
+impl TryFrom<DataValue> for u128 {
+    type Error = DataValueTypeMismatch;
+    fn try_from(v: DataValue) -> Result<Self, Self::Error> {
+        v.as_unsigned_number().ok_or(DataValueTypeMismatch { expected: "UnsignedNumber", got: v.type_name() })
+    }
+}
+
+impl TryFrom<DataValue> for u64 {
+    type Error = DataValueTypeMismatch;
+    fn try_from(v: DataValue) -> Result<Self, Self::Error> {
+        let n = v.as_unsigned_number().ok_or(DataValueTypeMismatch { expected: "UnsignedNumber", got: v.type_name() })?;
+        Ok(n as u64)
+    }
+}
+
+impl TryFrom<DataValue> for Vec<u8> {
+    type Error = DataValueTypeMismatch;
+    fn try_from(v: DataValue) -> Result<Self, Self::Error> {
+        match v {
+            DataValue::Bytes(b) => Ok(b),
+            other => Err(DataValueTypeMismatch { expected: "Bytes", got: other.type_name() }),
+        }
+    }
+}
+
 /* ================================ TESTS ================================ */
 #[cfg(test)]
 mod tests {
@@ -1263,6 +1537,41 @@ mod tests {
         let s = format!("{}", dv);
         assert!(s.contains("3:"));
         assert!(s.contains("6:"));
+    }
+
+    #[test]
+    fn test_from_primitives() {
+        assert_eq!(DataValue::from(true), DataValue::BoolTrue);
+        assert_eq!(DataValue::from(false), DataValue::BoolFalse);
+        assert_eq!(DataValue::from("hello"), DataValue::Str("hello".to_string()));
+        assert_eq!(DataValue::from("hello".to_string()), DataValue::Str("hello".to_string()));
+        assert_eq!(DataValue::from(42i64), DataValue::SignedNumber(42));
+        assert_eq!(DataValue::from(42i128), DataValue::SignedNumber(42));
+        assert_eq!(DataValue::from(42u64), DataValue::UnsignedNumber(42));
+        assert_eq!(DataValue::from(42u128), DataValue::UnsignedNumber(42));
+        assert_eq!(DataValue::from(vec![1u8, 2, 3]), DataValue::Bytes(vec![1, 2, 3]));
+        assert_eq!(DataValue::from([1u8, 2, 3].as_ref()), DataValue::Bytes(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn test_try_from_ok() {
+        assert_eq!(bool::try_from(DataValue::BoolTrue).unwrap(), true);
+        assert_eq!(bool::try_from(DataValue::BoolFalse).unwrap(), false);
+        assert_eq!(String::try_from(DataValue::Str("hi".to_string())).unwrap(), "hi");
+        assert_eq!(i128::try_from(DataValue::SignedNumber(-1)).unwrap(), -1i128);
+        assert_eq!(i64::try_from(DataValue::SignedNumber(10)).unwrap(), 10i64);
+        assert_eq!(u128::try_from(DataValue::UnsignedNumber(99)).unwrap(), 99u128);
+        assert_eq!(u64::try_from(DataValue::UnsignedNumber(7)).unwrap(), 7u64);
+        assert_eq!(Vec::<u8>::try_from(DataValue::Bytes(vec![0xAB])).unwrap(), vec![0xABu8]);
+    }
+
+    #[test]
+    fn test_try_from_err() {
+        assert!(bool::try_from(DataValue::Null).is_err());
+        assert!(String::try_from(DataValue::SignedNumber(1)).is_err());
+        assert!(i128::try_from(DataValue::BoolTrue).is_err());
+        assert!(u128::try_from(DataValue::Str("x".to_string())).is_err());
+        assert!(Vec::<u8>::try_from(DataValue::Null).is_err());
     }
 
     #[test]

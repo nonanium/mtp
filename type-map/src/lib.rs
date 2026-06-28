@@ -62,6 +62,16 @@ impl std::fmt::Display for Version {
     }
 }
 
+impl Version {
+    pub fn is_newer_than(&self, other: &Version) -> bool {
+        self > other
+    }
+
+    pub fn is_compatible_with(&self, other: &Version) -> bool {
+        self.0 == other.0
+    }
+}
+
 /*
  * A single protocol version's type dictionary.
  * Compiled into the client, or loaded by the host via the registry.

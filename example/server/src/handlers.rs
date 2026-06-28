@@ -31,13 +31,13 @@ pub fn process_and_respond(
     let sig_id = DataTypeId(tm.data_id_enum(DataType::SignedPayload).unwrap());
     let secure_id = DataTypeId(tm.data_id_enum(DataType::SecurePayload).unwrap());
 
-    let description = msg.get_data(desc_id);
-    let timestamp = msg.get_data(ts_id);
-    let data = msg.get_data(data_id);
-    let flags = msg.get_data(flags_id);
-    let value = msg.get_data(value_id);
-    let binary = msg.get_data(bin_id);
-    let items = msg.get_data(items_id);
+    let description = msg.get_data(DataType::Description);
+    let timestamp = msg.get_data(DataType::Timestamp);
+    let data = msg.get_data(DataType::Data);
+    let flags = msg.get_data(DataType::Flags);
+    let value = msg.get_data(DataType::Value);
+    let binary = msg.get_data(DataType::BinaryData);
+    let items = msg.get_data(DataType::Items);
 
     println!(
         "  Description: {}",
@@ -54,7 +54,7 @@ pub fn process_and_respond(
     let mut sig_status = String::from("SignedPayload: not present");
     let mut secure_status = String::from("SecurePayload: not present");
 
-    let enc = msg.get_data(enc_id);
+    let enc = msg.get_data(DataType::EncryptedPayload);
     if matches!(enc, DataValue::EncryptedContainer(_)) {
         let mut dv = enc.clone();
         if dv.decrypt_into_container(host_keyring, b"demo-aad").is_some() {
@@ -68,7 +68,7 @@ pub fn process_and_respond(
         }
     }
 
-    let sig = msg.get_data(sig_id);
+    let sig = msg.get_data(DataType::SignedPayload);
     if matches!(sig, DataValue::SignedContainer(_)) {
         if let Some(pk_bundle) = client_pk {
             let verifier = Ed25519Verifier(pk_bundle.sig_cl_public_key.clone());
@@ -88,7 +88,7 @@ pub fn process_and_respond(
         }
     }
 
-    let secure = msg.get_data(secure_id);
+    let secure = msg.get_data(DataType::SecurePayload);
     if matches!(secure, DataValue::SignedEncryptedContainer(_)) {
         if let Some(pk_bundle) = client_pk {
             let verifier = Ed25519Verifier(pk_bundle.sig_cl_public_key.clone());

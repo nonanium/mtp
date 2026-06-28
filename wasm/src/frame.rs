@@ -254,26 +254,26 @@ pub fn parse_auth_response(response: &[u8]) -> Result<JsValue, JsValue> {
         .map_err(|e| js_error(&format!("parse failed: {}", e)))?;
 
     let connected = matches!(
-        comm.get_data(DataType::Connected.to_id(&TypeMap::latest())),
+        comm.get_data(DataType::Connected)),
         DataValue::BoolTrue
     );
 
-    let client_nonce = match comm.get_data(DataType::ClientNonce.to_id(&TypeMap::latest())) {
+    let client_nonce = match comm.get_data(DataType::ClientNonce)) {
         DataValue::UnsignedNumber(n) => Some(*n),
         _ => None,
     };
 
-    let assigned_id = match comm.get_data(DataType::Id.to_id(&TypeMap::latest())) {
+    let assigned_id = match comm.get_data(DataType::Id)) {
         DataValue::UnsignedNumber(n) => Some(*n as u64),
         _ => None,
     };
 
-    let timestamp = match comm.get_data(DataType::Timestamp.to_id(&TypeMap::latest())) {
+    let timestamp = match comm.get_data(DataType::Timestamp)) {
         DataValue::UnsignedNumber(n) => Some(*n),
         _ => None,
     };
 
-    let signature = match comm.get_data(DataType::Signature.to_id(&TypeMap::latest())) {
+    let signature = match comm.get_data(DataType::Signature)) {
         DataValue::Bytes(b) => Some(b.clone()),
         _ => None,
     };
@@ -376,11 +376,11 @@ mod tests {
         assert_eq!(cv.get_type(), CommunicationType::Ping.to_id(&tm));
         assert_eq!(cv.get_sender(), 42);
         assert_eq!(
-            cv.get_data(DataType::Description.to_id(&tm)),
+            cv.get_data(DataType::Description),
             &DataValue::Str("test-ping".into())
         );
         assert_eq!(
-            cv.get_data(DataType::Timestamp.to_id(&tm)),
+            cv.get_data(DataType::Timestamp),
             &DataValue::UnsignedNumber(1234567890)
         );
     }
@@ -395,15 +395,15 @@ mod tests {
         assert_eq!(cv.get_type(), CommunicationType::Ping.to_id(&tm));
         assert_eq!(cv.get_sender(), 99);
         assert_eq!(
-            cv.get_data(DataType::Description.to_id(&tm)),
+            cv.get_data(DataType::Description),
             &DataValue::Str("with-data".into())
         );
         assert_eq!(
-            cv.get_data(DataType::Timestamp.to_id(&tm)),
+            cv.get_data(DataType::Timestamp),
             &DataValue::UnsignedNumber(555)
         );
         assert_eq!(
-            cv.get_data(DataType::Id.to_id(&tm)),
+            cv.get_data(DataType::Id),
             &DataValue::Bytes(payload.to_vec())
         );
     }

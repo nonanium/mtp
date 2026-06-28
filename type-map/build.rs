@@ -261,12 +261,15 @@ fn generate(config: &Config, multi_version: bool) -> String {
         generate_versioned_constructors(&mut out, &sorted);
         generate_builtin_type_maps(&mut out, &sorted);
         generate_lookup_methods(&mut out, config, &sorted);
+        generate_all_types_methods(&mut out, config, &sorted);
     } else {
         generate_single_version_lookup(&mut out, config);
+        generate_all_types_methods_single(&mut out, config);
     }
 
     generate_enum_conversion_methods(&mut out);
     generate_reverse_lookups(&mut out, config, &sorted, multi_version);
+    generate_id_display_impls(&mut out);
 
     out
 }
@@ -564,6 +567,78 @@ fn generate_lookup_methods(
     writeln!(out, "            _ => None,").unwrap();
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // Reverse lookups: wire ID → enum variant (version-aware)
+    writeln!(
+        out,
+        "    pub fn comm_enum_id(&self, id: u16) -> Option<CommunicationType> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self.version {{").unwrap();
+    for (version_key, major, minor) in sorted_versions {
+        let tm_cfg = &config.type_maps[version_key];
+        writeln!(
+            out,
+            "            Version({}, {}) => match id {{",
+            major, minor
+        )
+        .unwrap();
+        for entry in RESERVED_COMM_TYPES {
+            writeln!(
+                out,
+                "                {} => Some(CommunicationType::{}),",
+                entry.id, entry.name
+            )
+            .unwrap();
+        }
+        for (name, id) in &tm_cfg.communication_types {
+            writeln!(
+                out,
+                "                {} => Some(CommunicationType::{}),",
+                id, name
+            )
+            .unwrap();
+        }
+        writeln!(out, "                _ => None,").unwrap();
+        writeln!(out, "            }},").unwrap();
+    }
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    pub fn data_enum_id(&self, id: u16) -> Option<DataType> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self.version {{").unwrap();
+    for (version_key, major, minor) in sorted_versions {
+        let tm_cfg = &config.type_maps[version_key];
+        writeln!(
+            out,
+            "            Version({}, {}) => match id {{",
+            major, minor
+        )
+        .unwrap();
+        for entry in RESERVED_DATA_TYPES {
+            writeln!(
+                out,
+                "                {} => Some(DataType::{}),",
+                entry.id, entry.name
+            )
+            .unwrap();
+        }
+        for (name, id) in &tm_cfg.data_types {
+            writeln!(out, "                {} => Some(DataType::{}),", id, name).unwrap();
+        }
+        writeln!(out, "                _ => None,").unwrap();
+        writeln!(out, "            }},").unwrap();
+    }
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 }
@@ -624,6 +699,66 @@ fn generate_single_version_lookup(out: &mut String, config: &Config) {
     if let Some(tm_cfg) = tm_cfg {
         for (name, id) in &tm_cfg.data_types {
             writeln!(out, "                DataType::{} => Some({}),", name, id).unwrap();
+        }
+    }
+    writeln!(out, "                _ => None,").unwrap();
+    writeln!(out, "            }},").unwrap();
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // Reverse lookups: wire ID → enum variant (single version)
+    writeln!(
+        out,
+        "    pub fn comm_enum_id(&self, id: u16) -> Option<CommunicationType> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self.version {{").unwrap();
+    writeln!(out, "            PROTOCOL_VERSION => match id {{").unwrap();
+    for entry in RESERVED_COMM_TYPES {
+        writeln!(
+            out,
+            "                {} => Some(CommunicationType::{}),",
+            entry.id, entry.name
+        )
+        .unwrap();
+    }
+    if let Some(tm_cfg) = tm_cfg {
+        for (name, id) in &tm_cfg.communication_types {
+            writeln!(
+                out,
+                "                {} => Some(CommunicationType::{}),",
+                id, name
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "                _ => None,").unwrap();
+    writeln!(out, "            }},").unwrap();
+    writeln!(out, "            _ => None,").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    pub fn data_enum_id(&self, id: u16) -> Option<DataType> {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self.version {{").unwrap();
+    writeln!(out, "            PROTOCOL_VERSION => match id {{").unwrap();
+    for entry in RESERVED_DATA_TYPES {
+        writeln!(
+            out,
+            "                {} => Some(DataType::{}),",
+            entry.id, entry.name
+        )
+        .unwrap();
+    }
+    if let Some(tm_cfg) = tm_cfg {
+        for (name, id) in &tm_cfg.data_types {
+            writeln!(out, "                {} => Some(DataType::{}),", id, name).unwrap();
         }
     }
     writeln!(out, "                _ => None,").unwrap();
@@ -741,6 +876,190 @@ fn generate_enum_conversion_methods(out: &mut String) {
         "        DataTypeId(tm.data_id_enum(self).expect(\"DataType not found in this TypeMap version\"))"
     )
     .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn generate_all_types_methods(
+    out: &mut String,
+    config: &Config,
+    sorted_versions: &[(String, u16, u16)],
+) {
+    writeln!(out, "#[allow(unreachable_patterns)]").unwrap();
+    writeln!(out, "impl TypeMap {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn all_comm_types(&self) -> &'static [CommunicationType] {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self.version {{").unwrap();
+    for (version_key, major, minor) in sorted_versions {
+        let tm_cfg = &config.type_maps[version_key];
+        write!(out, "            Version({}, {}) => &[", major, minor).unwrap();
+        let mut first = true;
+        for entry in RESERVED_COMM_TYPES {
+            if !first {
+                write!(out, ", ").unwrap();
+            }
+            write!(out, "CommunicationType::{}", entry.name).unwrap();
+            first = false;
+        }
+        for (name, _) in &tm_cfg.communication_types {
+            if !first {
+                write!(out, ", ").unwrap();
+            }
+            write!(out, "CommunicationType::{}", name).unwrap();
+            first = false;
+        }
+        writeln!(out, "],").unwrap();
+    }
+    writeln!(out, "            _ => &[],").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    pub fn all_data_types(&self) -> &'static [DataType] {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self.version {{").unwrap();
+    for (version_key, major, minor) in sorted_versions {
+        let tm_cfg = &config.type_maps[version_key];
+        write!(out, "            Version({}, {}) => &[", major, minor).unwrap();
+        let mut first = true;
+        for entry in RESERVED_DATA_TYPES {
+            if !first {
+                write!(out, ", ").unwrap();
+            }
+            write!(out, "DataType::{}", entry.name).unwrap();
+            first = false;
+        }
+        for (name, _) in &tm_cfg.data_types {
+            if !first {
+                write!(out, ", ").unwrap();
+            }
+            write!(out, "DataType::{}", name).unwrap();
+            first = false;
+        }
+        writeln!(out, "],").unwrap();
+    }
+    writeln!(out, "            _ => &[],").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn generate_all_types_methods_single(out: &mut String, config: &Config) {
+    let tm_cfg = config.type_maps.get(&config.protocol_version);
+
+    writeln!(out, "#[allow(unreachable_patterns)]").unwrap();
+    writeln!(out, "impl TypeMap {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn all_comm_types(&self) -> &'static [CommunicationType] {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self.version {{").unwrap();
+    write!(out, "            PROTOCOL_VERSION => &[").unwrap();
+    let mut first = true;
+    for entry in RESERVED_COMM_TYPES {
+        if !first {
+            write!(out, ", ").unwrap();
+        }
+        write!(out, "CommunicationType::{}", entry.name).unwrap();
+        first = false;
+    }
+    if let Some(tm_cfg) = tm_cfg {
+        for (name, _) in &tm_cfg.communication_types {
+            if !first {
+                write!(out, ", ").unwrap();
+            }
+            write!(out, "CommunicationType::{}", name).unwrap();
+            first = false;
+        }
+    }
+    writeln!(out, "],").unwrap();
+    writeln!(out, "            _ => &[],").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    pub fn all_data_types(&self) -> &'static [DataType] {{"
+    )
+    .unwrap();
+    writeln!(out, "        match self.version {{").unwrap();
+    write!(out, "            PROTOCOL_VERSION => &[").unwrap();
+    let mut first = true;
+    for entry in RESERVED_DATA_TYPES {
+        if !first {
+            write!(out, ", ").unwrap();
+        }
+        write!(out, "DataType::{}", entry.name).unwrap();
+        first = false;
+    }
+    if let Some(tm_cfg) = tm_cfg {
+        for (name, _) in &tm_cfg.data_types {
+            if !first {
+                write!(out, ", ").unwrap();
+            }
+            write!(out, "DataType::{}", name).unwrap();
+            first = false;
+        }
+    }
+    writeln!(out, "],").unwrap();
+    writeln!(out, "            _ => &[],").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn generate_id_display_impls(out: &mut String) {
+    writeln!(out, "impl std::fmt::Display for CommunicationTypeId {{").unwrap();
+    writeln!(
+        out,
+        "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        match communication_type_name(self.0) {{"
+    )
+    .unwrap();
+    writeln!(out, "            Some(name) => f.write_str(name),").unwrap();
+    writeln!(
+        out,
+        "            None => write!(f, \"CommTypeId({{}})\", self.0),"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "impl std::fmt::Display for DataTypeId {{").unwrap();
+    writeln!(
+        out,
+        "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        match data_type_name(self.0) {{"
+    )
+    .unwrap();
+    writeln!(out, "            Some(name) => f.write_str(name),").unwrap();
+    writeln!(
+        out,
+        "            None => write!(f, \"DataTypeId({{}})\", self.0),"
+    )
+    .unwrap();
+    writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Cursor, Read};
 
-use crate::data_value::DataValue;
+use crate::data_value::{DataKind, DataValue};
 use crate::rand_u32;
 use mtp_common::CodecError;
 use mtp_type_map::{
@@ -12,9 +12,7 @@ use mtp_type_map::{
 };
 
 #[cfg(feature = "crypto")]
-use mtp_crypto::SigAlgorithm;
-#[cfg(feature = "crypto")]
-use mtp_crypto::SignatureScheme;
+use mtp_crypto::{PublicKeyBundle, SigAlgorithm, SignatureScheme};
 
 const FLAG_HAS_SENDER: u8 = 0b0000_0001;
 const FLAG_HAS_RECEIVER: u8 = 0b0000_0010;
@@ -121,12 +119,146 @@ impl CommunicationValue {
         self
     }
 
-    pub fn get_data(&self, data_type: DataTypeId) -> &DataValue {
-        self.data.get(&data_type).unwrap_or(&DataValue::Null)
+    pub fn get_data(&self, data_type: DataType) -> &DataValue {
+        let tm_owned;
+        let tm = match &self.type_map {
+            Some(tm) => tm,
+            None => {
+                tm_owned = TypeMap::latest();
+                &tm_owned
+            }
+        };
+        match tm.data_id_enum(data_type) {
+            Some(raw_id) => self.data.get(&DataTypeId(raw_id)).unwrap_or(&DataValue::Null),
+            None => &DataValue::Null,
+        }
+    }
+
+    pub fn get_data_opt(&self, data_type: DataType) -> Option<&DataValue> {
+        let tm_owned;
+        let tm = match &self.type_map {
+            Some(tm) => tm,
+            None => {
+                tm_owned = TypeMap::latest();
+                &tm_owned
+            }
+        };
+        let raw_id = tm.data_id_enum(data_type)?;
+        self.data.get(&DataTypeId(raw_id))
+    }
+
+    pub fn has_data(&self, data_type: DataType) -> Option<DataKind> {
+        self.get_data_opt(data_type).map(|v| v.kind())
+    }
+
+    pub fn get_comm_type_enum(&self) -> Option<CommunicationType> {
+        let tm_owned;
+        let tm = match &self.type_map {
+            Some(tm) => tm,
+            None => {
+                tm_owned = TypeMap::latest();
+                &tm_owned
+            }
+        };
+        tm.comm_enum_id(self.comm_type.0)
     }
 
     pub fn data(&self) -> &BTreeMap<DataTypeId, DataValue> {
         &self.data
+    }
+
+    pub fn data_len(&self) -> usize {
+        self.data.len()
+    }
+
+    // ── type checks ──────────────────────────────────────────────────────────
+
+    pub fn is_type(&self, comm_type: CommunicationType) -> bool {
+        self.get_comm_type_enum() == Some(comm_type)
+    }
+
+    pub fn get_type_name(&self) -> Option<&'static str> {
+        communication_type_name(self.comm_type.0)
+    }
+
+    // ── mutation ─────────────────────────────────────────────────────────────
+
+    pub fn set_data(&mut self, data_type: DataType, value: DataValue) {
+        let tm = self.type_map.clone().unwrap_or_else(TypeMap::latest);
+        if let Some(raw_id) = tm.data_id_enum(data_type) {
+            self.data.insert(DataTypeId(raw_id), value);
+        }
+    }
+
+    #[must_use]
+    pub fn with_data(mut self, data_type: DataType, value: DataValue) -> Self {
+        self.set_data(data_type, value);
+        self
+    }
+
+    pub fn remove_data(&mut self, data_type: DataType) -> Option<DataValue> {
+        let tm_owned;
+        let tm = match &self.type_map {
+            Some(tm) => tm,
+            None => {
+                tm_owned = TypeMap::latest();
+                &tm_owned
+            }
+        };
+        let raw_id = tm.data_id_enum(data_type)?;
+        self.data.remove(&DataTypeId(raw_id))
+    }
+
+    #[must_use]
+    pub fn reply_to(&self, comm_type: CommunicationType) -> Self {
+        Self::new(comm_type)
+            .with_sender(self.receiver)
+            .with_receiver(self.sender)
+    }
+
+    pub fn merge(&mut self, other: &CommunicationValue) {
+        for (id, value) in &other.data {
+            self.data.insert(*id, value.clone());
+        }
+    }
+
+    // ── typed iteration ──────────────────────────────────────────────────────
+
+    pub fn iter_typed_data(&self) -> impl Iterator<Item = (Option<DataType>, &DataValue)> + '_ {
+        let tm = self.type_map.clone().unwrap_or_else(TypeMap::latest);
+        self.data
+            .iter()
+            .map(move |(id, val)| (tm.data_enum_id(id.0), val))
+    }
+
+    // ── typed field accessors ─────────────────────────────────────────────────
+
+    pub fn get_bool(&self, data_type: DataType) -> Option<bool> {
+        self.get_data_opt(data_type)?.as_bool()
+    }
+
+    pub fn get_str(&self, data_type: DataType) -> Option<&str> {
+        self.get_data_opt(data_type)?.as_str()
+    }
+
+    pub fn get_u128(&self, data_type: DataType) -> Option<u128> {
+        self.get_data_opt(data_type)?.as_unsigned_number()
+    }
+
+    pub fn get_i128(&self, data_type: DataType) -> Option<i128> {
+        self.get_data_opt(data_type)?.as_signed_number()
+    }
+
+    pub fn get_float(&self, data_type: DataType) -> Option<(u8, u32)> {
+        self.get_data_opt(data_type)?.as_float()
+    }
+
+    pub fn get_bytes(&self, data_type: DataType) -> Option<&[u8]> {
+        self.get_data_opt(data_type)?.as_bytes_slice()
+    }
+
+    pub fn get_array(&self, data_type: DataType) -> Option<&[DataValue]> {
+        self.get_data_opt(data_type)?.as_array_slice()
     }
 }
 
@@ -433,6 +565,64 @@ impl CommunicationValue {
         self.frame_signature.as_ref()
     }
 
+    /*
+     * Verify the frame signature using a `PublicKeyBundle`. Dispatches to
+     * Ed25519, ML-DSA-65, or both (DUAL) based on the stored algorithm byte.
+     * Returns `false` if the frame has no signature or verification fails.
+     */
+    #[cfg(feature = "crypto")]
+    pub fn validate_signature(&self, pk: &PublicKeyBundle) -> bool {
+        let Some((alg, _)) = &self.frame_signature else {
+            return false;
+        };
+        struct Ed25519Verifier<'a>(&'a mtp_crypto::SignaturePublicKey);
+        impl SignatureScheme for Ed25519Verifier<'_> {
+            fn sign(&self, _: &[u8]) -> Result<Vec<u8>, mtp_crypto::CryptoError> {
+                Err(mtp_crypto::CryptoError::SigningFailed)
+            }
+            fn verify(&self, msg: &[u8], sig: &[u8]) -> Result<(), mtp_crypto::CryptoError> {
+                mtp_crypto::verify_ed25519(self.0, msg, sig)
+            }
+        }
+        struct MlDsaVerifier<'a>(&'a mtp_crypto::SignaturePqPublicKey);
+        impl SignatureScheme for MlDsaVerifier<'_> {
+            fn sign(&self, _: &[u8]) -> Result<Vec<u8>, mtp_crypto::CryptoError> {
+                Err(mtp_crypto::CryptoError::SigningFailed)
+            }
+            fn verify(&self, msg: &[u8], sig: &[u8]) -> Result<(), mtp_crypto::CryptoError> {
+                mtp_crypto::verify_ml_dsa(self.0, msg, sig)
+            }
+        }
+        match *alg {
+            SigAlgorithm::ED25519 => {
+                self.verify_frame(&Ed25519Verifier(&pk.sig_cl_public_key)).is_ok()
+            }
+            SigAlgorithm::ML_DSA_65 => {
+                self.verify_frame(&MlDsaVerifier(&pk.sig_pq_public_key)).is_ok()
+            }
+            SigAlgorithm::DUAL => {
+                // For DUAL, verify_frame passes the full combined sig to the verifier.
+                // We wrap a verifier that splits and checks both halves.
+                struct DualVerifier<'a>(&'a mtp_crypto::SignaturePublicKey, &'a mtp_crypto::SignaturePqPublicKey);
+                impl SignatureScheme for DualVerifier<'_> {
+                    fn sign(&self, _: &[u8]) -> Result<Vec<u8>, mtp_crypto::CryptoError> {
+                        Err(mtp_crypto::CryptoError::SigningFailed)
+                    }
+                    fn verify(&self, msg: &[u8], sig: &[u8]) -> Result<(), mtp_crypto::CryptoError> {
+                        const ED_LEN: usize = 64;
+                        if sig.len() < ED_LEN {
+                            return Err(mtp_crypto::CryptoError::InvalidSignature);
+                        }
+                        mtp_crypto::verify_ed25519(self.0, msg, &sig[..ED_LEN])?;
+                        mtp_crypto::verify_ml_dsa(self.1, msg, &sig[ED_LEN..])
+                    }
+                }
+                self.verify_frame(&DualVerifier(&pk.sig_cl_public_key, &pk.sig_pq_public_key)).is_ok()
+            }
+            _ => false,
+        }
+    }
+
     #[cfg(feature = "registry")]
     pub fn migrate(&self, target_tm: &TypeMap) -> Result<Self, CodecError> {
         let comm_name = communication_type_name(self.comm_type.0)
@@ -544,15 +734,23 @@ impl fmt::Display for CommunicationValue {
             write!(f, ", R:{}{:X}{}", ORANGE, self.receiver, RESET)?;
         }
 
-        let name = communication_type_name(self.comm_type.0).unwrap_or("?");
+        let name = self
+            .get_comm_type_enum()
+            .map(|t| t.name())
+            .unwrap_or_else(|| communication_type_name(self.comm_type.0).unwrap_or("?"));
         write!(f, ", {}: ", name)?;
 
+        let tm = self.type_map.clone().unwrap_or_else(TypeMap::latest);
         write!(f, "{{")?;
-        for (i, (key, value)) in self.data.iter().enumerate() {
+        for (i, (raw_id, value)) in self.data.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            let dname = data_type_name(key.0).unwrap_or("?");
+            let dname = tm
+                .data_enum_id(raw_id.0)
+                .map(|t| t.name())
+                .or_else(|| data_type_name(raw_id.0))
+                .unwrap_or("?");
             write!(f, "{}: ", dname)?;
             fmt_data_value(value, f)?;
         }
@@ -645,11 +843,11 @@ mod tests {
         assert_eq!(decoded.get_receiver(), 222);
         assert_eq!(decoded.get_type(), CommunicationType::Disconnect.to_id(&tm));
         assert_eq!(
-            decoded.get_data(DataType::Id.to_id(&tm)),
+            decoded.get_data(DataType::Id),
             &DataValue::Str("alice".to_string())
         );
         assert_eq!(
-            decoded.get_data(DataType::ClientNonce.to_id(&tm)),
+            decoded.get_data(DataType::ClientNonce),
             &DataValue::SignedNumber(42)
         );
     }

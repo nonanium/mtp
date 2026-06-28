@@ -5,7 +5,24 @@ use mtp_codec::{
 use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
 use std::net::IpAddr;
+use std::pin::Pin;
 use std::{error::Error, fmt};
+use tokio::time::Duration;
+
+/* ---- async callback type aliases ---- */
+#[cfg(feature = "crypto")]
+type GetExistingUser = Box<
+    dyn Fn(u64) -> Pin<Box<dyn std::future::Future<Output = Option<mtp_crypto::PublicKeyBundle>> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[cfg(feature = "crypto")]
+type CompleteRegister = Box<
+    dyn Fn(mtp_crypto::PublicKeyBundle) -> Pin<Box<dyn std::future::Future<Output = u64> + Send>>
+        + Send
+        + Sync,
+>;
 
 /* Host configuration. */
 pub struct HostConfig {
@@ -17,11 +34,13 @@ pub struct HostConfig {
     #[cfg(feature = "crypto")]
     pub require_authentication: bool,
     #[cfg(feature = "crypto")]
+    pub auth_timeout: Duration,
+    #[cfg(feature = "crypto")]
     pub host_keyring: mtp_crypto::Keyring,
     #[cfg(feature = "crypto")]
-    pub get_existing_user: Box<dyn Fn(u64) -> Option<mtp_crypto::PublicKeyBundle> + Send + Sync>,
+    pub get_existing_user: GetExistingUser,
     #[cfg(feature = "crypto")]
-    pub complete_register: Box<dyn Fn(mtp_crypto::PublicKeyBundle) -> u64 + Send + Sync>,
+    pub complete_register: CompleteRegister,
 }
 
 impl HostConfig {
@@ -34,6 +53,8 @@ impl HostConfig {
             #[cfg(feature = "crypto")]
             require_authentication: false,
             #[cfg(feature = "crypto")]
+            auth_timeout: Duration::from_secs(30),
+            #[cfg(feature = "crypto")]
             host_keyring: mtp_crypto::Keyring::new(
                 mtp_crypto::KemPublicKey::new(Vec::new()),
                 mtp_crypto::KemPrivateKey::new(Vec::new()),
@@ -43,9 +64,9 @@ impl HostConfig {
                 mtp_crypto::SignaturePrivateKey::new(Vec::new()),
             ),
             #[cfg(feature = "crypto")]
-            get_existing_user: Box::new(|_| None),
+            get_existing_user: Box::new(|_| Box::pin(async { None })),
             #[cfg(feature = "crypto")]
-            complete_register: Box::new(|_| 0),
+            complete_register: Box::new(|_| Box::pin(async { 0 })),
         }
     }
 
@@ -53,13 +74,25 @@ impl HostConfig {
     pub fn with_authentication(
         mut self,
         host_keyring: mtp_crypto::Keyring,
-        get_existing_user: impl Fn(u64) -> Option<mtp_crypto::PublicKeyBundle> + Send + Sync + 'static,
-        complete_register: impl Fn(mtp_crypto::PublicKeyBundle) -> u64 + Send + Sync + 'static,
+        get_existing_user: impl Fn(u64) -> Pin<Box<dyn std::future::Future<Output = Option<mtp_crypto::PublicKeyBundle>> + Send>>
+            + Send
+            + Sync
+            + 'static,
+        complete_register: impl Fn(mtp_crypto::PublicKeyBundle) -> Pin<Box<dyn std::future::Future<Output = u64> + Send>>
+            + Send
+            + Sync
+            + 'static,
     ) -> Self {
         self.require_authentication = true;
         self.host_keyring = host_keyring;
         self.get_existing_user = Box::new(get_existing_user);
         self.complete_register = Box::new(complete_register);
+        self
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn with_auth_timeout(mut self, timeout: Duration) -> Self {
+        self.auth_timeout = timeout;
         self
     }
 }
@@ -70,6 +103,7 @@ pub enum AcceptError {
     MissingVersion,
     UnsupportedVersion(Version),
     AuthenticationFailed(String),
+    AuthenticationTimedOut,
     Send(CommunicationError),
 }
 
@@ -85,6 +119,7 @@ impl fmt::Display for AcceptError {
                 write!(f, "unsupported protocol version: {version}")
             }
             Self::AuthenticationFailed(reason) => write!(f, "authentication failed: {reason}"),
+            Self::AuthenticationTimedOut => write!(f, "authentication handshake timed out"),
             Self::Send(error) => write!(f, "failed to send handshake message: {error}"),
         }
     }
@@ -95,6 +130,7 @@ impl Error for AcceptError {}
 #[cfg(feature = "crypto")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthState {
+    Unauthenticated,
     Pending,
     Authenticated,
     Failed,
@@ -158,7 +194,16 @@ impl MTPHost {
 
         #[cfg(feature = "crypto")]
         if self.config.require_authentication {
-            return self.accept_authenticated(sender, receiver).await;
+            let timeout = self.config.auth_timeout;
+            return match tokio::time::timeout(
+                timeout,
+                self.accept_authenticated(sender, receiver),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(AcceptError::AuthenticationTimedOut),
+            };
         }
 
         // Read the first message (always encoded with reserved types).
@@ -167,13 +212,6 @@ impl MTPHost {
             Err(e) => return Err(AcceptError::Receive(e)),
         };
 
-        /*
-         * Extract the client's version from the first message.
-         * The client is expected to send DataType::Version (reserved ID 3)
-         * as a DataValue::Str("X.Y").
-         *
-         * Then negotiate the version for single-version clients
-         */
         let client_version = match extract_version(&first_msg) {
             Some(v) => v,
             None => return Err(AcceptError::MissingVersion),
@@ -195,7 +233,7 @@ impl MTPHost {
             sender,
             receiver,
             #[cfg(feature = "crypto")]
-            auth_state: AuthState::Authenticated,
+            auth_state: AuthState::Unauthenticated,
             #[cfg(feature = "crypto")]
             client_id: 0,
             #[cfg(feature = "crypto")]
@@ -280,20 +318,31 @@ impl MTPHost {
         };
 
         // ===== Step 1: receive the client's unsigned hello =====
-        let hello = receiver.receive().await.map_err(AcceptError::Receive)?;
-        let version_str = match hello.get_data(DataType::Version.to_id(&tm)) {
+        let hello = match receiver.receive().await {
+            Ok(m) => m,
+            Err(e) => {
+                sender.close();
+                return Err(AcceptError::Receive(e));
+            }
+        };
+        let version_str = match hello.get_data(DataType::Version) {
             DataValue::Str(s) => s.clone(),
             _ => {
                 sender.close();
                 return Err(AcceptError::MissingVersion);
             }
         };
-        let client_version = Version::parse(&version_str).ok_or(AcceptError::MissingVersion)?;
+        let client_version = match Version::parse(&version_str) {
+            Some(v) => v,
+            None => {
+                sender.close();
+                return Err(AcceptError::MissingVersion);
+            }
+        };
 
         let (flow, response_type) =
             if hello.get_type() == mtp_codec::CommunicationType::Identification.to_id(&tm) {
-                // LOGIN: look up the claimed user before issuing a challenge.
-                let cid = match hello.get_data(DataType::Id.to_id(&tm)) {
+                let cid = match hello.get_data(DataType::Id) {
                     DataValue::UnsignedNumber(n) => *n as u64,
                     _ => {
                         sender.close();
@@ -302,7 +351,7 @@ impl MTPHost {
                         ));
                     }
                 };
-                let bundle = match (self.config.get_existing_user)(cid) {
+                let bundle = match (self.config.get_existing_user)(cid).await {
                     Some(b) => b,
                     None => {
                         let rejection = CommunicationValue::new(
@@ -321,8 +370,7 @@ impl MTPHost {
                     mtp_codec::CommunicationType::IdentificationResponse,
                 )
             } else if hello.get_type() == mtp_codec::CommunicationType::Register.to_id(&tm) {
-                // REGISTER: the client presents the bundle it wants to register.
-                let bundle = match hello.get_data(DataType::PublicKeys.to_id(&tm)) {
+                let bundle = match hello.get_data(DataType::PublicKeys) {
                     DataValue::Bytes(b) => PublicKeyBundle::from_bytes(b).map_err(|_| {
                         AcceptError::AuthenticationFailed("invalid public key bundle".into())
                     })?,
@@ -345,7 +393,6 @@ impl MTPHost {
                 ));
             };
 
-        // The id bound into the challenge (0 for register: none assigned yet).
         let challenge_id = match &flow {
             Flow::Login { id, .. } => *id,
             Flow::Register { .. } => 0,
@@ -366,20 +413,26 @@ impl MTPHost {
             challenge_msg = challenge_msg
                 .add_typed_default(DataType::PqSignature, DataValue::Bytes(chal_pq_sig));
         }
-        sender
-            .send(&challenge_msg)
-            .await
-            .map_err(AcceptError::Send)?;
+        if let Err(e) = sender.send(&challenge_msg).await {
+            sender.close();
+            return Err(AcceptError::Send(e));
+        }
 
         // ===== Step 3: receive and verify the client's proof =====
-        let proof = receiver.receive().await.map_err(AcceptError::Receive)?;
+        let proof = match receiver.receive().await {
+            Ok(m) => m,
+            Err(e) => {
+                sender.close();
+                return Err(AcceptError::Receive(e));
+            }
+        };
         if proof.get_type() != mtp_codec::CommunicationType::ChallengeResponse.to_id(&tm) {
             sender.close();
             return Err(AcceptError::AuthenticationFailed(
                 "missing challenge response".into(),
             ));
         }
-        let client_nonce = match proof.get_data(DataType::ClientNonce.to_id(&tm)) {
+        let client_nonce = match proof.get_data(DataType::ClientNonce) {
             DataValue::UnsignedNumber(n) => *n,
             _ => {
                 sender.close();
@@ -388,7 +441,7 @@ impl MTPHost {
                 ));
             }
         };
-        let sig_bytes = match proof.get_data(DataType::Signature.to_id(&tm)) {
+        let sig_bytes = match proof.get_data(DataType::Signature) {
             DataValue::Bytes(b) => b.clone(),
             _ => {
                 sender.close();
@@ -397,7 +450,7 @@ impl MTPHost {
                 ));
             }
         };
-        let pq_sig_bytes: Vec<u8> = match proof.get_data(DataType::PqSignature.to_id(&tm)) {
+        let pq_sig_bytes: Vec<u8> = match proof.get_data(DataType::PqSignature) {
             DataValue::Bytes(b) => b.clone(),
             _ => vec![],
         };
@@ -439,7 +492,7 @@ impl MTPHost {
         let (assigned_id, client_bundle) = match flow {
             Flow::Login { id, bundle } => (id, bundle),
             Flow::Register { bundle, .. } => {
-                let new_id = (self.config.complete_register)(bundle.clone());
+                let new_id = (self.config.complete_register)(bundle.clone()).await;
                 (new_id, bundle)
             }
         };
@@ -464,14 +517,26 @@ impl MTPHost {
                 response.add_typed_default(DataType::PqSignature, DataValue::Bytes(host_pq_sig));
         }
 
-        sender.send(&response).await.map_err(AcceptError::Send)?;
-        sender.finish_stream().await.map_err(AcceptError::Send)?;
+        if let Err(e) = sender.send(&response).await {
+            sender.close();
+            return Err(AcceptError::Send(e));
+        }
+        if let Err(e) = sender.finish_stream().await {
+            sender.close();
+            return Err(AcceptError::Send(e));
+        }
 
         // ===== Version negotiation =====
-        let negotiated = self
+        let negotiated = match self
             .registry
             .negotiate(std::slice::from_ref(&client_version))
-            .ok_or(AcceptError::UnsupportedVersion(client_version))?;
+        {
+            Some(v) => v,
+            None => {
+                sender.close();
+                return Err(AcceptError::UnsupportedVersion(client_version));
+            }
+        };
         let codec = VersionedCodec::new(self.registry.clone());
 
         Ok(Some(MTPConnection {
@@ -493,8 +558,7 @@ impl MTPHost {
  * (reserved ID 3) mapping to `DataValue::Str("major.minor")`.
  */
 fn extract_version(msg: &CommunicationValue) -> Option<Version> {
-    let tm = TypeMap::latest();
-    let value = msg.get_data(DataType::Version.to_id(&tm));
+    let value = msg.get_data(DataType::Version);
     match value {
         DataValue::Str(s) => Version::parse(s.as_str()),
         _ => None,
@@ -540,5 +604,12 @@ mod tests {
         )
         .add_data(DataType::Version.to_id(&tm), DataValue::UnsignedNumber(42));
         assert!(extract_version(&msg).is_none());
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn auth_state_unauthenticated_is_not_authenticated() {
+        assert_ne!(AuthState::Unauthenticated, AuthState::Authenticated);
+        assert_ne!(AuthState::Pending, AuthState::Authenticated);
     }
 }

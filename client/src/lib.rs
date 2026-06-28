@@ -1,6 +1,7 @@
 use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Version};
 use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
+use tokio::time::Duration;
 
 #[cfg(feature = "crypto")]
 fn unexpected_response_type_error(
@@ -20,6 +21,8 @@ pub struct ClientConfig {
     pub url: String,
     pub tls: ClientTlsConfig,
     pub client_id: u64,
+    #[cfg(feature = "crypto")]
+    pub auth_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +37,8 @@ impl ClientConfig {
             url: url.into(),
             tls: ClientTlsConfig::SystemRoots,
             client_id: 0,
+            #[cfg(feature = "crypto")]
+            auth_timeout: Duration::from_secs(30),
         }
     }
 
@@ -48,6 +53,12 @@ impl ClientConfig {
 
     pub fn with_client_id(mut self, client_id: u64) -> Self {
         self.client_id = client_id;
+        self
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn with_auth_timeout(mut self, timeout: Duration) -> Self {
+        self.auth_timeout = timeout;
         self
     }
 
@@ -73,6 +84,7 @@ pub struct MTPConnection {
 #[cfg(feature = "crypto")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthState {
+    Unauthenticated,
     Pending,
     Authenticated,
     Failed,
@@ -91,7 +103,6 @@ impl MTPClient {
         let (sender, receiver) =
             mtp_transport::connect(&config.url, config.server_cert(), Policy::default()).await?;
 
-        // Build the initial identification message with the protocol version.
         let version_str = format!("{}", PROTOCOL_VERSION);
         let ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)
             .add_typed_default(DataType::Version, DataValue::Str(version_str))
@@ -107,7 +118,7 @@ impl MTPClient {
             sender,
             receiver,
             #[cfg(feature = "crypto")]
-            auth_state: AuthState::Authenticated,
+            auth_state: AuthState::Unauthenticated,
             #[cfg(feature = "crypto")]
             client_id: config.client_id,
         })
@@ -126,14 +137,13 @@ impl MTPClient {
 #[cfg(feature = "crypto")]
 fn verify_host_challenge(
     challenge: &CommunicationValue,
-    tm: &mtp_codec::TypeMap,
     host_pk: &mtp_crypto::PublicKeyBundle,
     id: u64,
     server_challenge: u128,
 ) -> Result<(), CommunicationError> {
     use mtp_crypto::{auth, verify_ed25519, verify_ml_dsa};
 
-    let sig = match challenge.get_data(DataType::Signature.to_id(tm)) {
+    let sig = match challenge.get_data(DataType::Signature) {
         DataValue::Bytes(b) => b.clone(),
         _ => {
             return Err(CommunicationError::AuthenticationFailed(
@@ -141,7 +151,7 @@ fn verify_host_challenge(
             ));
         }
     };
-    let pq_sig = match challenge.get_data(DataType::PqSignature.to_id(tm)) {
+    let pq_sig = match challenge.get_data(DataType::PqSignature) {
         DataValue::Bytes(b) => b.clone(),
         _ => vec![],
     };
@@ -165,7 +175,6 @@ fn verify_host_challenge(
 #[cfg(feature = "crypto")]
 fn verify_host_final(
     response: &CommunicationValue,
-    tm: &mtp_codec::TypeMap,
     host_pk: &mtp_crypto::PublicKeyBundle,
     id: u64,
     client_nonce: u128,
@@ -173,7 +182,7 @@ fn verify_host_final(
 ) -> Result<(), CommunicationError> {
     use mtp_crypto::{auth, verify_ed25519, verify_ml_dsa};
 
-    match response.get_data(DataType::ClientNonce.to_id(tm)) {
+    match response.get_data(DataType::ClientNonce) {
         DataValue::UnsignedNumber(n) if *n == client_nonce => {}
         _ => {
             return Err(CommunicationError::AuthenticationFailed(
@@ -182,7 +191,7 @@ fn verify_host_final(
         }
     }
 
-    let sig = match response.get_data(DataType::Signature.to_id(tm)) {
+    let sig = match response.get_data(DataType::Signature) {
         DataValue::Bytes(b) => b.clone(),
         _ => {
             return Err(CommunicationError::AuthenticationFailed(
@@ -190,7 +199,7 @@ fn verify_host_final(
             ));
         }
     };
-    let pq_sig = match response.get_data(DataType::PqSignature.to_id(tm)) {
+    let pq_sig = match response.get_data(DataType::PqSignature) {
         DataValue::Bytes(b) => b.clone(),
         _ => vec![],
     };
@@ -210,10 +219,9 @@ fn verify_host_final(
 #[cfg(feature = "crypto")]
 fn check_connected(
     response: &CommunicationValue,
-    tm: &mtp_codec::TypeMap,
     reject_msg: &str,
 ) -> Result<(), CommunicationError> {
-    match response.get_data(DataType::Connected.to_id(tm)) {
+    match response.get_data(DataType::Connected) {
         DataValue::BoolTrue => Ok(()),
         DataValue::BoolFalse => Err(CommunicationError::AuthenticationFailed(reject_msg.into())),
         _ => Err(CommunicationError::AuthenticationFailed(
@@ -271,7 +279,7 @@ async fn receive_verified_challenge(
         ));
     }
 
-    let server_challenge = match challenge.get_data(DataType::ServerNonce.to_id(tm)) {
+    let server_challenge = match challenge.get_data(DataType::ServerNonce) {
         DataValue::UnsignedNumber(n) => *n,
         _ => {
             return Err(CommunicationError::AuthenticationFailed(
@@ -280,13 +288,7 @@ async fn receive_verified_challenge(
         }
     };
 
-    verify_host_challenge(
-        &challenge,
-        tm,
-        host_public_key_bundle,
-        bound_id,
-        server_challenge,
-    )?;
+    verify_host_challenge(&challenge, host_public_key_bundle, bound_id, server_challenge)?;
 
     Ok(server_challenge)
 }
@@ -294,6 +296,25 @@ async fn receive_verified_challenge(
 #[cfg(feature = "crypto")]
 impl MTPClient {
     pub async fn auth_connect(
+        config: ClientConfig,
+        keys: &mtp_crypto::Keyring,
+        host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
+    ) -> Result<MTPConnection, CommunicationError> {
+        let timeout = config.auth_timeout;
+        match tokio::time::timeout(
+            timeout,
+            Self::auth_connect_inner(config, keys, host_public_key_bundle),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(CommunicationError::AuthenticationFailed(
+                "authentication timed out".into(),
+            )),
+        }
+    }
+
+    async fn auth_connect_inner(
         config: ClientConfig,
         keys: &mtp_crypto::Keyring,
         host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
@@ -313,17 +334,27 @@ impl MTPClient {
                 DataType::Id,
                 DataValue::UnsignedNumber(config.client_id as u128),
             );
-        sender.send(&ident).await?;
+        if let Err(e) = sender.send(&ident).await {
+            sender.close();
+            return Err(e);
+        }
 
         // 2. Receive and verify the host's challenge.
-        let server_challenge = receive_verified_challenge(
+        let server_challenge = match receive_verified_challenge(
             &receiver,
             &tm,
             host_public_key_bundle,
             config.client_id,
             "auth_connect challenge",
         )
-        .await?;
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                sender.close();
+                return Err(e);
+            }
+        };
 
         // 3. Sign the host's challenge and send the proof.
         let client_nonce: u128 = rand::random();
@@ -334,28 +365,49 @@ impl MTPClient {
             client_nonce,
         );
 
-        let proof = signed_challenge_response(keys, &proof_payload, client_nonce)?;
-        sender.send(&proof).await?;
+        let proof = match signed_challenge_response(keys, &proof_payload, client_nonce) {
+            Ok(p) => p,
+            Err(e) => {
+                sender.close();
+                return Err(e);
+            }
+        };
+        if let Err(e) = sender.send(&proof).await {
+            sender.close();
+            return Err(e);
+        }
 
         // 4. Receive and verify the host's final confirmation.
-        let response = receiver.receive().await?;
+        let response = match receiver.receive().await {
+            Ok(r) => r,
+            Err(e) => {
+                sender.close();
+                return Err(e);
+            }
+        };
         let expected_type = mtp_codec::CommunicationType::IdentificationResponse.to_id(&tm);
         if response.get_type() != expected_type {
+            sender.close();
             return Err(unexpected_response_type_error(
                 "auth_connect",
                 expected_type,
                 &response,
             ));
         }
-        check_connected(&response, &tm, "Server rejected authentication")?;
-        verify_host_final(
+        if let Err(e) = check_connected(&response, "Server rejected authentication") {
+            sender.close();
+            return Err(e);
+        }
+        if let Err(e) = verify_host_final(
             &response,
-            &tm,
             host_public_key_bundle,
             config.client_id,
             client_nonce,
             server_challenge,
-        )?;
+        ) {
+            sender.close();
+            return Err(e);
+        }
 
         Ok(MTPConnection {
             version: PROTOCOL_VERSION,
@@ -367,6 +419,25 @@ impl MTPClient {
     }
 
     pub async fn auth_register(
+        config: ClientConfig,
+        keys: &mtp_crypto::Keyring,
+        host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
+    ) -> Result<MTPConnection, CommunicationError> {
+        let timeout = config.auth_timeout;
+        match tokio::time::timeout(
+            timeout,
+            Self::auth_register_inner(config, keys, host_public_key_bundle),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(CommunicationError::AuthenticationFailed(
+                "authentication timed out".into(),
+            )),
+        }
+    }
+
+    async fn auth_register_inner(
         config: ClientConfig,
         keys: &mtp_crypto::Keyring,
         host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
@@ -385,54 +456,86 @@ impl MTPClient {
         let register = CommunicationValue::new(mtp_codec::CommunicationType::Register)
             .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
             .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
-        sender.send(&register).await?;
+        if let Err(e) = sender.send(&register).await {
+            sender.close();
+            return Err(e);
+        }
 
         // 2. Receive and verify the host's challenge (register binds id = 0).
-        let server_challenge = receive_verified_challenge(
+        let server_challenge = match receive_verified_challenge(
             &receiver,
             &tm,
             host_public_key_bundle,
             0,
             "auth_register challenge",
         )
-        .await?;
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                sender.close();
+                return Err(e);
+            }
+        };
 
         // 3. Sign the host's challenge over the bundle and send the proof.
         let client_nonce: u128 = rand::random();
         let proof_payload =
             auth::register_proof_payload(&version_str, &pk_bytes, server_challenge, client_nonce);
 
-        let proof = signed_challenge_response(keys, &proof_payload, client_nonce)?;
-        sender.send(&proof).await?;
+        let proof = match signed_challenge_response(keys, &proof_payload, client_nonce) {
+            Ok(p) => p,
+            Err(e) => {
+                sender.close();
+                return Err(e);
+            }
+        };
+        if let Err(e) = sender.send(&proof).await {
+            sender.close();
+            return Err(e);
+        }
 
         // 4. Receive the host's final confirmation; extract the assigned id and
         //    verify the host signature binds to it.
-        let response = receiver.receive().await?;
+        let response = match receiver.receive().await {
+            Ok(r) => r,
+            Err(e) => {
+                sender.close();
+                return Err(e);
+            }
+        };
         let expected_type = mtp_codec::CommunicationType::RegisterResponse.to_id(&tm);
         if response.get_type() != expected_type {
+            sender.close();
             return Err(unexpected_response_type_error(
                 "auth_register",
                 expected_type,
                 &response,
             ));
         }
-        check_connected(&response, &tm, "Server rejected registration")?;
-        let assigned_id = match response.get_data(DataType::Id.to_id(&tm)) {
+        if let Err(e) = check_connected(&response, "Server rejected registration") {
+            sender.close();
+            return Err(e);
+        }
+        let assigned_id = match response.get_data(DataType::Id) {
             DataValue::UnsignedNumber(n) => *n as u64,
             _ => {
+                sender.close();
                 return Err(CommunicationError::AuthenticationFailed(
                     "Missing assigned ID".into(),
                 ));
             }
         };
-        verify_host_final(
+        if let Err(e) = verify_host_final(
             &response,
-            &tm,
             host_public_key_bundle,
             assigned_id,
             client_nonce,
             server_challenge,
-        )?;
+        ) {
+            sender.close();
+            return Err(e);
+        }
 
         Ok(MTPConnection {
             version: PROTOCOL_VERSION,
@@ -470,8 +573,23 @@ mod tests {
 
     #[cfg(feature = "crypto")]
     #[test]
-    fn test_auth_state_derive() {
-        assert_eq!(AuthState::Pending, AuthState::Pending);
-        assert_ne!(AuthState::Authenticated, AuthState::Failed);
+    fn test_auth_state_unauthenticated_is_not_authenticated() {
+        assert_ne!(AuthState::Unauthenticated, AuthState::Authenticated);
+        assert_ne!(AuthState::Pending, AuthState::Authenticated);
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_auth_timeout_default() {
+        let config = ClientConfig::new("https://localhost:4433");
+        assert_eq!(config.auth_timeout, Duration::from_secs(30));
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_auth_timeout_custom() {
+        let config = ClientConfig::new("https://localhost:4433")
+            .with_auth_timeout(Duration::from_secs(10));
+        assert_eq!(config.auth_timeout, Duration::from_secs(10));
     }
 }

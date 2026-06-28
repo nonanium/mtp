@@ -55,7 +55,7 @@ fn assert_numbered_message(
 ) {
     assert_eq!(message.get_type(), comm_type.to_id(tm));
     assert_eq!(
-        message.get_data(DataType::PqSignature.to_id(tm)).clone(),
+        message.get_data(DataType::PqSignature).clone(),
         DataValue::UnsignedNumber(value)
     );
 }

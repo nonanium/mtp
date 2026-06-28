@@ -21,6 +21,12 @@ impl From<Vec<u8>> for EncryptionPrivateKey {
     }
 }
 
+impl From<&[u8]> for EncryptionPrivateKey {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -39,6 +45,12 @@ impl SignaturePrivateKey {
 impl From<Vec<u8>> for SignaturePrivateKey {
     fn from(bytes: Vec<u8>) -> Self {
         Self(bytes)
+    }
+}
+
+impl From<&[u8]> for SignaturePrivateKey {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
     }
 }
 
@@ -63,6 +75,12 @@ impl From<Vec<u8>> for EncryptionPublicKey {
     }
 }
 
+impl From<&[u8]> for EncryptionPublicKey {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
 #[derive(Clone)]
@@ -81,6 +99,12 @@ impl SignaturePublicKey {
 impl From<Vec<u8>> for SignaturePublicKey {
     fn from(bytes: Vec<u8>) -> Self {
         Self(bytes)
+    }
+}
+
+impl From<&[u8]> for SignaturePublicKey {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
     }
 }
 
@@ -105,6 +129,12 @@ impl From<Vec<u8>> for KemPrivateKey {
     }
 }
 
+impl From<&[u8]> for KemPrivateKey {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
 #[derive(Clone)]
@@ -123,6 +153,12 @@ impl KemPublicKey {
 impl From<Vec<u8>> for KemPublicKey {
     fn from(bytes: Vec<u8>) -> Self {
         Self(bytes)
+    }
+}
+
+impl From<&[u8]> for KemPublicKey {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
     }
 }
 
@@ -147,6 +183,12 @@ impl From<Vec<u8>> for SignaturePqPublicKey {
     }
 }
 
+impl From<&[u8]> for SignaturePqPublicKey {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -165,6 +207,12 @@ impl SignaturePqPrivateKey {
 impl From<Vec<u8>> for SignaturePqPrivateKey {
     fn from(bytes: Vec<u8>) -> Self {
         Self(bytes)
+    }
+}
+
+impl From<&[u8]> for SignaturePqPrivateKey {
+    fn from(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
     }
 }
 

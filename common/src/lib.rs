@@ -16,6 +16,8 @@ pub enum CodecError {
     TooManyEntries,
     #[error("Crypto failed: {0}")]
     CryptoFailed(String),
+    #[error("Missing required field: {0}")]
+    MissingField(String),
 }
 
 /* ================================ TESTS ================================ */

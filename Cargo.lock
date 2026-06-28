@@ -999,6 +999,7 @@ dependencies = [
  "mtp-crypto",
  "mtp-transport",
  "rand 0.8.6",
+ "tokio",
 ]
 
 [[package]]
@@ -1049,6 +1050,7 @@ dependencies = [
  "mtp-crypto",
  "mtp-transport",
  "rand 0.8.6",
+ "tokio",
 ]
 
 [[package]]
