@@ -1,38 +1,31 @@
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug, Clone)]
+#[derive(Error, Debug, Clone)]
 pub enum CryptoError {
+    #[error("encryption failed")]
     EncryptionFailed,
+    #[error("decryption failed")]
     DecryptionFailed,
+    #[error("invalid key length")]
     InvalidKeyLength,
+    #[error("invalid nonce length")]
     InvalidNonceLength,
+    #[error("invalid signature")]
     InvalidSignature,
+    #[error("signing failed")]
     SigningFailed,
+    #[error("verification failed")]
     VerificationFailed,
+    #[error("key generation failed")]
     KeyGenerationFailed,
+    #[error("KDF error")]
     KdfError,
+    #[error("KEM encapsulation failed")]
     KemEncapsulationFailed,
+    #[error("KEM decapsulation failed")]
     KemDecapsulationFailed,
+    #[error("unknown algorithm")]
     UnknownAlgorithm,
+    #[error("invalid hex encoding")]
+    InvalidHex,
 }
-
-impl fmt::Display for CryptoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CryptoError::EncryptionFailed => write!(f, "encryption failed"),
-            CryptoError::DecryptionFailed => write!(f, "decryption failed"),
-            CryptoError::InvalidKeyLength => write!(f, "invalid key length"),
-            CryptoError::InvalidNonceLength => write!(f, "invalid nonce length"),
-            CryptoError::InvalidSignature => write!(f, "invalid signature"),
-            CryptoError::SigningFailed => write!(f, "signing failed"),
-            CryptoError::VerificationFailed => write!(f, "verification failed"),
-            CryptoError::KeyGenerationFailed => write!(f, "key generation failed"),
-            CryptoError::KdfError => write!(f, "KDF error"),
-            CryptoError::KemEncapsulationFailed => write!(f, "KEM encapsulation failed"),
-            CryptoError::KemDecapsulationFailed => write!(f, "KEM decapsulation failed"),
-            CryptoError::UnknownAlgorithm => write!(f, "unknown algorithm"),
-        }
-    }
-}
-
-impl std::error::Error for CryptoError {}
