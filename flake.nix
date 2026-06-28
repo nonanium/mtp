@@ -4,16 +4,25 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
-    flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs = {
     self,
     nixpkgs,
     rust-overlay,
-    flake-utils,
-  }:
-    flake-utils.lib.eachDefaultSystem (
+  }: let
+    systems = [
+      "aarch64-darwin"
+      "aarch64-linux"
+      "x86_64-darwin"
+      "x86_64-linux"
+    ];
+    eachSystem = f:
+      nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate {} (
+        map (system: nixpkgs.lib.mapAttrs (_: value: {${system} = value;}) (f system)) systems
+      );
+  in
+    eachSystem (
       system: let
         overlays = [rust-overlay.overlays.default];
         pkgs = import nixpkgs {inherit system overlays;};
