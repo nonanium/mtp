@@ -5,9 +5,14 @@ on:
         description: "Release type: 'dev' or 'stable'"
         required: true
         default: "dev"
+        type: choice
+        options:
+          - dev
+          - stable
       description:
         description: "Release description"
         required: true
+        type: string
 
 jobs:
   release:
