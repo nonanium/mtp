@@ -129,7 +129,10 @@ impl CommunicationValue {
             }
         };
         match tm.data_id_enum(data_type) {
-            Some(raw_id) => self.data.get(&DataTypeId(raw_id)).unwrap_or(&DataValue::Null),
+            Some(raw_id) => self
+                .data
+                .get(&DataTypeId(raw_id))
+                .unwrap_or(&DataValue::Null),
             None => &DataValue::Null,
         }
     }
@@ -594,21 +597,28 @@ impl CommunicationValue {
             }
         }
         match *alg {
-            SigAlgorithm::ED25519 => {
-                self.verify_frame(&Ed25519Verifier(&pk.sig_cl_public_key)).is_ok()
-            }
-            SigAlgorithm::ML_DSA_65 => {
-                self.verify_frame(&MlDsaVerifier(&pk.sig_pq_public_key)).is_ok()
-            }
+            SigAlgorithm::ED25519 => self
+                .verify_frame(&Ed25519Verifier(&pk.sig_cl_public_key))
+                .is_ok(),
+            SigAlgorithm::ML_DSA_65 => self
+                .verify_frame(&MlDsaVerifier(&pk.sig_pq_public_key))
+                .is_ok(),
             SigAlgorithm::DUAL => {
                 // For DUAL, verify_frame passes the full combined sig to the verifier.
                 // We wrap a verifier that splits and checks both halves.
-                struct DualVerifier<'a>(&'a mtp_crypto::SignaturePublicKey, &'a mtp_crypto::SignaturePqPublicKey);
+                struct DualVerifier<'a>(
+                    &'a mtp_crypto::SignaturePublicKey,
+                    &'a mtp_crypto::SignaturePqPublicKey,
+                );
                 impl SignatureScheme for DualVerifier<'_> {
                     fn sign(&self, _: &[u8]) -> Result<Vec<u8>, mtp_crypto::CryptoError> {
                         Err(mtp_crypto::CryptoError::SigningFailed)
                     }
-                    fn verify(&self, msg: &[u8], sig: &[u8]) -> Result<(), mtp_crypto::CryptoError> {
+                    fn verify(
+                        &self,
+                        msg: &[u8],
+                        sig: &[u8],
+                    ) -> Result<(), mtp_crypto::CryptoError> {
                         const ED_LEN: usize = 64;
                         if sig.len() < ED_LEN {
                             return Err(mtp_crypto::CryptoError::InvalidSignature);
@@ -617,7 +627,8 @@ impl CommunicationValue {
                         mtp_crypto::verify_ml_dsa(self.1, msg, &sig[ED_LEN..])
                     }
                 }
-                self.verify_frame(&DualVerifier(&pk.sig_cl_public_key, &pk.sig_pq_public_key)).is_ok()
+                self.verify_frame(&DualVerifier(&pk.sig_cl_public_key, &pk.sig_pq_public_key))
+                    .is_ok()
             }
             _ => false,
         }

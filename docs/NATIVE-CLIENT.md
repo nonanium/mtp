@@ -131,6 +131,18 @@ let id = conn.client_id;
 let keyring_bytes = keyring.to_bytes();
 ```
 
+When callers already know whether a saved client id exists, the convenience
+helper chooses login or registration:
+
+```rust
+let conn = MTPClient::auth_connect_or_register(
+    config,
+    saved_client_id, // Option<u64>
+    &keyring,
+    &host_pk,
+).await?;
+```
+
 Protocol (challenge-response):
 1. Client sends an unsigned `Register` hello (version, public key bundle)
 2. Host replies with a `Challenge` carrying a fresh random `server_challenge`
@@ -206,6 +218,19 @@ type-map configuration.
 ```rust
 conn.sender.send(&msg).await?;
 ```
+
+For request/response flows, `MTPConnection::request` sends one frame and waits
+for a response with the same non-zero frame id. An expected response type can be
+provided for validation:
+
+```rust
+let response = conn
+    .request(&msg, Some(mtp::codec::CommunicationType::Pong))
+    .await?;
+```
+
+Frames with other ids are consumed by this helper. Applications that need
+subscriptions or broad routing should use one receive task and correlate there.
 
 Two send modes (configured via `mtp::transport::Policy`):
 - `PersistentStream` (default) -- reuses one QUIC uni-directional stream

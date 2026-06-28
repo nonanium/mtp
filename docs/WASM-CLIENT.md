@@ -42,6 +42,8 @@ const client = await MTPClient.create({
   credentials,
   storage,
   serverCertificateHashes: ["sha-256:abcd1234..."],
+  maxMessageSize: 1_000_000,
+  authTimeoutMs: 30_000,
   pings: true,
   logger: (event) => console.log(event),
 });
@@ -139,6 +141,9 @@ await MTPClient.create({
 
 If hashes are omitted, the browser uses its normal TLS root store.
 
+`maxMessageSize` caps inbound and outbound MTP frames before buffering/sending.
+`authTimeoutMs` bounds connect/login/register promises at the SDK layer.
+
 ## Sending, Requests, Subscriptions, And Pings
 
 `send` accepts either a typed message or a prebuilt raw frame:
@@ -157,7 +162,7 @@ await client.send("SomeType", { value: "hello" }, {
 });
 ```
 
-`request` sends one frame and resolves with the matching parsed response from the WASM layer:
+`request` sends one frame and resolves with the parsed response carrying the same frame id. `responseType` is validated after the id match:
 
 ```typescript
 const response = await client.request(
@@ -252,6 +257,7 @@ Raw crypto and key helpers include:
 
 - `ed25519_generate()`
 - `ed25519_verify(publicKey, message, signature)`
+- `keyring_generate()`
 - `keyring_from_ed25519(secretKey, publicKey)`
 - `WasmKeyring.from_bytes(bytes)` and `keyring.to_bytes()`
 - `WasmPublicKeyBundle.from_bytes(bytes)` and `bundle.to_bytes()`

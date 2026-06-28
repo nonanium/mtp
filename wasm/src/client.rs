@@ -71,21 +71,6 @@ fn route_incoming_frame(
         }
     }
 
-    if let Some(message_type) = message_type.as_ref() {
-        let matching_id = pending_requests
-            .borrow()
-            .iter()
-            .find_map(|(id, pending)| match pending.response_type.as_ref() {
-                Some(response_type) if response_type == message_type => Some(*id),
-                _ => None,
-            });
-        if let Some(id) = matching_id {
-            if let Some(pending) = pending_requests.borrow_mut().remove(&id) {
-                let _ = pending.sender.send(Ok(frame.clone()));
-            }
-        }
-    }
-
     let _ = on_message.call1(&JsValue::NULL, frame);
 
     let Some(message_type) = message_type else {
@@ -154,7 +139,7 @@ fn unexpected_response_type_error(
  */
 fn verify_host_challenge(
     challenge: &CommunicationValue,
-    tm: &mtp_codec::TypeMap,
+    _tm: &mtp_codec::TypeMap,
     host_pk: &mtp_crypto::PublicKeyBundle,
     id: u64,
     server_challenge: u128,
@@ -185,7 +170,7 @@ fn verify_host_challenge(
  */
 fn verify_host_final(
     resp: &CommunicationValue,
-    tm: &mtp_codec::TypeMap,
+    _tm: &mtp_codec::TypeMap,
     host_pk: &mtp_crypto::PublicKeyBundle,
     id: u64,
     client_nonce: u128,
@@ -230,12 +215,24 @@ fn signed_challenge_response_bytes(
         .sign(proof_payload)
         .map_err(|e| js_error(&format!("signature failed: {}", e)))?;
 
-    CommunicationValue::new(CommunicationType::ChallengeResponse)
+    let mut proof = CommunicationValue::new(CommunicationType::ChallengeResponse)
         .add_typed_default(
             DataType::ClientNonce,
             DataValue::UnsignedNumber(client_nonce),
         )
-        .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
+        .add_typed_default(DataType::Signature, DataValue::Bytes(signature));
+
+    if !keyring.sig_pq_secret_key.as_bytes().is_empty() {
+        let pq_signer =
+            mtp_crypto::MlDsaSigner::new(&keyring.sig_pq_secret_key, &keyring.sig_pq_public_key)
+                .map_err(|e| js_error(&format!("PQ signer creation failed: {}", e)))?;
+        let pq_signature = pq_signer
+            .sign(proof_payload)
+            .map_err(|e| js_error(&format!("PQ signature failed: {}", e)))?;
+        proof = proof.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
+    }
+
+    proof
         .to_bytes()
         .map_err(|e| js_error(&format!("encode failed: {}", e)))
 }
@@ -297,8 +294,12 @@ impl WasmClient {
     #[wasm_bindgen]
     pub async fn connect(&mut self, config: &ConnectionConfig) -> Result<(), JsValue> {
         self.set_state(ConnectionState::Connecting);
-        let transport =
-            WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
+        let transport = WasmTransport::connect(
+            &config.url,
+            config.server_certificate_hashes.clone(),
+            config.max_message_size,
+        )
+        .await?;
 
         let version_str = format!("{}", PROTOCOL_VERSION);
         let ident = CommunicationValue::new(CommunicationType::Identification)
@@ -342,8 +343,12 @@ impl WasmClient {
         let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
 
-        let transport =
-            WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
+        let transport = WasmTransport::connect(
+            &config.url,
+            config.server_certificate_hashes.clone(),
+            config.max_message_size,
+        )
+        .await?;
 
         // 1. Send the unsigned Identification hello.
         let hello = CommunicationValue::new(CommunicationType::Identification)
@@ -450,8 +455,12 @@ impl WasmClient {
         let version_str = format!("{}", PROTOCOL_VERSION);
         let pk_bytes = keyring.public_key_bundle().as_bytes();
 
-        let transport =
-            WasmTransport::connect(&config.url, config.server_certificate_hashes.clone()).await?;
+        let transport = WasmTransport::connect(
+            &config.url,
+            config.server_certificate_hashes.clone(),
+            config.max_message_size,
+        )
+        .await?;
 
         // 1. Send the unsigned Register hello (version + public-key bundle).
         let hello = CommunicationValue::new(CommunicationType::Register)

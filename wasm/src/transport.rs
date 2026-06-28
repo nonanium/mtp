@@ -55,6 +55,7 @@ enum FrameOutcome {
 #[derive(Clone)]
 pub struct WasmTransport {
     inner: JsValue,
+    max_message_size: u32,
     /// Reader over `incoming_unidirectional_streams()` (a singleton stream of streams).
     streams_reader: Rc<RefCell<Option<JsValue>>>,
     /// Reader over the host's current uni-directional stream, if one is open.
@@ -64,7 +65,11 @@ pub struct WasmTransport {
 }
 
 impl WasmTransport {
-    pub async fn connect(url: &str, cert_hashes: Option<Vec<String>>) -> Result<Self, JsValue> {
+    pub async fn connect(
+        url: &str,
+        cert_hashes: Option<Vec<String>>,
+        max_message_size: u32,
+    ) -> Result<Self, JsValue> {
         let ctor = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("WebTransport"))?
             .dyn_into::<js_sys::Function>()
             .map_err(|_| js_error("WebTransport not available"))?;
@@ -111,6 +116,7 @@ impl WasmTransport {
             .map_err(|e| js_error(&format!("WebTransport ready failed: {:?}", e)))?;
         Ok(Self {
             inner: transport,
+            max_message_size,
             streams_reader: Rc::new(RefCell::new(None)),
             stream_reader: Rc::new(RefCell::new(None)),
             buffer: Rc::new(RefCell::new(Vec::new())),
@@ -122,6 +128,12 @@ impl WasmTransport {
     }
 
     pub async fn send_frame(&self, frame: &[u8]) -> Result<(), JsValue> {
+        if frame.len() as u64 > self.max_message_size as u64
+            || frame.len() as u64 >= CLOSE_FRAME_LEN as u64
+        {
+            return Err(js_error("message too large"));
+        }
+
         let create_stream = js_sys::Reflect::get(
             &self.inner,
             &JsValue::from_str("createUnidirectionalStream"),
@@ -272,6 +284,9 @@ impl WasmTransport {
         let frame_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
         if frame_len == CLOSE_FRAME_LEN {
             return Ok(Some(FrameOutcome::Closed));
+        }
+        if frame_len > self.max_message_size {
+            return Err(js_error("message too large"));
         }
         let frame_len = frame_len as usize;
         let Some(frame_end) = 4usize.checked_add(frame_len) else {

@@ -48,6 +48,7 @@ export class ConnectionConfig implements DisposableWasmObject {
   free(): void;
   [Symbol.dispose](): void;
   client_id: bigint;
+  max_message_size: number;
   server_certificate_hashes: string[];
   readonly url: string;
 }
@@ -158,6 +159,7 @@ export function ed25519_generate(): Ed25519GenerateResult;
 export function ed25519_verify(public_key: Uint8Array, message: Uint8Array, signature: Uint8Array): void;
 export function format_frame(frame: Uint8Array): string;
 export function keyring_from_ed25519(secret_key: Uint8Array, public_key: Uint8Array): Uint8Array;
+export function keyring_generate(): Uint8Array;
 export function main(): void;
 export function parse_auth_response(response: Uint8Array): AuthResponse;
 export function parse_frame(frame: Uint8Array): ParsedFrame;

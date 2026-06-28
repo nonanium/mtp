@@ -1,18 +1,23 @@
 use mtp_codec::{
-    CommunicationValue, DataType, DataValue, TypeMap, Version,
+    CommunicationValue, DataType, DataValue, Version,
     registry::{Registry, VersionedCodec},
 };
 use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
 use std::net::IpAddr;
+#[cfg(feature = "crypto")]
 use std::pin::Pin;
 use std::{error::Error, fmt};
+#[cfg(feature = "crypto")]
 use tokio::time::Duration;
 
 /* ---- async callback type aliases ---- */
 #[cfg(feature = "crypto")]
 type GetExistingUser = Box<
-    dyn Fn(u64) -> Pin<Box<dyn std::future::Future<Output = Option<mtp_crypto::PublicKeyBundle>> + Send>>
+    dyn Fn(
+            u64,
+        )
+            -> Pin<Box<dyn std::future::Future<Output = Option<mtp_crypto::PublicKeyBundle>> + Send>>
         + Send
         + Sync,
 >;
@@ -74,14 +79,19 @@ impl HostConfig {
     pub fn with_authentication(
         mut self,
         host_keyring: mtp_crypto::Keyring,
-        get_existing_user: impl Fn(u64) -> Pin<Box<dyn std::future::Future<Output = Option<mtp_crypto::PublicKeyBundle>> + Send>>
-            + Send
-            + Sync
-            + 'static,
-        complete_register: impl Fn(mtp_crypto::PublicKeyBundle) -> Pin<Box<dyn std::future::Future<Output = u64> + Send>>
-            + Send
-            + Sync
-            + 'static,
+        get_existing_user: impl Fn(
+            u64,
+        ) -> Pin<
+            Box<dyn std::future::Future<Output = Option<mtp_crypto::PublicKeyBundle>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+        complete_register: impl Fn(
+            mtp_crypto::PublicKeyBundle,
+        ) -> Pin<Box<dyn std::future::Future<Output = u64> + Send>>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         self.require_authentication = true;
         self.host_keyring = host_keyring;
@@ -195,11 +205,8 @@ impl MTPHost {
         #[cfg(feature = "crypto")]
         if self.config.require_authentication {
             let timeout = self.config.auth_timeout;
-            return match tokio::time::timeout(
-                timeout,
-                self.accept_authenticated(sender, receiver),
-            )
-            .await
+            return match tokio::time::timeout(timeout, self.accept_authenticated(sender, receiver))
+                .await
             {
                 Ok(result) => result,
                 Err(_) => Err(AcceptError::AuthenticationTimedOut),
@@ -288,7 +295,7 @@ impl MTPHost {
             },
         }
 
-        let tm = TypeMap::latest();
+        let tm = mtp_codec::TypeMap::latest();
         let pq_enabled = !self
             .config
             .host_keyring
