@@ -15,7 +15,7 @@ jobs:
     runs-on: nixos
     steps:
       - name: Install node
-        run: nix profile install nixpkgs#nodejs_24
+        run: nix profile add nixpkgs#nodejs_24
 
       - name: Checkout
         uses: https://data.forgejo.org/actions/checkout@v4
