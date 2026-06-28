@@ -14,6 +14,9 @@ on:
         required: true
         type: string
 
+env:
+  NIX_CONFIG: experimental-features = nix-command flakes
+
 jobs:
   release:
     runs-on: nixos
