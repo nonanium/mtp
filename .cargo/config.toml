@@ -1,0 +1,10 @@
+[env]
+MTP_TYPE_MAPS = { value = "example-type-maps.yaml", relative = true }
+
+# web-sys's WebTransport* bindings are behind unstable APIs, gated by this cfg.
+# Scoped to the wasm32 target so it applies to the wasm crate however cargo is
+# invoked (e.g. `cargo build -p mtp-wasm --target wasm32-unknown-unknown` from
+# the workspace root). Cargo only reads .cargo/config.toml from the invocation
+# dir and its ancestors, so the wasm crate's own config isn't seen from here.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]

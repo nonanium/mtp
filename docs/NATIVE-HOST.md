@@ -29,13 +29,15 @@ let config = HostConfig::new(
 )
 .with_authentication(
     /* Keyring */,
-    |client_id: u64| -> Option<PublicKeyBundle> {
-        CLIENT_DB.lock().unwrap().get(&client_id).cloned()
+    |client_id: u64| {
+        let db = CLIENT_DB.clone();
+        Box::pin(async move { db.lock().unwrap().get(&client_id).cloned() })
     },
-    |bundle: PublicKeyBundle| -> u64 {
+    |bundle: PublicKeyBundle| {
+        let mut db = CLIENT_DB.lock().unwrap();
         let id = next_id();
-        CLIENT_DB.lock().unwrap().insert(id, bundle);
-        id
+        db.insert(id, bundle);
+        Box::pin(async move { id })
     },
 );
 ```
@@ -48,8 +50,8 @@ let config = HostConfig::new(
 | `tls_key`              | `Vec<u8>`                               | PEM-encoded TLS private key                    |
 | `require_authentication` | `bool` (crypto)                      | Enable login/register handshake                |
 | `host_keyring`         | `Keyring` (crypto)                      | Host's signing and KEM keys                    |
-| `get_existing_user`    | `Fn(u64) -> Option<PublicKeyBundle> + Send + Sync` (crypto) | Lookup callback for login |
-| `complete_register`    | `Fn(PublicKeyBundle) -> u64 + Send + Sync` (crypto) | Registration callback, returns new client ID |
+| `get_existing_user`    | `Fn(u64) -> Pin<Box<dyn Future<Output = Option<PublicKeyBundle>> + Send>> + Send + Sync` (crypto) | Async lookup callback for login |
+| `complete_register`    | `Fn(PublicKeyBundle) -> Pin<Box<dyn Future<Output = u64> + Send>> + Send + Sync` (crypto) | Async registration callback, returns new client ID |
 
 ### TLS
 
@@ -262,8 +264,9 @@ verification. Must return `Some(PublicKeyBundle)` if the client ID is known,
 or `None` to reject.
 
 ```rust
-let get_existing_user = |id: u64| -> Option<PublicKeyBundle> {
-    db.lock().unwrap().get(&id).cloned()
+let get_existing_user = |id: u64| {
+    let db = db.clone();
+    Box::pin(async move { db.lock().unwrap().get(&id).cloned() })
 };
 ```
 
@@ -274,18 +277,19 @@ assign a client ID. The returned `u64` becomes the client's permanent
 identifier.
 
 ```rust
-let complete_register = |bundle: PublicKeyBundle| -> u64 {
-    let mut db = db.lock().unwrap();
-    let id = next_id;
-    next_id += 1;
-    db.insert(id, bundle);
-    id
+let complete_register = |bundle: PublicKeyBundle| {
+    let db = db.clone();
+    let id = next_id.fetch_add(1, Ordering::SeqCst);
+    Box::pin(async move {
+        db.lock().unwrap().insert(id, bundle);
+        id
+    })
 };
 ```
 
-Both callbacks are called from within `accept()` and must be `Send + Sync`. They are
-invoked synchronously, so avoid long-running operations (or use `spawn_blocking`
-if needed, though the callbacks are `Fn`, not `AsyncFn`).
+Both callbacks are called from within `accept()` and must be `Send + Sync`. They
+are `async` (returning `Pin<Box<dyn Future<...>>`) and are `.await`ed by the
+host, so they can perform I/O or other async work as needed.
 
 ## Host Key Generation
 

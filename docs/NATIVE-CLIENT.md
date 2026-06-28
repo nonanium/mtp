@@ -24,11 +24,12 @@ let config = ClientConfig::new("https://host.example.com:4433")
     .with_client_id(0);
 ```
 
-| Field        | Type               | Description                                         |
-|--------------|--------------------|-----------------------------------------------------|
-| `url`        | `String`           | `https://host:port` address of the MTP host         |
-| `tls`        | `ClientTlsConfig`  | `SystemRoots` or `PinnedPem(pem_bytes)`              |
-| `client_id`  | `u64`              | Client identifier (ignored during `auth_register`)  |
+| Field         | Type               | Description                                         |
+|---------------|--------------------|-----------------------------------------------------|
+| `url`         | `String`           | `https://host:port` address of the MTP host         |
+| `tls`         | `ClientTlsConfig`  | `SystemRoots` or `PinnedPem(pem_bytes)`              |
+| `client_id`   | `u64`              | Client identifier (ignored during `auth_register`)  |
+| `auth_timeout` | `Duration` (crypto) | Authentication handshake timeout (default 30s)     |
 
 ### TLS Certificate Handling
 
