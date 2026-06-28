@@ -14,7 +14,8 @@ jobs:
     name: checks
     runs-on: nixos
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v4
+      - name: Checkout
+        uses: https://data.forgejo.org/actions/checkout@v4
 
       - name: Run checks
         run: |
