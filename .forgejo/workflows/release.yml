@@ -1,0 +1,116 @@
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Release type: 'dev' or 'stable'"
+        required: true
+        default: "dev"
+      description:
+        description: "Release description"
+        required: true
+
+jobs:
+  release:
+    runs-on: docker
+    steps:
+      - name: Check out repo
+        uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Packages
+        run: apt-get update && apt-get install -y sudo curl jq npm
+
+      - name: Install Nix
+        uses: https://github.com/cachix/install-nix-action@v30
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build all
+        run: bun build:all
+
+      - name: Pack npm package
+        run: npm pack
+
+      - name: Read release metadata
+        id: version
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          set -eu
+
+          VERSION="$(node -p "require('./package.json').version")"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+
+          case "$RELEASE_TYPE" in
+            dev)
+              TAG="${VERSION}-dev-${SHORT_SHA}"
+              PRERELEASE="true"
+              ;;
+            stable)
+              TAG="$VERSION"
+              PRERELEASE="false"
+              ;;
+            *)
+              echo "release_type must be either 'dev' or 'stable'"
+              exit 1
+              ;;
+          esac
+
+          PACKAGE="mtp-${VERSION}.tgz"
+          test -f "$PACKAGE"
+
+          echo "version=$VERSION" >> "$FORGEJO_OUTPUT"
+          echo "tag=$TAG" >> "$FORGEJO_OUTPUT"
+          echo "title=$TAG" >> "$FORGEJO_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$FORGEJO_OUTPUT"
+          echo "package=$PACKAGE" >> "$FORGEJO_OUTPUT"
+
+      - name: Create release and upload package
+        env:
+          TOKEN: ${{ forgejo.token }}
+          API: ${{ forgejo.api_url }}
+          REPO: ${{ forgejo.repository }}
+          SHA: ${{ forgejo.sha }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TITLE: ${{ steps.version.outputs.title }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          PACKAGE: ${{ steps.version.outputs.package }}
+          DESCRIPTION: ${{ inputs.description }}
+        run: |
+          set -eu
+
+          HTTP_STATUS=$(curl -s -w "%{http_code}" -o release_out.json -H "Authorization: token $TOKEN" "$API/repos/$REPO/releases/tags/$TAG")
+
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "Release $TAG already exists."
+            RELEASE_ID="$(jq -r .id release_out.json)"
+          else
+            echo "Creating release for $TAG"
+            RELEASE_JSON="$(curl -f -sS -X POST "$API/repos/$REPO/releases" \
+              -H "Authorization: token $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg tag "$TAG" \
+                --arg name "$TITLE" \
+                --arg body "$DESCRIPTION" \
+                --arg target "$SHA" \
+                --argjson prerelease "$PRERELEASE" \
+                '{
+                  tag_name: $tag,
+                  name: $name,
+                  body: $body,
+                  target_commitish: $target,
+                  draft: false,
+                  prerelease: $prerelease
+                }')")"
+            RELEASE_ID="$(echo "$RELEASE_JSON" | jq -r .id)"
+          fi
+
+          curl -fsS -X POST "$API/repos/$REPO/releases/$RELEASE_ID/assets?name=$PACKAGE" \
+            -H "Authorization: token $TOKEN" \
+            -F "attachment=@$PACKAGE"
