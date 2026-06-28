@@ -21,10 +21,10 @@ hex = "0.4"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 getrandom-v02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
-mtp-common = { path = "../common" }
-mtp-type-map = { path = "../type-map" }
-mtp-codec = { path = "../codec", features = ["crypto"] }
-mtp-crypto = { path = "../crypto", features = ["wasm"] }
+mtp-common = { version = "0.1.0", path = "../common" }
+mtp-type-map = { version = "0.1.0", path = "../type-map" }
+mtp-codec = { version = "0.1.0", path = "../codec", features = ["crypto"] }
+mtp-crypto = { version = "0.1.0", path = "../crypto", features = ["wasm"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

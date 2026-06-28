@@ -46,18 +46,18 @@ edition = "2024"
 
 [dependencies]
 # --- always-on core ---
-mtp-common = { path = "common" }
-mtp-type-map = { path = "type-map" }
-mtp-codec = { path = "codec" }
-mtp-transport = { path = "transport" }
+mtp-common = { version = "0.1.0", path = "common" }
+mtp-type-map = { version = "0.1.0", path = "type-map" }
+mtp-codec = { version = "0.1.0", path = "codec" }
+mtp-transport = { version = "0.1.0", path = "transport" }
 
 # --- optional, behind features ---
-mtp-crypto = { path = "crypto", optional = true, features = [
+mtp-crypto = { version = "0.1.0", path = "crypto", optional = true, features = [
     "serde",
     "mlkem-tls",
 ] }
-mtp-host = { path = "host", optional = true }
-mtp-client = { path = "client", optional = true }
+mtp-host = { version = "0.1.0", path = "host", optional = true }
+mtp-client = { version = "0.1.0", path = "client", optional = true }
 
 [features]
 default = []

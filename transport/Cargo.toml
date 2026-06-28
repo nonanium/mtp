@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mtp-codec = { path = "../codec" }
-mtp-common = { path = "../common" }
+mtp-codec = { version = "0.1.0", path = "../codec" }
+mtp-common = { version = "0.1.0", path = "../common" }
 wtransport = { version = "0.7.1", default-features = false, features = [
     "aws-lc-rs",
     "quinn",

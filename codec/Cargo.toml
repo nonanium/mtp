@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mtp-type-map = { path = "../type-map" }
-mtp-common = { path = "../common" }
-mtp-crypto = { path = "../crypto", optional = true }
+mtp-type-map = { version = "0.1.0", path = "../type-map" }
+mtp-common = { version = "0.1.0", path = "../common" }
+mtp-crypto = { version = "0.1.0", path = "../crypto", optional = true }
 base64 = "0.22"
 byteorder = "1.5"
 rand = { version = "0.8", features = ["std", "std_rng"] }

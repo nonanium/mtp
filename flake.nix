@@ -46,7 +46,7 @@
 
         buildAll = pkgs.writeShellApplication {
           name = "mtp-build-all";
-          runtimeInputs = [rustToolchain pkgs.wasm-pack pkgs.pnpm pkgs.coreutils clippyCheck macheteCheck];
+          runtimeInputs = [rustToolchain pkgs.cargo-deny pkgs.wasm-pack pkgs.pnpm pkgs.coreutils clippyCheck macheteCheck];
           text = ''
             export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example/type-maps.yaml}"
 
@@ -78,6 +78,7 @@
 
             buildInputs = with pkgs; [
               rustToolchain
+              cargo-deny
               cargo-machete
               wasm-pack
               pnpm
