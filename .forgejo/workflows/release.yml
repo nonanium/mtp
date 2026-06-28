@@ -16,15 +16,15 @@ on:
 
 jobs:
   release:
-    runs-on: docker
+    runs-on: nixos
     steps:
+      - name: Install node
+        run: nix profile install nixpkgs#nodejs_24
+
       - name: Check out repo
         uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Install Packages
-        run: apt-get update && apt-get install -y sudo curl jq npm
 
       - name: Install Nix
         uses: https://github.com/cachix/install-nix-action@v30
