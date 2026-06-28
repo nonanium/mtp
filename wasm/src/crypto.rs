@@ -42,6 +42,12 @@ impl WasmKeyring {
     }
 }
 
+/// Generate a full keyring with KEM, ML-DSA, and Ed25519 keys.
+#[wasm_bindgen]
+pub fn keyring_generate() -> Vec<u8> {
+    Keyring::generate().to_bytes()
+}
+
 /// Build a [`Keyring`] containing only an Ed25519 keypair (no KEM, no ML-DSA).
 ///
 /// Takes the Ed25519 secret key and public key, each 32 bytes.

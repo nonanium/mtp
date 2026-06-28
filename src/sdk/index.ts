@@ -2,8 +2,7 @@ import initWasm, {
   ConnectionConfig,
   ConnectionState,
   WasmClient,
-  ed25519_generate,
-  keyring_from_ed25519,
+  keyring_generate,
 } from "mtp/raw";
 import * as bindings from "mtp/raw";
 import type * as RawBindings from "../raw/index";
@@ -40,6 +39,8 @@ export interface MTPClientOptions {
   credentialsStorageKey?: string;
   storage?: MTPCredentialStorage;
   serverCertificateHashes?: string[];
+  maxMessageSize?: number;
+  authTimeoutMs?: number;
   pings?: boolean | { intervalMs?: number };
   wasm?: RawBindings.InitInput | Promise<RawBindings.InitInput> | { module_or_path: RawBindings.InitInput | Promise<RawBindings.InitInput> };
   logger?: (event: MTPLogEvent) => void;
@@ -185,12 +186,7 @@ function toBigInt(value) {
 }
 
 function generateKeyringBytes() {
-  const generated = ed25519_generate();
-  try {
-    return keyring_from_ed25519(generated.secretKey, generated.publicKey);
-  } finally {
-    generated.signer?.free?.();
-  }
+  return keyring_generate();
 }
 
 function serializeCredentials(credentials) {
@@ -246,6 +242,30 @@ function validateOptions(options) {
         throw new TypeError(`storage.${method} must be a function`);
       }
     }
+  }
+  if (options.maxMessageSize != null && (!Number.isSafeInteger(options.maxMessageSize) || options.maxMessageSize <= 0)) {
+    throw new TypeError("maxMessageSize must be a positive safe integer");
+  }
+  if (options.authTimeoutMs != null && (!Number.isSafeInteger(options.authTimeoutMs) || options.authTimeoutMs <= 0)) {
+    throw new TypeError("authTimeoutMs must be a positive safe integer");
+  }
+}
+
+async function withTimeout(promise, timeoutMs, message) {
+  if (!timeoutMs) {
+    return await promise;
+  }
+
+  let timeoutId;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -334,6 +354,9 @@ export class MTPClient {
     if (this.#options.serverCertificateHashes) {
       config.server_certificate_hashes = this.#options.serverCertificateHashes;
     }
+    if (this.#options.maxMessageSize != null) {
+      config.max_message_size = this.#options.maxMessageSize;
+    }
     return config;
   }
 
@@ -345,7 +368,11 @@ export class MTPClient {
 
     const config = this.#connectionConfig();
     try {
-      await this.raw.client.connect(config);
+      await withTimeout(
+        this.raw.client.connect(config),
+        this.#options.authTimeoutMs,
+        "connection timed out",
+      );
       this.#startPings(0n);
     } finally {
       config.free();
@@ -362,11 +389,15 @@ export class MTPClient {
 
     const config = this.#connectionConfig();
     try {
-      const clientId = await this.raw.client.auth_connect(
-        config,
-        this.#options.hostPublicKey,
-        this.#credentials.keyringBytes,
-        this.#credentials.clientId,
+      const clientId = await withTimeout(
+        this.raw.client.auth_connect(
+          config,
+          this.#options.hostPublicKey,
+          this.#credentials.keyringBytes,
+          this.#credentials.clientId,
+        ),
+        this.#options.authTimeoutMs,
+        "authentication timed out",
       );
       this.#credentials = { ...this.#credentials, clientId };
       await this.#persistCredentials();
@@ -391,10 +422,14 @@ export class MTPClient {
 
     const config = this.#connectionConfig();
     try {
-      const clientId = await this.raw.client.auth_register(
-        config,
-        this.#options.hostPublicKey,
-        this.#credentials.keyringBytes,
+      const clientId = await withTimeout(
+        this.raw.client.auth_register(
+          config,
+          this.#options.hostPublicKey,
+          this.#credentials.keyringBytes,
+        ),
+        this.#options.authTimeoutMs,
+        "authentication timed out",
       );
       this.#credentials = { ...this.#credentials, clientId };
       await this.#persistCredentials();

@@ -253,10 +253,7 @@ pub fn parse_auth_response(response: &[u8]) -> Result<JsValue, JsValue> {
     let comm = CommunicationValue::from_bytes(response)
         .map_err(|e| js_error(&format!("parse failed: {}", e)))?;
 
-    let connected = matches!(
-        comm.get_data(DataType::Connected),
-        DataValue::BoolTrue
-    );
+    let connected = matches!(comm.get_data(DataType::Connected), DataValue::BoolTrue);
 
     let client_nonce = match comm.get_data(DataType::ClientNonce) {
         DataValue::UnsignedNumber(n) => Some(*n),

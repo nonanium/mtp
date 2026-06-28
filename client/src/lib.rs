@@ -1,6 +1,7 @@
 use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Version};
 use mtp_common::CommunicationError;
 use mtp_transport::{Policy, Receiver, Sender};
+#[cfg(feature = "crypto")]
 use tokio::time::Duration;
 
 #[cfg(feature = "crypto")]
@@ -79,6 +80,51 @@ pub struct MTPConnection {
     pub auth_state: AuthState,
     #[cfg(feature = "crypto")]
     pub client_id: u64,
+}
+
+impl MTPConnection {
+    /*
+     * Send a request frame and wait for the response with the same frame id.
+     * Any expected response type is validated after the id match. Frames with
+     * other ids are consumed by this call, so applications that need broad
+     * routing should put request correlation in a dedicated receive task.
+     */
+    pub async fn request(
+        &self,
+        request: &CommunicationValue,
+        expected_response: Option<mtp_codec::CommunicationType>,
+    ) -> Result<CommunicationValue, CommunicationError> {
+        let request_id = request.get_id();
+        if request_id == 0 {
+            return Err(CommunicationError::Other(
+                "request frame must have a non-zero id".into(),
+            ));
+        }
+
+        self.sender.send(request).await?;
+
+        let tm = mtp_codec::TypeMap::latest();
+        loop {
+            let response = self.receiver.receive().await?;
+            if response.get_id() != request_id {
+                continue;
+            }
+
+            if let Some(expected) = expected_response {
+                let expected_type = expected.to_id(&tm);
+                if response.get_type() != expected_type {
+                    return Err(CommunicationError::Other(format!(
+                        "unexpected response type: expected {:?}, got {:?}; parsed {}",
+                        expected_type,
+                        response.get_type(),
+                        response
+                    )));
+                }
+            }
+
+            return Ok(response);
+        }
+    }
 }
 
 #[cfg(feature = "crypto")]
@@ -288,7 +334,12 @@ async fn receive_verified_challenge(
         }
     };
 
-    verify_host_challenge(&challenge, host_public_key_bundle, bound_id, server_challenge)?;
+    verify_host_challenge(
+        &challenge,
+        host_public_key_bundle,
+        bound_id,
+        server_challenge,
+    )?;
 
     Ok(server_challenge)
 }
@@ -434,6 +485,21 @@ impl MTPClient {
             Err(_) => Err(CommunicationError::AuthenticationFailed(
                 "authentication timed out".into(),
             )),
+        }
+    }
+
+    pub async fn auth_connect_or_register(
+        mut config: ClientConfig,
+        existing_client_id: Option<u64>,
+        keys: &mtp_crypto::Keyring,
+        host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
+    ) -> Result<MTPConnection, CommunicationError> {
+        match existing_client_id {
+            Some(client_id) => {
+                config.client_id = client_id;
+                Self::auth_connect(config, keys, host_public_key_bundle).await
+            }
+            None => Self::auth_register(config, keys, host_public_key_bundle).await,
         }
     }
 
@@ -588,8 +654,8 @@ mod tests {
     #[cfg(feature = "crypto")]
     #[test]
     fn test_auth_timeout_custom() {
-        let config = ClientConfig::new("https://localhost:4433")
-            .with_auth_timeout(Duration::from_secs(10));
+        let config =
+            ClientConfig::new("https://localhost:4433").with_auth_timeout(Duration::from_secs(10));
         assert_eq!(config.auth_timeout, Duration::from_secs(10));
     }
 }

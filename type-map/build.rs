@@ -1026,11 +1026,7 @@ fn generate_id_display_impls(out: &mut String) {
         "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
     )
     .unwrap();
-    writeln!(
-        out,
-        "        match communication_type_name(self.0) {{"
-    )
-    .unwrap();
+    writeln!(out, "        match communication_type_name(self.0) {{").unwrap();
     writeln!(out, "            Some(name) => f.write_str(name),").unwrap();
     writeln!(
         out,
@@ -1048,11 +1044,7 @@ fn generate_id_display_impls(out: &mut String) {
         "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
     )
     .unwrap();
-    writeln!(
-        out,
-        "        match data_type_name(self.0) {{"
-    )
-    .unwrap();
+    writeln!(out, "        match data_type_name(self.0) {{").unwrap();
     writeln!(out, "            Some(name) => f.write_str(name),").unwrap();
     writeln!(
         out,

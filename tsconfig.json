@@ -8,6 +8,8 @@
     "outDir": "dist",
     "rootDir": "src",
     "baseUrl": ".",
+    "types": ["node"],
+    "ignoreDeprecations": "6.0",
     "paths": {
       "mtp/raw": ["src/raw/index.ts"],
       "mtp/type-map": ["src/type-map/index.ts"]

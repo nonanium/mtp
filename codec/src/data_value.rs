@@ -493,7 +493,8 @@ impl DataValue {
         let container_bytes = &blob[1 + sig_len..];
         match alg {
             SigAlgorithm::ED25519 => {
-                mtp_crypto::verify_ed25519(&pk.sig_cl_public_key, container_bytes, signature).is_ok()
+                mtp_crypto::verify_ed25519(&pk.sig_cl_public_key, container_bytes, signature)
+                    .is_ok()
             }
             SigAlgorithm::ML_DSA_65 => {
                 mtp_crypto::verify_ml_dsa(&pk.sig_pq_public_key, container_bytes, signature).is_ok()
@@ -1046,7 +1047,11 @@ impl Hash for DataValue {
 
 impl From<bool> for DataValue {
     fn from(v: bool) -> Self {
-        if v { DataValue::BoolTrue } else { DataValue::BoolFalse }
+        if v {
+            DataValue::BoolTrue
+        } else {
+            DataValue::BoolFalse
+        }
     }
 }
 
@@ -1115,7 +1120,10 @@ impl std::error::Error for DataValueTypeMismatch {}
 impl TryFrom<DataValue> for bool {
     type Error = DataValueTypeMismatch;
     fn try_from(v: DataValue) -> Result<Self, Self::Error> {
-        v.as_bool().ok_or(DataValueTypeMismatch { expected: "Bool", got: v.type_name() })
+        v.as_bool().ok_or(DataValueTypeMismatch {
+            expected: "Bool",
+            got: v.type_name(),
+        })
     }
 }
 
@@ -1124,7 +1132,10 @@ impl TryFrom<DataValue> for String {
     fn try_from(v: DataValue) -> Result<Self, Self::Error> {
         match v {
             DataValue::Str(s) => Ok(s),
-            other => Err(DataValueTypeMismatch { expected: "Str", got: other.type_name() }),
+            other => Err(DataValueTypeMismatch {
+                expected: "Str",
+                got: other.type_name(),
+            }),
         }
     }
 }
@@ -1132,14 +1143,20 @@ impl TryFrom<DataValue> for String {
 impl TryFrom<DataValue> for i128 {
     type Error = DataValueTypeMismatch;
     fn try_from(v: DataValue) -> Result<Self, Self::Error> {
-        v.as_signed_number().ok_or(DataValueTypeMismatch { expected: "SignedNumber", got: v.type_name() })
+        v.as_signed_number().ok_or(DataValueTypeMismatch {
+            expected: "SignedNumber",
+            got: v.type_name(),
+        })
     }
 }
 
 impl TryFrom<DataValue> for i64 {
     type Error = DataValueTypeMismatch;
     fn try_from(v: DataValue) -> Result<Self, Self::Error> {
-        let n = v.as_signed_number().ok_or(DataValueTypeMismatch { expected: "SignedNumber", got: v.type_name() })?;
+        let n = v.as_signed_number().ok_or(DataValueTypeMismatch {
+            expected: "SignedNumber",
+            got: v.type_name(),
+        })?;
         Ok(n as i64)
     }
 }
@@ -1147,14 +1164,20 @@ impl TryFrom<DataValue> for i64 {
 impl TryFrom<DataValue> for u128 {
     type Error = DataValueTypeMismatch;
     fn try_from(v: DataValue) -> Result<Self, Self::Error> {
-        v.as_unsigned_number().ok_or(DataValueTypeMismatch { expected: "UnsignedNumber", got: v.type_name() })
+        v.as_unsigned_number().ok_or(DataValueTypeMismatch {
+            expected: "UnsignedNumber",
+            got: v.type_name(),
+        })
     }
 }
 
 impl TryFrom<DataValue> for u64 {
     type Error = DataValueTypeMismatch;
     fn try_from(v: DataValue) -> Result<Self, Self::Error> {
-        let n = v.as_unsigned_number().ok_or(DataValueTypeMismatch { expected: "UnsignedNumber", got: v.type_name() })?;
+        let n = v.as_unsigned_number().ok_or(DataValueTypeMismatch {
+            expected: "UnsignedNumber",
+            got: v.type_name(),
+        })?;
         Ok(n as u64)
     }
 }
@@ -1164,7 +1187,10 @@ impl TryFrom<DataValue> for Vec<u8> {
     fn try_from(v: DataValue) -> Result<Self, Self::Error> {
         match v {
             DataValue::Bytes(b) => Ok(b),
-            other => Err(DataValueTypeMismatch { expected: "Bytes", got: other.type_name() }),
+            other => Err(DataValueTypeMismatch {
+                expected: "Bytes",
+                got: other.type_name(),
+            }),
         }
     }
 }
@@ -1543,26 +1569,47 @@ mod tests {
     fn test_from_primitives() {
         assert_eq!(DataValue::from(true), DataValue::BoolTrue);
         assert_eq!(DataValue::from(false), DataValue::BoolFalse);
-        assert_eq!(DataValue::from("hello"), DataValue::Str("hello".to_string()));
-        assert_eq!(DataValue::from("hello".to_string()), DataValue::Str("hello".to_string()));
+        assert_eq!(
+            DataValue::from("hello"),
+            DataValue::Str("hello".to_string())
+        );
+        assert_eq!(
+            DataValue::from("hello".to_string()),
+            DataValue::Str("hello".to_string())
+        );
         assert_eq!(DataValue::from(42i64), DataValue::SignedNumber(42));
         assert_eq!(DataValue::from(42i128), DataValue::SignedNumber(42));
         assert_eq!(DataValue::from(42u64), DataValue::UnsignedNumber(42));
         assert_eq!(DataValue::from(42u128), DataValue::UnsignedNumber(42));
-        assert_eq!(DataValue::from(vec![1u8, 2, 3]), DataValue::Bytes(vec![1, 2, 3]));
-        assert_eq!(DataValue::from([1u8, 2, 3].as_ref()), DataValue::Bytes(vec![1, 2, 3]));
+        assert_eq!(
+            DataValue::from(vec![1u8, 2, 3]),
+            DataValue::Bytes(vec![1, 2, 3])
+        );
+        assert_eq!(
+            DataValue::from([1u8, 2, 3].as_ref()),
+            DataValue::Bytes(vec![1, 2, 3])
+        );
     }
 
     #[test]
     fn test_try_from_ok() {
-        assert_eq!(bool::try_from(DataValue::BoolTrue).unwrap(), true);
-        assert_eq!(bool::try_from(DataValue::BoolFalse).unwrap(), false);
-        assert_eq!(String::try_from(DataValue::Str("hi".to_string())).unwrap(), "hi");
+        assert!(bool::try_from(DataValue::BoolTrue).unwrap());
+        assert!(!bool::try_from(DataValue::BoolFalse).unwrap());
+        assert_eq!(
+            String::try_from(DataValue::Str("hi".to_string())).unwrap(),
+            "hi"
+        );
         assert_eq!(i128::try_from(DataValue::SignedNumber(-1)).unwrap(), -1i128);
         assert_eq!(i64::try_from(DataValue::SignedNumber(10)).unwrap(), 10i64);
-        assert_eq!(u128::try_from(DataValue::UnsignedNumber(99)).unwrap(), 99u128);
+        assert_eq!(
+            u128::try_from(DataValue::UnsignedNumber(99)).unwrap(),
+            99u128
+        );
         assert_eq!(u64::try_from(DataValue::UnsignedNumber(7)).unwrap(), 7u64);
-        assert_eq!(Vec::<u8>::try_from(DataValue::Bytes(vec![0xAB])).unwrap(), vec![0xABu8]);
+        assert_eq!(
+            Vec::<u8>::try_from(DataValue::Bytes(vec![0xAB])).unwrap(),
+            vec![0xABu8]
+        );
     }
 
     #[test]
