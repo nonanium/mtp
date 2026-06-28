@@ -32,6 +32,9 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      - name: Install cc linker
+        run: nix profile add nixpkgs#stdenv.cc
+
       - name: Build all
         run: bun build:all
 
