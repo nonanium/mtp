@@ -48,7 +48,7 @@
   ],
   "scripts": {
     "example": "pnpm install && pnpm run build:all && nix develop .#autoStart",
-    "build": "tsc && MTP_TYPE_MAPS=$PWD/example/type-maps.yaml RUSTFLAGS='--cfg web_sys_unstable_apis' wasm-pack build wasm --target web --out-dir pkg --release",
+    "build": "MTP_TYPE_MAPS=$PWD/example/type-maps.yaml RUSTFLAGS='--cfg web_sys_unstable_apis' wasm-pack build wasm --target web --out-dir pkg --release && tsc",
     "build:all": "nix run .#build-all",
     "dup": "jscpd --pattern '**/*.rs' --ignore 'target/**' --ignore 'wasm/pkg/**' --ignore '.git/**' --min-lines 8 --min-tokens 80 --threshold 4 --reporters console --no-tips ."
   },
