@@ -254,26 +254,26 @@ pub fn parse_auth_response(response: &[u8]) -> Result<JsValue, JsValue> {
         .map_err(|e| js_error(&format!("parse failed: {}", e)))?;
 
     let connected = matches!(
-        comm.get_data(DataType::Connected)),
+        comm.get_data(DataType::Connected),
         DataValue::BoolTrue
     );
 
-    let client_nonce = match comm.get_data(DataType::ClientNonce)) {
+    let client_nonce = match comm.get_data(DataType::ClientNonce) {
         DataValue::UnsignedNumber(n) => Some(*n),
         _ => None,
     };
 
-    let assigned_id = match comm.get_data(DataType::Id)) {
+    let assigned_id = match comm.get_data(DataType::Id) {
         DataValue::UnsignedNumber(n) => Some(*n as u64),
         _ => None,
     };
 
-    let timestamp = match comm.get_data(DataType::Timestamp)) {
+    let timestamp = match comm.get_data(DataType::Timestamp) {
         DataValue::UnsignedNumber(n) => Some(*n),
         _ => None,
     };
 
-    let signature = match comm.get_data(DataType::Signature)) {
+    let signature = match comm.get_data(DataType::Signature) {
         DataValue::Bytes(b) => Some(b.clone()),
         _ => None,
     };

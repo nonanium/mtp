@@ -905,7 +905,7 @@ fn generate_all_types_methods(
             write!(out, "CommunicationType::{}", entry.name).unwrap();
             first = false;
         }
-        for (name, _) in &tm_cfg.communication_types {
+        for name in tm_cfg.communication_types.keys() {
             if !first {
                 write!(out, ", ").unwrap();
             }
@@ -936,7 +936,7 @@ fn generate_all_types_methods(
             write!(out, "DataType::{}", entry.name).unwrap();
             first = false;
         }
-        for (name, _) in &tm_cfg.data_types {
+        for name in tm_cfg.data_types.keys() {
             if !first {
                 write!(out, ", ").unwrap();
             }
@@ -973,7 +973,7 @@ fn generate_all_types_methods_single(out: &mut String, config: &Config) {
         first = false;
     }
     if let Some(tm_cfg) = tm_cfg {
-        for (name, _) in &tm_cfg.communication_types {
+        for name in tm_cfg.communication_types.keys() {
             if !first {
                 write!(out, ", ").unwrap();
             }
@@ -1003,7 +1003,7 @@ fn generate_all_types_methods_single(out: &mut String, config: &Config) {
         first = false;
     }
     if let Some(tm_cfg) = tm_cfg {
-        for (name, _) in &tm_cfg.data_types {
+        for name in tm_cfg.data_types.keys() {
             if !first {
                 write!(out, ", ").unwrap();
             }

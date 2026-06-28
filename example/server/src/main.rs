@@ -5,7 +5,9 @@ mod tls;
 
 use mtp::host::{HostConfig, MTPHost};
 use mtp::type_map::TypeMap;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 fn dev_cert_paths() -> (String, String) {
     let cert = std::env::var("MTP_DEV_CERT").unwrap_or_else(|_| {
@@ -44,34 +46,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (clients, next_id) = clients::load_client_db("clients.json")?;
 
     let clients_for_get = clients.clone();
-    let get_existing_user = move |id: u64| -> Option<mtp::crypto::PublicKeyBundle> {
-        let result = clients_for_get.lock().unwrap().get(&id).cloned();
-        if result.is_some() {
-            println!("Auth lookup: client ID {id} found");
-        } else {
-            eprintln!("Auth lookup: unknown client ID {id}");
-        }
-        result
+    let get_existing_user = move |id: u64| {
+        let clients = clients_for_get.clone();
+        Box::pin(async move {
+            let result = clients.lock().unwrap().get(&id).cloned();
+            if result.is_some() {
+                println!("Auth lookup: client ID {id} found");
+            } else {
+                eprintln!("Auth lookup: unknown client ID {id}");
+            }
+            result
+        }) as Pin<Box<dyn Future<Output = Option<mtp::crypto::PublicKeyBundle>> + Send>>
     };
 
     let clients_for_register = clients.clone();
     let next_id_for_register = next_id.clone();
     let clients_path = "clients.json".to_string();
-    let complete_register = move |bundle: mtp::crypto::PublicKeyBundle| -> u64 {
-        let mut db = clients_for_register.lock().unwrap();
-        let mut nid = next_id_for_register.lock().unwrap();
-        let id = *nid;
-        *nid += 1;
-        db.insert(id, bundle);
-        match serde_json::to_string_pretty(&*db) {
-            Ok(json) => match std::fs::write(&clients_path, json) {
-                Ok(()) => {}
-                Err(e) => eprintln!("Failed to persist client database to {clients_path}: {e}"),
-            },
-            Err(e) => eprintln!("Failed to serialize client database after registering {id}: {e}"),
-        }
-        println!("Registered new client with ID: {}", id);
-        id
+    let complete_register = move |bundle: mtp::crypto::PublicKeyBundle| {
+        let db_arc = clients_for_register.clone();
+        let nid_arc = next_id_for_register.clone();
+        let path = clients_path.clone();
+        Box::pin(async move {
+            let mut db = db_arc.lock().unwrap();
+            let mut nid = nid_arc.lock().unwrap();
+            let id = *nid;
+            *nid += 1;
+            db.insert(id, bundle);
+            match serde_json::to_string_pretty(&*db) {
+                Ok(json) => match std::fs::write(&path, json) {
+                    Ok(()) => {}
+                    Err(e) => eprintln!("Failed to persist client database to {path}: {e}"),
+                },
+                Err(e) => eprintln!("Failed to serialize client database after registering {id}: {e}"),
+            }
+            println!("Registered new client with ID: {}", id);
+            id
+        }) as Pin<Box<dyn Future<Output = u64> + Send>>
     };
 
     println!("Starting MTP server on port 8080 ...");

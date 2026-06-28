@@ -27,9 +27,9 @@ pub fn process_and_respond(
     let value_id = DataTypeId(tm.data_id_enum(DataType::Value).unwrap());
     let bin_id = DataTypeId(tm.data_id_enum(DataType::BinaryData).unwrap());
     let items_id = DataTypeId(tm.data_id_enum(DataType::Items).unwrap());
-    let enc_id = DataTypeId(tm.data_id_enum(DataType::EncryptedPayload).unwrap());
-    let sig_id = DataTypeId(tm.data_id_enum(DataType::SignedPayload).unwrap());
-    let secure_id = DataTypeId(tm.data_id_enum(DataType::SecurePayload).unwrap());
+    let _enc_id = DataTypeId(tm.data_id_enum(DataType::EncryptedPayload).unwrap());
+    let _sig_id = DataTypeId(tm.data_id_enum(DataType::SignedPayload).unwrap());
+    let _secure_id = DataTypeId(tm.data_id_enum(DataType::SecurePayload).unwrap());
 
     let description = msg.get_data(DataType::Description);
     let timestamp = msg.get_data(DataType::Timestamp);
