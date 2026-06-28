@@ -50,11 +50,11 @@
     "example": "pnpm install && pnpm run build:all && nix develop .#autoStart",
     "build": "MTP_TYPE_MAPS=$PWD/example/type-maps.yaml RUSTFLAGS='--cfg web_sys_unstable_apis' wasm-pack build wasm --target web --out-dir pkg --release && tsc",
     "build:all": "nix run .#build-all",
-    "dup": "jscpd --pattern '**/*.rs' --ignore 'target/**' --ignore 'wasm/pkg/**' --ignore '.git/**' --min-lines 8 --min-tokens 80 --threshold 4 --reporters console --no-tips ."
+    "dup": "jscpd --pattern '**/*.rs' --ignore 'target/**' --ignore 'wasm/pkg/**' --ignore '.git/**' --min-lines 8 --min-tokens 80 --threshold 4 --reporters console --noTips ."
   },
   "devDependencies": {
     "@types/node": "^26.0.1",
-    "jscpd": "5.0.11",
+    "jscpd": "4.2.5",
     "typescript": "^6.0.3"
   }
 }
