@@ -12,18 +12,12 @@ env:
 jobs:
   checks:
     name: checks
-    runs-on: docker
+    runs-on: nixos
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
 
-      - name: Install Nix
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends ca-certificates curl xz-utils
-          curl -L https://nixos.org/nix/install | sh -s -- --daemon
-
       - name: Run checks
         run: |
-          . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
           nix develop --command bash -c '
             set -euo pipefail
 
