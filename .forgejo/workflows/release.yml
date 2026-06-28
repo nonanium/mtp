@@ -29,9 +29,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install Nix
-        uses: https://github.com/cachix/install-nix-action@v30
-
       - name: Install dependencies
         run: bun install
 
