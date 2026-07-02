@@ -48,6 +48,7 @@ export class ConnectionConfig implements DisposableWasmObject {
   free(): void;
   [Symbol.dispose](): void;
   client_id: bigint;
+  description: string | undefined;
   max_message_size: number;
   server_certificate_hashes: string[];
   readonly url: string;

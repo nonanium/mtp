@@ -93,6 +93,7 @@ export interface MTPClientCredentials {
 
 export interface MTPClientOptions {
   url: string;
+  descriptor?: string;
   hostPublicKey?: MTPBytesInput | string;
   credentials?: MTPCredentials | string | null;
   credentialsStorageKey?: string;
@@ -296,6 +297,9 @@ function validateOptions(options) {
   if (typeof options.url !== "string" || !options.url.trim()) {
     throw new TypeError("MTPClient.create requires a non-empty url");
   }
+  if (options.descriptor != null && typeof options.descriptor !== "string") {
+    throw new TypeError("descriptor must be a string");
+  }
   if (options.storage) {
     for (const method of ["getItem", "setItem", "removeItem"]) {
       if (typeof options.storage[method] !== "function") {
@@ -426,6 +430,9 @@ export class MTPClient {
     }
     if (this.#options.maxMessageSize != null) {
       config.max_message_size = this.#options.maxMessageSize;
+    }
+    if (this.#options.descriptor != null) {
+      config.description = this.#options.descriptor;
     }
     return config;
   }
