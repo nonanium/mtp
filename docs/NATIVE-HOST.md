@@ -48,10 +48,29 @@ let config = HostConfig::new(
 | `port`                 | `u16`                                   | Listen port                                    |
 | `tls_fullchain`        | `Vec<u8>`                               | PEM-encoded TLS certificate chain              |
 | `tls_key`              | `Vec<u8>`                               | PEM-encoded TLS private key                    |
-| `require_authentication` | `bool` (crypto)                      | Enable login/register handshake                |
+| `authentication_policy` | `AuthenticationPolicy` (crypto)       | `ForceAuthentication`, `AllowAuthentication`, or `Unauthenticated` |
 | `host_keyring`         | `Keyring` (crypto)                      | Host's signing and KEM keys                    |
 | `get_existing_user`    | `Fn(u64) -> Pin<Box<dyn Future<Output = Option<PublicKeyBundle>> + Send>> + Send + Sync` (crypto) | Async lookup callback for login |
 | `complete_register`    | `Fn(PublicKeyBundle) -> Pin<Box<dyn Future<Output = u64> + Send>> + Send + Sync` (crypto) | Async registration callback, returns new client ID |
+
+### AuthenticationPolicy
+
+`ForceAuthentication` requires every client to complete the login/register handshake. `AllowAuthentication` accepts both authenticated and unauthenticated connections — unauthenticated clients get a random ID and `AuthState::Unauthenticated`. `Unauthenticated` rejects any client that tries to authenticate and is the default.
+
+```rust
+use mtp::host::AuthenticationPolicy;
+
+// Force authentication (default was `require_authentication: true`):
+let config = HostConfig::new(ip, port, cert, key)
+    .with_authentication(host_keyring, get_user, register);
+
+// Allow both authenticated and unauthenticated:
+let config = HostConfig::new(ip, port, cert, key)
+    .with_allow_authentication(host_keyring, get_user, register);
+
+// Unauthenticated only (default):
+let config = HostConfig::new(ip, port, cert, key);
+```
 
 ### TLS
 
@@ -82,6 +101,7 @@ pub struct MTPConnection {
     pub codec: VersionedCodec,
     pub sender: Sender,
     pub receiver: Receiver,
+    pub description: Option<String>,
     #[cfg(feature = "crypto")]
     pub auth_state: AuthState,
     #[cfg(feature = "crypto")]
@@ -95,6 +115,7 @@ pub struct MTPConnection {
 - `codec` -- a `VersionedCodec` scoped to the negotiated version (use for
   version-aware encode/decode)
 - `sender` / `receiver` -- for message I/O
+- `description` -- optional client-provided label (e.g. `"phone"`, `"desktop"`)
 - `client_id` -- the authenticated client's ID
 - `client_public_key` -- the client's public key bundle (for signature
   verification of subsequent messages)
@@ -130,7 +151,7 @@ let negotiated = registry.negotiate(&[Version(1, 0), Version(2, 0)]);
 
 ## Authentication Flow
 
-When `require_authentication` is `true`, `accept()` runs a mutually-authenticated
+When `authentication_policy` is `ForceAuthentication`, `accept()` runs a mutually-authenticated
 **challenge-response** handshake before returning the connection. The host issues
 a fresh, random `server_challenge` that the client must sign, which is what makes
 the client's proof unreplayable: a captured proof is bound to a one-time challenge
