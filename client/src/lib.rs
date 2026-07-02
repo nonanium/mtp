@@ -22,6 +22,7 @@ pub struct ClientConfig {
     pub url: String,
     pub tls: ClientTlsConfig,
     pub client_id: u64,
+    pub description: Option<String>,
     #[cfg(feature = "crypto")]
     pub auth_timeout: Duration,
 }
@@ -38,6 +39,7 @@ impl ClientConfig {
             url: url.into(),
             tls: ClientTlsConfig::SystemRoots,
             client_id: 0,
+            description: None,
             #[cfg(feature = "crypto")]
             auth_timeout: Duration::from_secs(30),
         }
@@ -54,6 +56,11 @@ impl ClientConfig {
 
     pub fn with_client_id(mut self, client_id: u64) -> Self {
         self.client_id = client_id;
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
         self
     }
 
@@ -76,6 +83,7 @@ pub struct MTPConnection {
     pub version: Version,
     pub sender: Sender,
     pub receiver: Receiver,
+    pub description: Option<String>,
     #[cfg(feature = "crypto")]
     pub auth_state: AuthState,
     #[cfg(feature = "crypto")]
@@ -150,12 +158,15 @@ impl MTPClient {
             mtp_transport::connect(&config.url, config.server_cert(), Policy::default()).await?;
 
         let version_str = format!("{}", PROTOCOL_VERSION);
-        let ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)
+        let mut ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)
             .add_typed_default(DataType::Version, DataValue::Str(version_str))
             .add_typed_default(
                 DataType::Id,
                 DataValue::UnsignedNumber(config.client_id.into()),
             );
+        if let Some(desc) = &config.description {
+            ident = ident.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
+        }
 
         sender.send(&ident).await?;
 
@@ -163,6 +174,7 @@ impl MTPClient {
             version: PROTOCOL_VERSION,
             sender,
             receiver,
+            description: config.description,
             #[cfg(feature = "crypto")]
             auth_state: AuthState::Unauthenticated,
             #[cfg(feature = "crypto")]
@@ -379,12 +391,15 @@ impl MTPClient {
         let version_str = format!("{}", PROTOCOL_VERSION);
 
         // 1. Send the unsigned Identification hello (version + claimed id).
-        let ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)
+        let mut ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)
             .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
             .add_typed_default(
                 DataType::Id,
                 DataValue::UnsignedNumber(config.client_id as u128),
             );
+        if let Some(desc) = &config.description {
+            ident = ident.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
+        }
         if let Err(e) = sender.send(&ident).await {
             sender.close();
             return Err(e);
@@ -464,6 +479,7 @@ impl MTPClient {
             version: PROTOCOL_VERSION,
             sender,
             receiver,
+            description: config.description,
             auth_state: AuthState::Authenticated,
             client_id: config.client_id,
         })
@@ -519,9 +535,12 @@ impl MTPClient {
         let pk_bytes = pk_bundle.as_bytes();
 
         // 1. Send the unsigned Register hello (version + public-key bundle).
-        let register = CommunicationValue::new(mtp_codec::CommunicationType::Register)
+        let mut register = CommunicationValue::new(mtp_codec::CommunicationType::Register)
             .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
             .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
+        if let Some(desc) = &config.description {
+            register = register.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
+        }
         if let Err(e) = sender.send(&register).await {
             sender.close();
             return Err(e);
@@ -607,6 +626,7 @@ impl MTPClient {
             version: PROTOCOL_VERSION,
             sender,
             receiver,
+            description: config.description,
             auth_state: AuthState::Authenticated,
             client_id: assigned_id,
         })

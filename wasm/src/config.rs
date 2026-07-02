@@ -6,6 +6,7 @@ pub struct ConnectionConfig {
     pub(crate) server_certificate_hashes: Option<Vec<String>>,
     pub(crate) client_id: u64,
     pub(crate) max_message_size: u32,
+    pub(crate) description: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -17,6 +18,7 @@ impl ConnectionConfig {
             server_certificate_hashes: None,
             client_id: 0,
             max_message_size: 1_000_000_000,
+            description: None,
         }
     }
 
@@ -48,5 +50,15 @@ impl ConnectionConfig {
     #[wasm_bindgen(getter)]
     pub fn max_message_size(&self) -> u32 {
         self.max_message_size
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_description(&mut self, description: String) {
+        self.description = Some(description);
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn description(&self) -> Option<String> {
+        self.description.clone()
     }
 }

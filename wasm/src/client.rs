@@ -302,12 +302,15 @@ impl WasmClient {
         .await?;
 
         let version_str = format!("{}", PROTOCOL_VERSION);
-        let ident = CommunicationValue::new(CommunicationType::Identification)
+        let mut ident = CommunicationValue::new(CommunicationType::Identification)
             .add_typed_default(DataType::Version, DataValue::Str(version_str))
             .add_typed_default(
                 DataType::Id,
                 DataValue::UnsignedNumber(config.client_id as u128),
             );
+        if let Some(desc) = &config.description {
+            ident = ident.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
+        }
         let ident_bytes = ident
             .to_bytes()
             .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
@@ -351,12 +354,16 @@ impl WasmClient {
         .await?;
 
         // 1. Send the unsigned Identification hello.
-        let hello = CommunicationValue::new(CommunicationType::Identification)
+        let mut hello = CommunicationValue::new(CommunicationType::Identification)
             .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
-            .add_typed_default(DataType::Id, DataValue::UnsignedNumber(client_id as u128))
+            .add_typed_default(DataType::Id, DataValue::UnsignedNumber(client_id as u128));
+        if let Some(desc) = &config.description {
+            hello = hello.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
+        }
+        let hello_bytes = hello
             .to_bytes()
             .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
-        transport.send_frame(&hello).await?;
+        transport.send_frame(&hello_bytes).await?;
 
         // 2. Receive and verify the host's challenge.
         let server_challenge = self
@@ -463,12 +470,16 @@ impl WasmClient {
         .await?;
 
         // 1. Send the unsigned Register hello (version + public-key bundle).
-        let hello = CommunicationValue::new(CommunicationType::Register)
+        let mut hello = CommunicationValue::new(CommunicationType::Register)
             .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
-            .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()))
+            .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
+        if let Some(desc) = &config.description {
+            hello = hello.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
+        }
+        let hello_bytes = hello
             .to_bytes()
             .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
-        transport.send_frame(&hello).await?;
+        transport.send_frame(&hello_bytes).await?;
 
         // 2. Receive and verify the host's challenge (register binds id = 0).
         let server_challenge = self
