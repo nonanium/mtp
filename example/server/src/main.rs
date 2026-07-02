@@ -98,8 +98,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Server listening on {}", host.local_addr());
 
     while let Some(conn) = host.accept().await? {
+        let desc = conn
+            .description
+            .as_deref()
+            .unwrap_or("(no description)");
         println!(
-            "\n--- New authenticated connection (version {}) ---",
+            "\n--- New connection (version {}, description: {desc}) ---",
             conn.version
         );
         println!("Client ID: {}", conn.client_id);

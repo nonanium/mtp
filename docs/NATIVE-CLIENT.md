@@ -29,6 +29,7 @@ let config = ClientConfig::new("https://host.example.com:4433")
 | `url`         | `String`           | `https://host:port` address of the MTP host         |
 | `tls`         | `ClientTlsConfig`  | `SystemRoots` or `PinnedPem(pem_bytes)`              |
 | `client_id`   | `u64`              | Client identifier (ignored during `auth_register`)  |
+| `description` | `Option<String>`   | Optional label sent during handshake (e.g. `"phone"`) |
 | `auth_timeout` | `Duration` (crypto) | Authentication handshake timeout (default 30s)     |
 
 ### TLS Certificate Handling
@@ -60,6 +61,7 @@ pub struct MTPConnection {
     pub version: Version,
     pub sender: Sender,
     pub receiver: Receiver,
+    pub description: Option<String>,
     #[cfg(feature = "crypto")]
     pub auth_state: AuthState,
     #[cfg(feature = "crypto")]
@@ -69,6 +71,7 @@ pub struct MTPConnection {
 
 - `version` -- the negotiated protocol version
 - `sender` / `receiver` -- for message I/O
+- `description` -- the label sent during handshake (set via `ClientConfig::with_description`)
 - `client_id` -- the confirmed/assigned client identifier (crypto only)
 
 ### Unauthenticated Connect

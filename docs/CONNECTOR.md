@@ -71,7 +71,8 @@ The host's `accept()` method:
 
 ### Login/Register Handshake
 
-When `require_authentication` is set, the parties run a mutually-authenticated
+When `authentication_policy` is `ForceAuthentication` or `AllowAuthentication`,
+the parties run a mutually-authenticated
 **challenge-response**. The client speaks first with an *unsigned* hello:
 
 - **Login** (`CommunicationType::Identification`, reserved ID 0): version, client ID
