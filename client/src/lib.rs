@@ -539,7 +539,8 @@ impl MTPClient {
             .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
             .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
         if let Some(desc) = &config.description {
-            register = register.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
+            register =
+                register.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
         }
         if let Err(e) = sender.send(&register).await {
             sender.close();

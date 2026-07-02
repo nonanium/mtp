@@ -251,7 +251,9 @@ impl MTPHost {
                     Some(v) => v,
                     None => return Err(AcceptError::MissingVersion),
                 };
-                let negotiated = match self.registry.negotiate(std::slice::from_ref(&client_version))
+                let negotiated = match self
+                    .registry
+                    .negotiate(std::slice::from_ref(&client_version))
                 {
                     Some(v) => v,
                     None => return Err(AcceptError::UnsupportedVersion(client_version)),
@@ -288,7 +290,9 @@ impl MTPHost {
                 Some(v) => v,
                 None => return Err(AcceptError::MissingVersion),
             };
-            let negotiated = match self.registry.negotiate(std::slice::from_ref(&client_version))
+            let negotiated = match self
+                .registry
+                .negotiate(std::slice::from_ref(&client_version))
             {
                 Some(v) => v,
                 None => return Err(AcceptError::UnsupportedVersion(client_version)),
@@ -435,7 +439,16 @@ impl MTPHost {
                 ));
             };
 
-        self.complete_auth_handshake(sender, receiver, flow, response_type, &version_str, client_version, description).await
+        self.complete_auth_handshake(
+            sender,
+            receiver,
+            flow,
+            response_type,
+            &version_str,
+            client_version,
+            description,
+        )
+        .await
     }
 
     /*
@@ -455,7 +468,7 @@ impl MTPHost {
         description: Option<String>,
     ) -> Result<Option<MTPConnection>, AcceptError> {
         use mtp_crypto::{
-            auth, verify_ed25519, verify_ml_dsa, Ed25519Signer, MlDsaSigner, SignatureScheme,
+            Ed25519Signer, MlDsaSigner, SignatureScheme, auth, verify_ed25519, verify_ml_dsa,
         };
 
         let tm = mtp_codec::TypeMap::latest();
@@ -688,7 +701,9 @@ impl MTPHost {
                 })?,
                 _ => {
                     sender.close();
-                    return Err(AcceptError::AuthenticationFailed("missing public keys".into()));
+                    return Err(AcceptError::AuthenticationFailed(
+                        "missing public keys".into(),
+                    ));
                 }
             };
             let pk_bytes = bundle.as_bytes();
@@ -696,10 +711,7 @@ impl MTPHost {
                 .complete_auth_handshake(
                     sender,
                     receiver,
-                    Flow::Register {
-                        bundle,
-                        pk_bytes,
-                    },
+                    Flow::Register { bundle, pk_bytes },
                     mtp_codec::CommunicationType::RegisterResponse,
                     &version_str,
                     client_version,
@@ -718,20 +730,17 @@ impl MTPHost {
             if cid > 0
                 && let Some(bundle) = (self.config.get_existing_user)(cid).await
             {
-                    return self
-                        .complete_auth_handshake(
-                            sender,
-                            receiver,
-                            Flow::Login {
-                                id: cid,
-                                bundle,
-                            },
-                            mtp_codec::CommunicationType::IdentificationResponse,
-                            &version_str,
-                            client_version,
-                            description,
-                        )
-                        .await;
+                return self
+                    .complete_auth_handshake(
+                        sender,
+                        receiver,
+                        Flow::Login { id: cid, bundle },
+                        mtp_codec::CommunicationType::IdentificationResponse,
+                        &version_str,
+                        client_version,
+                        description,
+                    )
+                    .await;
             }
 
             // Unknown (or zero) client id → unauthenticated connection.
