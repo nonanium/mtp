@@ -347,12 +347,15 @@ impl WasmTransport {
     /// Background loop: deliver every incoming frame to `on_message` until the
     /// connection closes. Shares reader state with `read_one_frame`, so frames
     /// buffered during the handshake are not lost.
-    pub async fn receive_loop(&self, on_message: js_sys::Function, on_error: js_sys::Function) {
+    pub async fn receive_loop<F>(&self, mut on_message: F, on_error: js_sys::Function)
+    where
+        F: FnMut(JsValue),
+    {
         loop {
             match self.next_frame().await {
                 Ok(FrameOutcome::Frame(frame)) => match parse_frame_value(&frame) {
                     Ok(parsed) => {
-                        let _ = on_message.call1(&JsValue::NULL, &parsed);
+                        on_message(parsed);
                     }
                     Err(e) => {
                         let message = e.as_string().unwrap_or_else(|| format!("{:?}", e));

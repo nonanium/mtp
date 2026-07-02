@@ -62,9 +62,7 @@ const client = await MTPClient.create({
 
 client.subscribe("SomeType", (message) => console.log(message));
 
-const clientId = client.credentials?.clientId == null
-  ? await client.register()
-  : (await client.connect(), client.credentials.clientId);
+const clientId = await client.auth();
 
 await client.send("SomeType", { value: "hello" });
 console.log("Connected MTP client", clientId, client.state);

@@ -128,6 +128,7 @@ type NormalizedMTPClientOptions = Omit<MTPClientOptions, "hostPublicKey"> & {
 };
 
 const DEFAULT_CREDENTIALS_KEY = "mtp:credentials";
+let wasmInitPromise: Promise<Awaited<ReturnType<typeof initWasm>>> | undefined;
 
 function emit(logger, event) {
   if (typeof logger === "function") {
@@ -394,7 +395,8 @@ export class MTPClient {
   }
 
   static async init(wasm?: MTPClientOptions["wasm"]): Promise<Awaited<ReturnType<typeof initWasm>>> {
-    return await initWasm(wasm);
+    wasmInitPromise ??= initWasm(wasm);
+    return await wasmInitPromise;
   }
 
   get credentials(): MTPClientCredentials | null {
@@ -430,7 +432,7 @@ export class MTPClient {
 
   async connect(): Promise<void> {
     if (this.#credentials?.clientId != null && this.#options.hostPublicKey) {
-      await this.#connectAuthenticated();
+      await this.auth();
       return;
     }
 
@@ -445,6 +447,15 @@ export class MTPClient {
     } finally {
       config.free();
     }
+  }
+
+  async auth(): Promise<bigint> {
+    if (!this.#options.hostPublicKey) {
+      throw new Error("MTPClient.auth requires hostPublicKey");
+    }
+    return this.#credentials?.clientId == null
+      ? await this.register()
+      : await this.#connectAuthenticated();
   }
 
   async #connectAuthenticated() {
