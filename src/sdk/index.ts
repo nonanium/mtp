@@ -20,7 +20,7 @@ export type MTPStorage = MTPCredentialStorage;
 
 export type MTPLogEvent =
   | { hint: "info" | "warning"; type: string; data: unknown }
-  | { hint: "error"; type: string | "error"; error: string };
+  | { hint: "error"; type: string | "error"; error: string; data?: unknown };
 
 export type ParsedFrame = RawBindings.ParsedFrame;
 
@@ -73,17 +73,27 @@ export interface MTPRaw {
   bindings: MTPRawBindings;
 }
 
+export type MTPBytesInput = Uint8Array | number[];
+
 export interface MTPCredentials {
   clientId: bigint | string | number | null;
-  keyring: Uint8Array | number[];
+  keyring: MTPBytesInput;
   /** @deprecated Use keyring. Kept as a migration alias for existing callers. */
-  keyringBytes?: Uint8Array | number[];
-  hostPublicKey?: Uint8Array | number[];
+  keyringBytes?: MTPBytesInput;
+  hostPublicKey?: MTPBytesInput | string;
+}
+
+export interface MTPClientCredentials {
+  clientId: bigint | null;
+  keyring: Uint8Array;
+  /** @deprecated Use keyring. Kept as a migration alias for existing callers. */
+  keyringBytes: Uint8Array;
+  hostPublicKey?: Uint8Array;
 }
 
 export interface MTPClientOptions {
   url: string;
-  hostPublicKey?: Uint8Array | string;
+  hostPublicKey?: MTPBytesInput | string;
   credentials?: MTPCredentials | string | null;
   credentialsStorageKey?: string;
   storage?: MTPCredentialStorage;
@@ -333,7 +343,7 @@ export class MTPClient {
     this.raw = { client, bindings };
   }
 
-  static async create(options: MTPClientOptions = {} as MTPClientOptions): Promise<MTPClient> {
+  static async create(options: MTPClientOptions): Promise<MTPClient> {
     validateOptions(options);
     await MTPClient.init(options.wasm);
 
@@ -387,7 +397,7 @@ export class MTPClient {
     return await initWasm(wasm);
   }
 
-  get credentials(): MTPCredentials | null {
+  get credentials(): MTPClientCredentials | null {
     return publicCredentials(this.#credentials);
   }
 
@@ -545,7 +555,7 @@ export class MTPClient {
     try {
       const frame = this.raw.bindings.parse_frame(message);
       emit(this.#options.logger, isErrorType(frame.type)
-        ? { hint: "error", type: frame.type, error: errorMessage(frame) }
+        ? { hint: "error", type: frame.type, error: errorMessage(frame), data: frame.data }
         : { hint: "info", type: frame.type, data: frame.data });
     } catch (error) {
       emit(this.#options.logger, {
@@ -582,6 +592,7 @@ export class MTPClient {
         hint: "error",
         type: frame.type,
         error: errorMessage(frame),
+        data: frame.data,
       });
     } else {
       emit(this.#options.logger, {
