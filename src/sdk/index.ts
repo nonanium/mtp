@@ -75,6 +75,36 @@ export interface MTPRaw {
 
 export type MTPBytesInput = Uint8Array | number[];
 
+export interface MTPCodecOptions {
+  id?: number;
+  sender?: bigint | number;
+  receiver?: bigint | number;
+}
+
+export interface MTPCodec {
+  encode(type: MTPCommunicationType, data: Record<string, unknown>, options?: MTPCodecOptions): Uint8Array;
+  decode(frame: MTPBytesInput): ParsedFrame;
+  format(frame: MTPBytesInput): string;
+}
+
+export function encode(type: MTPCommunicationType, data: Record<string, unknown>, options?: MTPCodecOptions): Uint8Array {
+  return bindings.build_frame(type, data, options ?? {});
+}
+
+export function decode(frame: MTPBytesInput): ParsedFrame {
+  return bindings.parse_frame(bytesFrom(frame, "frame"));
+}
+
+export function format(frame: MTPBytesInput): string {
+  return bindings.format_frame(bytesFrom(frame, "frame"));
+}
+
+export const codec: MTPCodec = {
+  encode,
+  decode,
+  format,
+};
+
 export interface MTPCredentials {
   clientId: bigint | string | number | null;
   keyring: MTPBytesInput;
@@ -93,6 +123,7 @@ export interface MTPClientCredentials {
 
 export interface MTPClientOptions {
   url: string;
+  descriptor?: string;
   hostPublicKey?: MTPBytesInput | string;
   credentials?: MTPCredentials | string | null;
   credentialsStorageKey?: string;
@@ -128,6 +159,7 @@ type NormalizedMTPClientOptions = Omit<MTPClientOptions, "hostPublicKey"> & {
 };
 
 const DEFAULT_CREDENTIALS_KEY = "mtp:credentials";
+let wasmInitPromise: Promise<Awaited<ReturnType<typeof initWasm>>> | undefined;
 
 function emit(logger, event) {
   if (typeof logger === "function") {
@@ -295,6 +327,9 @@ function validateOptions(options) {
   if (typeof options.url !== "string" || !options.url.trim()) {
     throw new TypeError("MTPClient.create requires a non-empty url");
   }
+  if (options.descriptor != null && typeof options.descriptor !== "string") {
+    throw new TypeError("descriptor must be a string");
+  }
   if (options.storage) {
     for (const method of ["getItem", "setItem", "removeItem"]) {
       if (typeof options.storage[method] !== "function") {
@@ -330,12 +365,14 @@ async function withTimeout(promise, timeoutMs, message) {
 
 export class MTPClient {
   static readonly crypto = crypto;
+  static readonly codec = codec;
 
   #credentials: InternalCredentials | null;
   #options: NormalizedMTPClientOptions;
   readonly raw: MTPRaw;
 
   readonly crypto = MTPClient.crypto;
+  readonly codec = MTPClient.codec;
 
   private constructor(options: NormalizedMTPClientOptions, client: RawBindings.WasmClient) {
     this.#options = options;
@@ -394,7 +431,8 @@ export class MTPClient {
   }
 
   static async init(wasm?: MTPClientOptions["wasm"]): Promise<Awaited<ReturnType<typeof initWasm>>> {
-    return await initWasm(wasm);
+    wasmInitPromise ??= initWasm(wasm);
+    return await wasmInitPromise;
   }
 
   get credentials(): MTPClientCredentials | null {
@@ -425,12 +463,15 @@ export class MTPClient {
     if (this.#options.maxMessageSize != null) {
       config.max_message_size = this.#options.maxMessageSize;
     }
+    if (this.#options.descriptor != null) {
+      config.description = this.#options.descriptor;
+    }
     return config;
   }
 
   async connect(): Promise<void> {
     if (this.#credentials?.clientId != null && this.#options.hostPublicKey) {
-      await this.#connectAuthenticated();
+      await this.auth();
       return;
     }
 
@@ -445,6 +486,15 @@ export class MTPClient {
     } finally {
       config.free();
     }
+  }
+
+  async auth(): Promise<bigint> {
+    if (!this.#options.hostPublicKey) {
+      throw new Error("MTPClient.auth requires hostPublicKey");
+    }
+    return this.#credentials?.clientId == null
+      ? await this.register()
+      : await this.#connectAuthenticated();
   }
 
   async #connectAuthenticated() {

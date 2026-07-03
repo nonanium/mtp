@@ -199,10 +199,7 @@ async function connect() {
       log(`Subscribed Pong: ${formatParsedFrame(frame)}`, "received");
     });
 
-    const existingClientId = client.credentials?.clientId;
-    const activeClientId = existingClientId == null
-      ? await client.register()
-      : (await client.connect(), BigInt(existingClientId));
+    const activeClientId = await client.auth();
     clientId = activeClientId;
     loadKeys();
     log(`Connected as client ${activeClientId}`);

@@ -62,9 +62,7 @@ const client = await MTPClient.create({
 
 client.subscribe("SomeType", (message) => console.log(message));
 
-const clientId = client.credentials?.clientId == null
-  ? await client.register()
-  : (await client.connect(), client.credentials.clientId);
+const clientId = await client.auth();
 
 await client.send("SomeType", { value: "hello" });
 console.log("Connected MTP client", clientId, client.state);
@@ -73,6 +71,15 @@ console.log("Connected MTP client", clientId, client.state);
 `client.raw` exposes the lower-level WASM client and generated binding module for advanced integrations. Prefer the SDK methods unless you specifically need an API the wrapper does not expose; raw calls bypass SDK validation, credential persistence, logging, timeout handling, frame helpers, and lifecycle safeguards.
 
 Use `MTPClient.crypto` for SDK-level crypto helpers such as `generateKeyring()`, `generateEd25519()`, `keyringFromEd25519()`, `verifyEd25519()`, `sha256()`, `sha256Double()`, `hkdfExpand()`, and `deriveEncryptionKey()`.
+
+Use `codec` to encode and decode MTP frames from the main SDK export:
+
+```typescript
+import { codec } from "mtp";
+
+const frame = codec.encode("SomeType", { value: "hello" });
+const parsed = codec.decode(frame);
+```
 
 ## Getting Started
 

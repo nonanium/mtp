@@ -705,19 +705,19 @@ impl WasmClient {
         let loop_pending_requests = pending_requests.clone();
         let ping_timer = self.ping_timer.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let route_frame = Closure::wrap(Box::new(move |frame: JsValue| {
-                route_incoming_frame(&frame, &on_msg, &subscriptions, &loop_pending_requests);
-            }) as Box<dyn FnMut(JsValue)>);
             loop_transport
                 .receive_loop(
-                    route_frame
-                        .as_ref()
-                        .unchecked_ref::<js_sys::Function>()
-                        .clone(),
+                    move |frame: JsValue| {
+                        route_incoming_frame(
+                            &frame,
+                            &on_msg,
+                            &subscriptions,
+                            &loop_pending_requests,
+                        );
+                    },
                     on_err.clone(),
                 )
                 .await;
-            drop(route_frame);
             state.set(ConnectionState::Disconnected);
             stop_ping_timer(&ping_timer);
             reject_pending_requests(&pending_requests, "disconnected");
