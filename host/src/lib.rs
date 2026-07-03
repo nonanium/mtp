@@ -16,7 +16,7 @@ pub use MTPHost as Host;
 
 /* ---- async callback type aliases ---- */
 #[cfg(feature = "crypto")]
-pub type GetExistingUser = Box<
+pub type GetExistingClient = Box<
     dyn Fn(
             u64,
             Option<String>,
@@ -58,7 +58,7 @@ pub struct HostConfig {
     #[cfg(feature = "crypto")]
     pub host_keyring: mtp_crypto::Keyring,
     #[cfg(feature = "crypto")]
-    pub get_existing_user: GetExistingUser,
+    pub get_existing_client: GetExistingClient,
     #[cfg(feature = "crypto")]
     pub complete_register: CompleteRegister,
 }
@@ -84,7 +84,7 @@ impl HostConfig {
                 mtp_crypto::SignaturePrivateKey::new(Vec::new()),
             ),
             #[cfg(feature = "crypto")]
-            get_existing_user: Box::new(|_| Box::pin(async { None })),
+            get_existing_client: Box::new(|_| Box::pin(async { None })),
             #[cfg(feature = "crypto")]
             complete_register: Box::new(|_| Box::pin(async { 0 })),
         }
@@ -94,12 +94,12 @@ impl HostConfig {
     pub fn with_authentication(
         mut self,
         host_keyring: mtp_crypto::Keyring,
-        get_existing_user: GetExistingUser,
+        get_existing_client: GetExistingClient,
         complete_register: CompleteRegister,
     ) -> Self {
         self.authentication_policy = AuthenticationPolicy::ForceAuthentication;
         self.host_keyring = host_keyring;
-        self.get_existing_user = Box::new(get_existing_user);
+        self.get_existing_client = Box::new(get_existing_client);
         self.complete_register = Box::new(complete_register);
         self
     }
@@ -393,7 +393,7 @@ impl MTPHost {
                         ));
                     }
                 };
-                let bundle = match (self.config.get_existing_user)(cid).await {
+                let bundle = match (self.config.get_existing_client)(cid).await {
                     Some(b) => b,
                     None => {
                         let rejection = CommunicationValue::new(
@@ -724,7 +724,7 @@ impl MTPHost {
             };
 
             if cid > 0
-                && let Some(bundle) = (self.config.get_existing_user)(cid).await
+                && let Some(bundle) = (self.config.get_existing_client)(cid).await
             {
                 return self
                     .complete_auth_handshake(
