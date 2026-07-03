@@ -29,6 +29,7 @@ pub struct ClientConfig {
     pub tls: ClientTlsConfig,
     pub client_id: u64,
     pub description: Option<String>,
+    pub policy: Policy,
     #[cfg(feature = "crypto")]
     pub auth_timeout: Duration,
 }
@@ -46,6 +47,7 @@ impl ClientConfig {
             tls: ClientTlsConfig::SystemRoots,
             client_id: 0,
             description: None,
+            policy: Policy::default(),
             #[cfg(feature = "crypto")]
             auth_timeout: Duration::from_secs(30),
         }
@@ -67,6 +69,11 @@ impl ClientConfig {
 
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
         self
     }
 
@@ -391,7 +398,7 @@ impl MTPClient {
         use mtp_crypto::auth;
 
         let (sender, receiver) =
-            mtp_transport::connect(&config.url, config.server_cert(), Policy::default()).await?;
+            mtp_transport::connect(&config.url, config.server_cert(), config.policy).await?;
 
         let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
@@ -533,7 +540,7 @@ impl MTPClient {
         use mtp_crypto::auth;
 
         let (sender, receiver) =
-            mtp_transport::connect(&config.url, config.server_cert(), Policy::default()).await?;
+            mtp_transport::connect(&config.url, config.server_cert(), config.policy).await?;
 
         let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
