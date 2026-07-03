@@ -3,7 +3,8 @@ mod handlers;
 mod keys;
 mod tls;
 
-use mtp::host::{HostConfig, MTPHost};
+use mtp::host::{AuthenticationPolicy, HostConfig, MTPHost};
+
 use mtp::type_map::TypeMap;
 use std::future::Future;
 use std::path::Path;
@@ -77,7 +78,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(()) => {}
                     Err(e) => eprintln!("Failed to persist client database to {path}: {e}"),
                 },
-                Err(e) => eprintln!("Failed to serialize client database after registering {id}: {e}"),
+                Err(e) => {
+                    eprintln!("Failed to serialize client database after registering {id}: {e}")
+                }
             }
             println!("Registered new client with ID: {}", id);
             id
@@ -92,16 +95,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cert_pem,
         key_pem,
     )
-    .with_authentication(host_keyring, get_existing_user, complete_register);
+    .with_authentication(host_keyring, get_existing_user, complete_register)
+    .with_authentication_policy(AuthenticationPolicy::ForceAuthentication);
 
     let mut host = MTPHost::new(config).await?;
     println!("Server listening on {}", host.local_addr());
 
     while let Some(conn) = host.accept().await? {
-        let desc = conn
-            .description
-            .as_deref()
-            .unwrap_or("(no description)");
+        let desc = conn.description.as_deref().unwrap_or("(no description)");
         println!(
             "\n--- New connection (version {}, description: {desc}) ---",
             conn.version

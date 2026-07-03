@@ -28,4 +28,6 @@ pub enum CryptoError {
     UnknownAlgorithm,
     #[error("invalid hex encoding")]
     InvalidHex,
+    #[error("invalid base64 encoding")]
+    InvalidBase64,
 }

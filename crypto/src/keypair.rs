@@ -1,4 +1,7 @@
 use std::fmt;
+
+use base64::Engine;
+use base64::engine::general_purpose;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // --- Private key types ---
@@ -195,6 +198,16 @@ fn hex_to_bytes(s: &str) -> Result<Vec<u8>, crate::error::CryptoError> {
             u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| crate::error::CryptoError::InvalidHex)
         })
         .collect()
+}
+
+fn bytes_to_base64(bytes: &[u8]) -> String {
+    general_purpose::STANDARD.encode(bytes)
+}
+
+fn base64_to_bytes(s: &str) -> Result<Vec<u8>, crate::error::CryptoError> {
+    general_purpose::STANDARD
+        .decode(s)
+        .map_err(|_| crate::error::CryptoError::InvalidBase64)
 }
 
 // ---
@@ -510,6 +523,22 @@ impl Keyring {
             sig_cl_secret_key: SignaturePrivateKey::new(read_key(&mut offset)?),
         })
     }
+
+    pub fn to_hex(&self) -> String {
+        bytes_to_hex(&self.to_bytes())
+    }
+
+    pub fn from_hex(s: &str) -> Result<Self, crate::error::CryptoError> {
+        Self::from_bytes(&hex_to_bytes(s)?)
+    }
+
+    pub fn to_base64(&self) -> String {
+        bytes_to_base64(&self.to_bytes())
+    }
+
+    pub fn from_base64(s: &str) -> Result<Self, crate::error::CryptoError> {
+        Self::from_bytes(&base64_to_bytes(s)?)
+    }
 }
 
 impl TryFrom<&[u8]> for Keyring {
@@ -645,6 +674,14 @@ impl PublicKeyBundle {
             sig_cl_public_key: cl,
         })
     }
+
+    pub fn to_base64(&self) -> String {
+        bytes_to_base64(&self.as_bytes())
+    }
+
+    pub fn from_base64(s: &str) -> Result<Self, crate::error::CryptoError> {
+        Self::from_bytes(&base64_to_bytes(s)?)
+    }
 }
 
 impl TryFrom<&[u8]> for PublicKeyBundle {
@@ -758,6 +795,48 @@ mod tests {
         assert_eq!(hex, "deadbeef");
         let recovered = KemPublicKey::from_hex(&hex).unwrap();
         assert_eq!(key.as_bytes(), recovered.as_bytes());
+    }
+
+    #[test]
+    fn keyring_hex_roundtrip() {
+        let keyring = Keyring::new(
+            KemPublicKey::new(vec![1u8; 16]),
+            KemPrivateKey::new(vec![2u8; 16]),
+            SignaturePqPublicKey::new(vec![3u8; 16]),
+            SignaturePqPrivateKey::new(vec![4u8; 16]),
+            SignaturePublicKey::new(vec![5u8; 16]),
+            SignaturePrivateKey::new(vec![6u8; 16]),
+        );
+        let hex = keyring.to_hex();
+        let recovered = Keyring::from_hex(&hex).unwrap();
+        assert_eq!(keyring.to_bytes(), recovered.to_bytes());
+    }
+
+    #[test]
+    fn keyring_base64_roundtrip() {
+        let keyring = Keyring::new(
+            KemPublicKey::new(vec![1u8; 16]),
+            KemPrivateKey::new(vec![2u8; 16]),
+            SignaturePqPublicKey::new(vec![3u8; 16]),
+            SignaturePqPrivateKey::new(vec![4u8; 16]),
+            SignaturePublicKey::new(vec![5u8; 16]),
+            SignaturePrivateKey::new(vec![6u8; 16]),
+        );
+        let b64 = keyring.to_base64();
+        let recovered = Keyring::from_base64(&b64).unwrap();
+        assert_eq!(keyring.to_bytes(), recovered.to_bytes());
+    }
+
+    #[test]
+    fn public_key_bundle_base64_roundtrip() {
+        let bundle = PublicKeyBundle::new(
+            KemPublicKey::new(vec![1u8; 32]),
+            SignaturePqPublicKey::new(vec![2u8; 64]),
+            SignaturePublicKey::new(vec![3u8; 32]),
+        );
+        let b64 = bundle.to_base64();
+        let recovered = PublicKeyBundle::from_base64(&b64).unwrap();
+        assert_eq!(bundle.as_bytes(), recovered.as_bytes());
     }
 
     #[test]

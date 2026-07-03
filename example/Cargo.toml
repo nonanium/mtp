@@ -1,6 +1,6 @@
 [workspace]
 members = [
     "server",
-    "client",
+    "client", "keygen",
 ]
 resolver = "3"
