@@ -4,6 +4,9 @@ use mtp_transport::{Policy, Receiver, Sender};
 #[cfg(feature = "crypto")]
 use tokio::time::Duration;
 
+pub use MTPClient as Client;
+pub use MTPConnection as Connection;
+
 #[cfg(feature = "crypto")]
 fn unexpected_response_type_error(
     context: &str,
