@@ -1,13 +1,35 @@
+use std::path::PathBuf;
+
 use mtp::crypto::Keyring;
+use mtp::files::{
+    self, BUNDLE_EXTENSION, KEYRING_EXTENSION, load_keyring, load_public_key_bundle, save_keyring,
+    save_public_key_bundle,
+};
 
-fn main() {
+fn main() -> Result<(), files::FileError> {
+    let prefix = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "keyring".to_string());
+    let keyring_path = PathBuf::from(format!("{prefix}.{KEYRING_EXTENSION}"));
+    let bundle_path = PathBuf::from(format!("{prefix}.{BUNDLE_EXTENSION}"));
+
     let keyring = Keyring::generate();
-    let bundle = keyring.public_key_bundle();
+    save_keyring(&keyring, &keyring_path)?;
+    save_public_key_bundle(&keyring.public_key_bundle(), &bundle_path)?;
 
-    // The `Debug` impl redacts private keys by design, so use the encoding
-    // methods to emit the full keyring (public + secret keys) instead.
-    println!("Keyring (hex):\n{}\n", keyring.to_hex());
-    println!("Keyring (base64):\n{}\n", keyring.to_base64());
+    /* Read both back to confirm the files round-trip through the on-disk format. */
+    let loaded_keyring = load_keyring(&keyring_path)?;
+    let loaded_bundle = load_public_key_bundle(&bundle_path)?;
+    assert_eq!(keyring.to_bytes(), loaded_keyring.to_bytes());
+    assert_eq!(
+        keyring.public_key_bundle().as_bytes(),
+        loaded_bundle.as_bytes()
+    );
+    println!("\nPrivateKeyRing (base64):\n{}", keyring.to_base64());
 
-    println!("PublicKeyBundle (base64):\n{}", bundle.to_base64());
+    println!("\nPublicKeyBundle (base64):\n{}", loaded_bundle.to_base64());
+
+    println!("Wrote keyring  -> {}", keyring_path.display());
+    println!("Wrote bundle   -> {}", bundle_path.display());
+    Ok(())
 }

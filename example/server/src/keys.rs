@@ -1,50 +1,33 @@
 use std::fs;
 
-use mtp::crypto::kem::HybridKem;
-use mtp::crypto::{Ed25519Signer, Keyring, MlDsaSigner};
+use mtp::crypto::Keyring;
+use mtp::files::{load_keyring, save_keyring, save_public_key_bundle};
+
+/* Host id is fixed for the example; only the keyring itself is persisted. */
+const HOST_ID: u64 = 1;
 
 pub fn load_or_generate_host_keys(
-    path: &str,
+    keyring_path: &str,
 ) -> Result<(u64, Keyring), Box<dyn std::error::Error>> {
-    if let Ok(data) = fs::read_to_string(path) {
-        let json: serde_json::Value = serde_json::from_str(&data)?;
-        let hid = json["host_id"].as_u64().unwrap_or(1);
-        let keyring = Keyring::from_bytes(&hex::decode(json["keyring"].as_str().unwrap())?)?;
-        println!("Loaded host keys (ID: {})", hid);
-        return Ok((hid, keyring));
+    if let Ok(keyring) = load_keyring(keyring_path) {
+        println!("Loaded host keyring from {keyring_path}");
+        return Ok((HOST_ID, keyring));
     }
 
-    let (_ed_signer, sig_sk, sig_pk) = Ed25519Signer::generate();
-    let (_pq_signer, sig_pq_sk, sig_pq_pk) = MlDsaSigner::generate();
-    let (kem_sk, kem_pk) = HybridKem::generate_keypair();
-    let keyring = Keyring::new(kem_pk, kem_sk, sig_pq_pk, sig_pq_sk, sig_pk, sig_sk);
-
-    let json = serde_json::json!({
-        "host_id": 1,
-        "keyring": hex::encode(keyring.to_bytes()),
-    });
-    fs::write(path, serde_json::to_string_pretty(&json)?)?;
-    println!("Generated host keys -> {path}");
-    Ok((1u64, keyring))
+    let keyring = Keyring::generate();
+    save_keyring(&keyring, keyring_path)?;
+    println!("Generated host keyring -> {keyring_path}");
+    Ok((HOST_ID, keyring))
 }
 
 pub fn export_host_public_keys(host_keyring: &Keyring) -> Result<(), Box<dyn std::error::Error>> {
-    let public_key_bundle_hex = hex::encode(host_keyring.public_key_bundle().as_bytes());
+    let bundle = host_keyring.public_key_bundle();
+    save_public_key_bundle(&bundle, "host.mpkb")?;
 
-    fs::write("host_public_key_bundle.hex", &public_key_bundle_hex)?;
+    /* The web client fetches the bundle as hex over HTTP. */
+    let bundle_hex = hex::encode(bundle.as_bytes());
+    fs::write("host_public_key_bundle.hex", &bundle_hex)?;
     fs::create_dir_all("web-client/public")?;
-    fs::write(
-        "web-client/public/host_public_key_bundle.hex",
-        &public_key_bundle_hex,
-    )?;
-    fs::write(
-        "host_enc_kem_pk.bin",
-        host_keyring.kem_public_key.as_bytes(),
-    )?;
-    fs::write("host_sig_pk.bin", host_keyring.sig_cl_public_key.as_bytes())?;
-    fs::write(
-        "host_sig_pq_pk.bin",
-        host_keyring.sig_pq_public_key.as_bytes(),
-    )?;
+    fs::write("web-client/public/host_public_key_bundle.hex", &bundle_hex)?;
     Ok(())
 }

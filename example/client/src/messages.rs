@@ -10,20 +10,26 @@ pub fn build_demo_message(
 ) -> CommunicationValue {
     // Encrypt to the server's KEM public key; the server decrypts with its keyring.
     let enc_type = EncryptionType::MlKemChaCha20Poly1305;
-    let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)
-        .expect("Ed25519 signer from keyring");
+    let signer =
+        Ed25519Signer::new(&keyring.sig_cl_secret_key).expect("Ed25519 signer from keyring");
 
     let tm = TypeMap::latest();
 
     let inner_enc = DataValue::Container(vec![
-        (DataType::Version.to_id(&tm), DataValue::Str("secret inner data".into())),
+        (
+            DataType::Version.to_id(&tm),
+            DataValue::Str("secret inner data".into()),
+        ),
         (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(42)),
     ]);
     let mut dv_enc = inner_enc;
     dv_enc.encrypt_container(enc_type, server_bundle, b"demo-aad");
 
     let inner_sig = DataValue::Container(vec![
-        (DataType::Version.to_id(&tm), DataValue::Str("signed by client".into())),
+        (
+            DataType::Version.to_id(&tm),
+            DataValue::Str("signed by client".into()),
+        ),
         (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(99)),
     ]);
     let mut dv_sig = inner_sig;
@@ -37,7 +43,13 @@ pub fn build_demo_message(
         (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(7)),
     ]);
     let mut dv_sec = inner_sec;
-    dv_sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, enc_type, server_bundle, b"demo-aad");
+    dv_sec.sign_and_encrypt_container(
+        SigAlgorithm::ED25519,
+        &signer,
+        enc_type,
+        server_bundle,
+        b"demo-aad",
+    );
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

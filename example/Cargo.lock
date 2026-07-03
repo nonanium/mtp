@@ -207,9 +207,7 @@ dependencies = [
 name = "client"
 version = "0.1.0"
 dependencies = [
- "hex",
  "mtp",
- "serde_json",
  "tokio",
 ]
 
@@ -902,6 +900,7 @@ dependencies = [
  "mtp-codec",
  "mtp-common",
  "mtp-crypto",
+ "mtp-files",
  "mtp-host",
  "mtp-transport",
  "mtp-type-map",
@@ -957,6 +956,14 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 1.0.69",
  "zeroize",
+]
+
+[[package]]
+name = "mtp-files"
+version = "0.1.0"
+dependencies = [
+ "mtp-crypto",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

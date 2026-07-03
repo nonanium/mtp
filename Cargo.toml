@@ -8,6 +8,7 @@ members = [
     "host",
     "client",
     "wasm",
+    "files",
 ]
 # `wasm` is a wasm32-only crate: it relies on web-sys unstable APIs
 # (`--cfg=web_sys_unstable_apis`, set in wasm/.cargo/config.toml) and the
@@ -26,6 +27,7 @@ default-members = [
     "transport",
     "host",
     "client",
+    "files",
 ]
 resolver = "3"
 
@@ -58,6 +60,7 @@ mtp-crypto = { version = "0.1.0", path = "crypto", optional = true, features = [
 ] }
 mtp-host = { version = "0.1.0", path = "host", optional = true }
 mtp-client = { version = "0.1.0", path = "client", optional = true }
+mtp-files = { version = "0.1.0", path = "files", optional = true }
 
 [features]
 default = []
@@ -79,6 +82,10 @@ host = ["dep:mtp-host", "mtp-codec/registry", "mtp-transport/host"]
 
 # MTP client - outgoing QUIC connections to a host.
 client = ["dep:mtp-client"]
+
+# On-disk storage for keyrings (`.mk`) and public key bundles (`.mpkb`).
+# Pulls in `crypto` so the `Keyring` / `PublicKeyBundle` types are in scope.
+files = ["dep:mtp-files", "crypto"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

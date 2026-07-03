@@ -1,52 +1,49 @@
 use std::fs;
 
 use mtp::client::{ClientConfig, MTPClient, MTPConnection};
-use mtp::crypto::{Ed25519Signer, Keyring, MlDsaSigner, PublicKeyBundle};
+use mtp::crypto::{
+    Ed25519Signer, KemPrivateKey, KemPublicKey, Keyring, MlDsaSigner, PublicKeyBundle,
+};
+use mtp::files::{load_keyring, save_keyring};
 
 pub async fn connect_or_register(
     mut config: ClientConfig,
     host_public_key: PublicKeyBundle,
-    client_key_path: &str,
+    key_prefix: &str,
 ) -> Result<(MTPConnection, Keyring), Box<dyn std::error::Error>> {
-    if let Ok(data) = fs::read_to_string(client_key_path) {
-        let json: serde_json::Value = serde_json::from_str(&data)?;
-        let client_id = json["client_id"].as_u64().expect("Invalid client_id");
-        let keyring = Keyring::from_bytes(&hex::decode(
-            json["keyring"].as_str().expect("Missing keyring"),
-        )?)?;
+    let keyring_path = format!("{key_prefix}.mk");
+    let id_path = format!("{key_prefix}.id");
 
-        println!("Loaded client keys (ID: {})", client_id);
+    if let (Ok(keyring), Ok(id)) = (load_keyring(&keyring_path), fs::read_to_string(&id_path)) {
+        let client_id: u64 = id.trim().parse()?;
+        println!("Loaded client keys (ID: {client_id})");
 
         config.client_id = client_id;
         let conn = MTPClient::auth_connect(config, &keyring, &host_public_key).await?;
         println!("Authenticated (version {})", conn.version);
-        Ok((conn, keyring))
-    } else {
-        println!("No existing keys found: registering new client");
-
-        let (_ed_signer, sig_sk, sig_pk) = Ed25519Signer::generate();
-        let (_pq_signer, sig_pq_sk, sig_pq_pk) = MlDsaSigner::generate();
-        let keyring = Keyring::new(
-            mtp::crypto::KemPublicKey::new(vec![]),
-            mtp::crypto::KemPrivateKey::new(vec![]),
-            sig_pq_pk,
-            sig_pq_sk,
-            sig_pk,
-            sig_sk,
-        );
-
-        let keyring_bytes = keyring.to_bytes();
-        let conn = MTPClient::auth_register(config, &keyring, &host_public_key).await?;
-        println!("Registered with ID: {}", conn.client_id);
-
-        let json = serde_json::json!({
-            "client_id": conn.client_id,
-            "keyring": hex::encode(&keyring_bytes),
-        });
-        fs::write(client_key_path, serde_json::to_string_pretty(&json)?)?;
-        println!("Saved client keys -> {client_key_path}");
-
-        let keyring = Keyring::from_bytes(&keyring_bytes)?;
-        Ok((conn, keyring))
+        return Ok((conn, keyring));
     }
+
+    println!("No existing keys found: registering new client");
+
+    /* The client authenticates with signatures only, so the KEM slot is empty. */
+    let (_ed_signer, sig_sk, sig_pk) = Ed25519Signer::generate();
+    let (_pq_signer, sig_pq_sk, sig_pq_pk) = MlDsaSigner::generate();
+    let keyring = Keyring::new(
+        KemPublicKey::new(vec![]),
+        KemPrivateKey::new(vec![]),
+        sig_pq_pk,
+        sig_pq_sk,
+        sig_pk,
+        sig_sk,
+    );
+
+    let conn = MTPClient::auth_register(config, &keyring, &host_public_key).await?;
+    println!("Registered with ID: {}", conn.client_id);
+
+    save_keyring(&keyring, &keyring_path)?;
+    fs::write(&id_path, conn.client_id.to_string())?;
+    println!("Saved client keys -> {keyring_path}");
+
+    Ok((conn, keyring))
 }

@@ -1,7 +1,5 @@
 use mtp::codec::{CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue, TypeMap};
-use mtp::crypto::{
-    CryptoError, Keyring, SignaturePublicKey, SignatureScheme, verify_ed25519,
-};
+use mtp::crypto::{CryptoError, Keyring, SignaturePublicKey, SignatureScheme, verify_ed25519};
 
 struct Ed25519Verifier(SignaturePublicKey);
 
@@ -57,7 +55,10 @@ pub fn process_and_respond(
     let enc = msg.get_data(DataType::EncryptedPayload);
     if matches!(enc, DataValue::EncryptedContainer(_)) {
         let mut dv = enc.clone();
-        if dv.decrypt_into_container(host_keyring, b"demo-aad").is_some() {
+        if dv
+            .decrypt_into_container(host_keyring, b"demo-aad")
+            .is_some()
+        {
             if let Some(entries) = dv.as_container() {
                 println!("  Decrypted EncryptedPayload: {:?}", entries);
                 enc_status = format!("EncryptedPayload decrypted OK ({} entries)", entries.len());
@@ -93,7 +94,9 @@ pub fn process_and_respond(
         if let Some(pk_bundle) = client_pk {
             let verifier = Ed25519Verifier(pk_bundle.sig_cl_public_key.clone());
             let mut dv = secure.clone();
-            if dv.decrypt_signed_encrypted_container(host_keyring, b"demo-aad").is_some()
+            if dv
+                .decrypt_signed_encrypted_container(host_keyring, b"demo-aad")
+                .is_some()
                 && dv.verify_into_container(&verifier).is_some()
             {
                 if let Some(entries) = dv.as_container() {

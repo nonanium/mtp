@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tls::export_webtransport_cert_hash(&cert_hash)?;
     println!("WebTransport certificate sha256: {cert_hash}");
 
-    let (_host_id, host_keyring) = keys::load_or_generate_host_keys("host_keys.json")?;
+    let (_host_id, host_keyring) = keys::load_or_generate_host_keys("host.mk")?;
     keys::export_host_public_keys(&host_keyring)?;
 
     // The keyring is moved into the host config; keep a copy for decrypting the
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (clients, next_id) = clients::load_client_db("clients.json")?;
 
     let clients_for_get = clients.clone();
-    let get_existing_user = move |id: u64| {
+    let get_existing_user = move |id: u64, _description: Option<String>| {
         let clients = clients_for_get.clone();
         Box::pin(async move {
             let result = clients.lock().unwrap().get(&id).cloned();
@@ -63,7 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let clients_for_register = clients.clone();
     let next_id_for_register = next_id.clone();
     let clients_path = "clients.json".to_string();
-    let complete_register = move |bundle: mtp::crypto::PublicKeyBundle| {
+    let complete_register = move |bundle: mtp::crypto::PublicKeyBundle,
+                                  _description: Option<String>| {
         let db_arc = clients_for_register.clone();
         let nid_arc = next_id_for_register.clone();
         let path = clients_path.clone();
@@ -95,7 +96,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cert_pem,
         key_pem,
     )
-    .with_authentication(host_keyring, get_existing_user, complete_register)
+    .with_authentication(
+        host_keyring,
+        Box::new(get_existing_user),
+        Box::new(complete_register),
+    )
     .with_authentication_policy(AuthenticationPolicy::ForceAuthentication);
 
     let mut host = MTPHost::new(config).await?;

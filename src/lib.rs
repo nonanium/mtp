@@ -10,3 +10,6 @@ pub use mtp_host as host;
 
 #[cfg(feature = "client")]
 pub use mtp_client as client;
+
+#[cfg(feature = "files")]
+pub use mtp_files as files;
