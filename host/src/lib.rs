@@ -3,7 +3,6 @@ use mtp_codec::{
     registry::{Registry, VersionedCodec},
 };
 use mtp_common::CommunicationError;
-use mtp_transport::Policy;
 use std::net::IpAddr;
 #[cfg(feature = "crypto")]
 use std::pin::Pin;
