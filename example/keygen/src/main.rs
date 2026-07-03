@@ -7,11 +7,8 @@ use mtp::files::{
 };
 
 fn main() -> Result<(), files::FileError> {
-    let prefix = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "keyring".to_string());
-    let keyring_path = PathBuf::from(format!("{prefix}.{KEYRING_EXTENSION}"));
-    let bundle_path = PathBuf::from(format!("{prefix}.{BUNDLE_EXTENSION}"));
+    let keyring_path = PathBuf::from(format!("keyring.{KEYRING_EXTENSION}"));
+    let bundle_path = PathBuf::from(format!("bundle.{BUNDLE_EXTENSION}"));
 
     let keyring = Keyring::generate();
     save_keyring(&keyring, &keyring_path)?;
