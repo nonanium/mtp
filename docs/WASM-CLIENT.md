@@ -258,6 +258,16 @@ Raw message helpers that remain available include:
 - `format_frame(frame)`
 - `parse_auth_response(frame)`
 
+The SDK export also exposes the same frame codec through `codec`:
+
+```typescript
+import { codec } from "mtp";
+
+const frame = codec.encode("SomeType", { value: "hello" });
+const parsed = codec.decode(frame);
+const display = codec.format(frame);
+```
+
 Raw crypto and key helpers include:
 
 - `ed25519_generate()`

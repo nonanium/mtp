@@ -72,6 +72,15 @@ console.log("Connected MTP client", clientId, client.state);
 
 Use `MTPClient.crypto` for SDK-level crypto helpers such as `generateKeyring()`, `generateEd25519()`, `keyringFromEd25519()`, `verifyEd25519()`, `sha256()`, `sha256Double()`, `hkdfExpand()`, and `deriveEncryptionKey()`.
 
+Use `codec` to encode and decode MTP frames from the main SDK export:
+
+```typescript
+import { codec } from "mtp";
+
+const frame = codec.encode("SomeType", { value: "hello" });
+const parsed = codec.decode(frame);
+```
+
 ## Getting Started
 
 Add the `mtp` crate with your desired features:

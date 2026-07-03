@@ -75,6 +75,36 @@ export interface MTPRaw {
 
 export type MTPBytesInput = Uint8Array | number[];
 
+export interface MTPCodecOptions {
+  id?: number;
+  sender?: bigint | number;
+  receiver?: bigint | number;
+}
+
+export interface MTPCodec {
+  encode(type: MTPCommunicationType, data: Record<string, unknown>, options?: MTPCodecOptions): Uint8Array;
+  decode(frame: MTPBytesInput): ParsedFrame;
+  format(frame: MTPBytesInput): string;
+}
+
+export function encode(type: MTPCommunicationType, data: Record<string, unknown>, options?: MTPCodecOptions): Uint8Array {
+  return bindings.build_frame(type, data, options ?? {});
+}
+
+export function decode(frame: MTPBytesInput): ParsedFrame {
+  return bindings.parse_frame(bytesFrom(frame, "frame"));
+}
+
+export function format(frame: MTPBytesInput): string {
+  return bindings.format_frame(bytesFrom(frame, "frame"));
+}
+
+export const codec: MTPCodec = {
+  encode,
+  decode,
+  format,
+};
+
 export interface MTPCredentials {
   clientId: bigint | string | number | null;
   keyring: MTPBytesInput;
@@ -335,12 +365,14 @@ async function withTimeout(promise, timeoutMs, message) {
 
 export class MTPClient {
   static readonly crypto = crypto;
+  static readonly codec = codec;
 
   #credentials: InternalCredentials | null;
   #options: NormalizedMTPClientOptions;
   readonly raw: MTPRaw;
 
   readonly crypto = MTPClient.crypto;
+  readonly codec = MTPClient.codec;
 
   private constructor(options: NormalizedMTPClientOptions, client: RawBindings.WasmClient) {
     this.#options = options;
