@@ -3,7 +3,7 @@ use mtp_codec::{
     registry::{Registry, VersionedCodec},
 };
 use mtp_common::CommunicationError;
-use mtp_transport::{Policy, Receiver, Sender};
+use mtp_transport::Policy;
 use std::net::IpAddr;
 #[cfg(feature = "crypto")]
 use std::pin::Pin;
@@ -13,6 +13,8 @@ use tokio::time::Duration;
 
 pub use MTPConnection as Connection;
 pub use MTPHost as Host;
+pub use mtp_transport::Receiver;
+pub use mtp_transport::Sender;
 
 /* ---- async callback type aliases ---- */
 #[cfg(feature = "crypto")]
@@ -382,59 +384,59 @@ impl MTPHost {
             _ => None,
         };
 
-        let (flow, response_type) =
-            if hello.get_type() == mtp_codec::CommunicationType::Identification.to_id(&tm) {
-                let cid = match hello.get_data(DataType::Id) {
-                    DataValue::UnsignedNumber(n) => *n as u64,
-                    _ => {
-                        sender.close();
-                        return Err(AcceptError::AuthenticationFailed(
-                            "missing client id".into(),
-                        ));
-                    }
-                };
-                let bundle = match (self.config.get_existing_client)(cid, description.clone()).await
-                {
-                    Some(b) => b,
-                    None => {
-                        let rejection = CommunicationValue::new(
-                            mtp_codec::CommunicationType::IdentificationResponse,
-                        )
-                        .add_typed_default(DataType::Connected, DataValue::BoolFalse);
-                        let _ = sender.send(&rejection).await;
-                        sender.close();
-                        return Err(AcceptError::AuthenticationFailed(
-                            "unknown client id".into(),
-                        ));
-                    }
-                };
-                (
-                    Flow::Login { id: cid, bundle },
-                    mtp_codec::CommunicationType::IdentificationResponse,
-                )
-            } else if hello.get_type() == mtp_codec::CommunicationType::Register.to_id(&tm) {
-                let bundle = match hello.get_data(DataType::PublicKeys) {
-                    DataValue::Bytes(b) => PublicKeyBundle::from_bytes(b).map_err(|_| {
-                        AcceptError::AuthenticationFailed("invalid public key bundle".into())
-                    })?,
-                    _ => {
-                        sender.close();
-                        return Err(AcceptError::AuthenticationFailed(
-                            "missing public keys".into(),
-                        ));
-                    }
-                };
-                let pk_bytes = bundle.as_bytes();
-                (
-                    Flow::Register { bundle, pk_bytes },
-                    mtp_codec::CommunicationType::RegisterResponse,
-                )
-            } else {
-                sender.close();
-                return Err(AcceptError::AuthenticationFailed(
-                    "unexpected authentication message".into(),
-                ));
+        let (flow, response_type) = if hello.get_type()
+            == mtp_codec::CommunicationType::Identification.to_id(&tm)
+        {
+            let cid = match hello.get_data(DataType::Id) {
+                DataValue::UnsignedNumber(n) => *n as u64,
+                _ => {
+                    sender.close();
+                    return Err(AcceptError::AuthenticationFailed(
+                        "missing client id".into(),
+                    ));
+                }
             };
+            let bundle = match (self.config.get_existing_client)(cid, description.clone()).await {
+                Some(b) => b,
+                None => {
+                    let rejection = CommunicationValue::new(
+                        mtp_codec::CommunicationType::IdentificationResponse,
+                    )
+                    .add_typed_default(DataType::Connected, DataValue::BoolFalse);
+                    let _ = sender.send(&rejection).await;
+                    sender.close();
+                    return Err(AcceptError::AuthenticationFailed(
+                        "unknown client id".into(),
+                    ));
+                }
+            };
+            (
+                Flow::Login { id: cid, bundle },
+                mtp_codec::CommunicationType::IdentificationResponse,
+            )
+        } else if hello.get_type() == mtp_codec::CommunicationType::Register.to_id(&tm) {
+            let bundle = match hello.get_data(DataType::PublicKeys) {
+                DataValue::Bytes(b) => PublicKeyBundle::from_bytes(b).map_err(|_| {
+                    AcceptError::AuthenticationFailed("invalid public key bundle".into())
+                })?,
+                _ => {
+                    sender.close();
+                    return Err(AcceptError::AuthenticationFailed(
+                        "missing public keys".into(),
+                    ));
+                }
+            };
+            let pk_bytes = bundle.as_bytes();
+            (
+                Flow::Register { bundle, pk_bytes },
+                mtp_codec::CommunicationType::RegisterResponse,
+            )
+        } else {
+            sender.close();
+            return Err(AcceptError::AuthenticationFailed(
+                "unexpected authentication message".into(),
+            ));
+        };
 
         self.complete_auth_handshake(
             sender,
@@ -590,7 +592,8 @@ impl MTPHost {
         let (assigned_id, client_bundle) = match flow {
             Flow::Login { id, bundle } => (id, bundle),
             Flow::Register { bundle, .. } => {
-                let new_id = (self.config.complete_register)(bundle.clone(), description.clone()).await;
+                let new_id =
+                    (self.config.complete_register)(bundle.clone(), description.clone()).await;
                 (new_id, bundle)
             }
         };
@@ -725,7 +728,8 @@ impl MTPHost {
             };
 
             if cid > 0
-                && let Some(bundle) = (self.config.get_existing_client)(cid, description.clone()).await
+                && let Some(bundle) =
+                    (self.config.get_existing_client)(cid, description.clone()).await
             {
                 return self
                     .complete_auth_handshake(
