@@ -84,9 +84,9 @@ impl HostConfig {
                 mtp_crypto::SignaturePrivateKey::new(Vec::new()),
             ),
             #[cfg(feature = "crypto")]
-            get_existing_client: Box::new(|_| Box::pin(async { None })),
+            get_existing_client: Box::new(|_, _| Box::pin(async { None })),
             #[cfg(feature = "crypto")]
-            complete_register: Box::new(|_| Box::pin(async { 0 })),
+            complete_register: Box::new(|_, _| Box::pin(async { 0 })),
         }
     }
 
@@ -393,7 +393,8 @@ impl MTPHost {
                         ));
                     }
                 };
-                let bundle = match (self.config.get_existing_client)(cid).await {
+                let bundle = match (self.config.get_existing_client)(cid, description.clone()).await
+                {
                     Some(b) => b,
                     None => {
                         let rejection = CommunicationValue::new(
@@ -589,7 +590,7 @@ impl MTPHost {
         let (assigned_id, client_bundle) = match flow {
             Flow::Login { id, bundle } => (id, bundle),
             Flow::Register { bundle, .. } => {
-                let new_id = (self.config.complete_register)(bundle.clone()).await;
+                let new_id = (self.config.complete_register)(bundle.clone(), description.clone()).await;
                 (new_id, bundle)
             }
         };
@@ -724,7 +725,7 @@ impl MTPHost {
             };
 
             if cid > 0
-                && let Some(bundle) = (self.config.get_existing_client)(cid).await
+                && let Some(bundle) = (self.config.get_existing_client)(cid, description.clone()).await
             {
                 return self
                     .complete_auth_handshake(
