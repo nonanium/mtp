@@ -53,6 +53,8 @@ pub struct HostConfig {
     pub tls_fullchain: Vec<u8>,
     pub tls_key: Vec<u8>,
 
+    pub policy: Policy,
+
     #[cfg(feature = "crypto")]
     pub authentication_policy: AuthenticationPolicy,
     #[cfg(feature = "crypto")]
@@ -72,6 +74,7 @@ impl HostConfig {
             port,
             tls_fullchain,
             tls_key,
+            policy: Policy::default(),
             #[cfg(feature = "crypto")]
             authentication_policy: AuthenticationPolicy::Unauthenticated,
             #[cfg(feature = "crypto")]
@@ -90,6 +93,11 @@ impl HostConfig {
             #[cfg(feature = "crypto")]
             complete_register: Box::new(|_, _| Box::pin(async { 0 })),
         }
+    }
+
+    pub fn with_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
+        self
     }
 
     #[cfg(feature = "crypto")]
@@ -190,7 +198,7 @@ impl MTPHost {
             config.port,
             config.tls_fullchain.clone(),
             config.tls_key.clone(),
-            Policy::default(),
+            config.policy,
         )
         .await?;
 

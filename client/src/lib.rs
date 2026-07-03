@@ -1,11 +1,13 @@
 use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Version};
 use mtp_common::CommunicationError;
-use mtp_transport::{Policy, Receiver, Sender};
+use mtp_transport::Policy;
 #[cfg(feature = "crypto")]
 use tokio::time::Duration;
 
 pub use MTPClient as Client;
 pub use MTPConnection as Connection;
+pub use mtp_transport::Receiver;
+pub use mtp_transport::Sender;
 
 #[cfg(feature = "crypto")]
 fn unexpected_response_type_error(
