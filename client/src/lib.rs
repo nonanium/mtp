@@ -1,12 +1,13 @@
 use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Version};
 use mtp_common::CommunicationError;
-use mtp_transport::Policy;
 #[cfg(feature = "crypto")]
 use tokio::time::Duration;
 
 pub use MTPClient as Client;
 pub use MTPConnection as Connection;
+pub use mtp_transport::Policy;
 pub use mtp_transport::Receiver;
+pub use mtp_transport::SendMode;
 pub use mtp_transport::Sender;
 
 #[cfg(feature = "crypto")]
