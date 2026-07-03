@@ -13,9 +13,10 @@ use tokio::time::Duration;
 
 /* ---- async callback type aliases ---- */
 #[cfg(feature = "crypto")]
-type GetExistingUser = Box<
+pub type GetExistingUser = Box<
     dyn Fn(
             u64,
+            Option<String>,
         )
             -> Pin<Box<dyn std::future::Future<Output = Option<mtp_crypto::PublicKeyBundle>> + Send>>
         + Send
@@ -23,8 +24,11 @@ type GetExistingUser = Box<
 >;
 
 #[cfg(feature = "crypto")]
-type CompleteRegister = Box<
-    dyn Fn(mtp_crypto::PublicKeyBundle) -> Pin<Box<dyn std::future::Future<Output = u64> + Send>>
+pub type CompleteRegister = Box<
+    dyn Fn(
+            mtp_crypto::PublicKeyBundle,
+            Option<String>,
+        ) -> Pin<Box<dyn std::future::Future<Output = u64> + Send>>
         + Send
         + Sync,
 >;
@@ -87,19 +91,8 @@ impl HostConfig {
     pub fn with_authentication(
         mut self,
         host_keyring: mtp_crypto::Keyring,
-        get_existing_user: impl Fn(
-            u64,
-        ) -> Pin<
-            Box<dyn std::future::Future<Output = Option<mtp_crypto::PublicKeyBundle>> + Send>,
-        > + Send
-        + Sync
-        + 'static,
-        complete_register: impl Fn(
-            mtp_crypto::PublicKeyBundle,
-        ) -> Pin<Box<dyn std::future::Future<Output = u64> + Send>>
-        + Send
-        + Sync
-        + 'static,
+        get_existing_user: GetExistingUser,
+        complete_register: CompleteRegister,
     ) -> Self {
         self.authentication_policy = AuthenticationPolicy::ForceAuthentication;
         self.host_keyring = host_keyring;
