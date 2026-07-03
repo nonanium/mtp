@@ -14,7 +14,7 @@ pub enum SendMode {
     SingleStreamPerMessage,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
     pub send_mode: SendMode,
     pub max_message_size: u64,
