@@ -394,7 +394,8 @@ mod tests {
     fn kem_encapsulate_decapsulate_roundtrip() {
         let (sk, pk) = HybridKem::generate_keypair();
         let enc = wasm_kem_encapsulate(pk.as_bytes()).expect("encapsulate failed");
-        let ss = wasm_kem_decapsulate(sk.as_bytes(), &enc.ciphertext()).expect("decapsulate failed");
+        let ss =
+            wasm_kem_decapsulate(sk.as_bytes(), &enc.ciphertext()).expect("decapsulate failed");
         assert_eq!(enc.shared_secret(), ss);
     }
 
