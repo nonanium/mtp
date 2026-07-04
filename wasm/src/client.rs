@@ -252,7 +252,7 @@ pub enum ConnectionState {
 
 #[wasm_bindgen]
 pub struct WasmClient {
-    transport: Option<WasmTransport>,
+    transport: Rc<RefCell<Option<WasmTransport>>>,
     state: Rc<Cell<ConnectionState>>,
     on_state_change: js_sys::Function,
     pub(crate) on_message: js_sys::Function,
@@ -272,7 +272,7 @@ impl WasmClient {
         on_error: &js_sys::Function,
     ) -> Self {
         Self {
-            transport: None,
+            transport: Rc::new(RefCell::new(None)),
             state: Rc::new(Cell::new(ConnectionState::Disconnected)),
             on_state_change: on_state_change.clone(),
             on_message: on_message.clone(),
@@ -296,7 +296,7 @@ impl WasmClient {
 
     /// Unauthenticated connect (sends basic Identification, enables receive loop).
     #[wasm_bindgen]
-    pub async fn connect(&mut self, config: &ConnectionConfig) -> Result<(), JsValue> {
+    pub async fn connect(&self, config: &ConnectionConfig) -> Result<(), JsValue> {
         self.set_state(ConnectionState::Connecting);
         let transport = WasmTransport::connect(
             &config.url,
@@ -334,7 +334,7 @@ impl WasmClient {
     /// Returns the confirmed (same) client ID on success.
     #[wasm_bindgen]
     pub async fn auth_connect(
-        &mut self,
+        &self,
         config: &ConnectionConfig,
         host_public_key_bytes: &[u8],
         keyring_bytes: &[u8],
@@ -450,7 +450,7 @@ impl WasmClient {
     /// Returns the newly assigned client ID.
     #[wasm_bindgen]
     pub async fn auth_register(
-        &mut self,
+        &self,
         config: &ConnectionConfig,
         host_public_key_bytes: &[u8],
         keyring_bytes: &[u8],
@@ -552,7 +552,7 @@ impl WasmClient {
 
     #[wasm_bindgen]
     pub async fn send(&self, frame: Vec<u8>) -> Result<(), JsValue> {
-        match &self.transport {
+        match self.transport.borrow().clone() {
             Some(t) => t.send_frame(&frame).await,
             None => Err(js_error("not connected")),
         }
@@ -571,7 +571,7 @@ impl WasmClient {
             return Err(js_error("request frame must have a non-zero id"));
         }
 
-        let Some(transport) = self.transport.clone() else {
+        let Some(transport) = self.transport.borrow().clone() else {
             return Err(js_error("not connected"));
         };
 
@@ -613,7 +613,7 @@ impl WasmClient {
     #[wasm_bindgen]
     pub fn start_protocol_pings(&self, interval_ms: u32, client_id: u64) -> Result<(), JsValue> {
         self.stop_protocol_pings();
-        let Some(transport) = self.transport.clone() else {
+        let Some(transport) = self.transport.borrow().clone() else {
             return Err(js_error("not connected"));
         };
         let interval_ms = interval_ms.max(1_000) as i32;
@@ -678,12 +678,11 @@ impl WasmClient {
     }
 
     #[wasm_bindgen]
-    pub fn disconnect(&mut self) {
+    pub fn disconnect(&self) {
         self.stop_protocol_pings();
-        if let Some(t) = &self.transport {
+        if let Some(t) = self.transport.borrow_mut().take() {
             t.close();
         }
-        self.transport = None;
         self.subscriptions.borrow_mut().clear();
         self.reject_pending_requests("disconnected");
         self.set_state(ConnectionState::Disconnected);
@@ -726,9 +725,9 @@ impl WasmClient {
         }
     }
 
-    fn start_receive_loop(&mut self, transport: WasmTransport) {
+    fn start_receive_loop(&self, transport: WasmTransport) {
         let loop_transport = transport.clone();
-        self.transport = Some(transport);
+        *self.transport.borrow_mut() = Some(transport);
         self.set_state(ConnectionState::Connected);
 
         let state = self.state.clone();
