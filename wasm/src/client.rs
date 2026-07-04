@@ -76,10 +76,14 @@ fn route_incoming_frame(
     let Some(message_type) = message_type else {
         return;
     };
-    for (_, (subscription_type, callback)) in subscriptions.borrow().iter() {
-        if subscription_type == &message_type {
-            let _ = callback.call1(&JsValue::NULL, frame);
-        }
+    let callbacks: Vec<js_sys::Function> = subscriptions
+        .borrow()
+        .iter()
+        .filter(|(_, (t, _))| t == &message_type)
+        .map(|(_, (_, cb))| cb.clone())
+        .collect();
+    for callback in callbacks {
+        let _ = callback.call1(&JsValue::NULL, frame);
     }
 }
 
