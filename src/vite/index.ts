@@ -369,7 +369,7 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
     buildStart() {
       this.addWatchFile(state.typeMapsPath);
     },
-    configureServer(server) {
+    async configureServer(server) {
       const wasmPath = path.join(state.outDir, wasmEntryName);
       const wasmUrl = devServerPath(server.config.root, wasmPath);
       if (wasmUrl) {
@@ -381,6 +381,7 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
 
           try {
             res.setHeader("Content-Type", "application/wasm");
+            res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
             res.end(await fs.readFile(wasmPath));
           } catch (error) {
             next(error);
@@ -388,19 +389,50 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
         });
       }
 
+      const sourceWatchDirs = [
+        "wasm/src",
+        "common/src",
+        "codec/src",
+        "crypto/src",
+        "type-map/src",
+      ].map((rel) => path.join(packageRoot, rel));
+
       server.watcher.add(state.typeMapsPath);
-      server.watcher.on("change", async (changedPath) => {
-        if (path.resolve(changedPath) !== state.typeMapsPath) {
+      for (const dir of sourceWatchDirs) {
+        if (await pathExists(dir)) {
+          server.watcher.add(dir);
+        }
+      }
+
+      let rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+      const scheduleRebuild = (changedPath: string) => {
+        const resolved = path.resolve(changedPath);
+        const isTypeMap = resolved === state.typeMapsPath;
+        const isSource = sourceWatchDirs.some((dir) => resolved.startsWith(`${dir}${path.sep}`));
+        if (!isTypeMap && !isSource) {
           return;
         }
-        try {
-          await buildIfNeeded(state, true);
-          server.moduleGraph.invalidateAll();
-          server.ws.send({ type: "full-reload" });
-        } catch (error) {
-          server.config.logger.error(error instanceof Error ? error.message : String(error));
+
+        if (rebuildTimer) {
+          clearTimeout(rebuildTimer);
         }
-      });
+
+        rebuildTimer = setTimeout(() => {
+          rebuildTimer = null;
+          void (async () => {
+            try {
+              await buildIfNeeded(state, true);
+              server.moduleGraph.invalidateAll();
+              server.ws.send({ type: "full-reload" });
+            } catch (error) {
+              server.config.logger.error(error instanceof Error ? error.message : String(error));
+            }
+          })();
+        }, 200);
+      };
+
+      server.watcher.on("change", scheduleRebuild);
+      server.watcher.on("add", scheduleRebuild);
     },
   };
 }

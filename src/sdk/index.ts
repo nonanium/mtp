@@ -405,7 +405,7 @@ export class MTPClient {
       },
       (error) => emit(normalizedOptions.logger, {
         hint: "error",
-        type: "error",
+        type: "Error",
         error: String(error),
       }),
     );
@@ -610,7 +610,7 @@ export class MTPClient {
     } catch (error) {
       emit(this.#options.logger, {
         hint: "error",
-        type: "error",
+        type: "Error",
         error: String(error),
         direction: "send",
       });
@@ -631,7 +631,7 @@ export class MTPClient {
     } catch (error) {
       emit(this.#options.logger, {
         hint: "error",
-        type: "error",
+        type: "Error",
         error: String(error),
         direction: "send",
       });
