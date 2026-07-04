@@ -10,20 +10,25 @@ use crate::frame::parse_frame_value;
 
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 
-/// Inspect a JS error value for a WebTransport stream error and log the
-/// `streamErrorCode` carried by STOP_SENDING / RESET_STREAM.
+/// Inspect a JS error value for a WebTransport **stream-level** error and, if
+/// present, log the `streamErrorCode` carried by STOP_SENDING / RESET_STREAM.
 ///
-/// The browser's WebTransport API rejects write/close/read promises with a
-/// `WebTransportError` whose `source` is `"stream"` and whose
-/// `streamErrorCode` is the application error code from the peer's
-/// STOP_SENDING (for send streams) or RESET_STREAM (for receive streams).
 /// Per draft-ietf-webtrans-http3-15 §4.4, a WebTransport application MUST
-/// provide an error code for those operations, so it is always present on
-/// stream-level errors.
-fn log_webtransport_error(error: &JsValue, context: &str) {
+/// provide an error code for those operations. The browser surfaces these as
+/// `WebTransportError` with `source = "stream"` and a numeric `streamErrorCode`.
+///
+/// Session-level errors (`source = "session"`) are normal connection
+/// closures and are **not** logged here — they propagate to `on_error`
+/// in the receive loop like any other transport error.
+fn log_stream_error_code(error: &JsValue, context: &str) {
     let source = js_sys::Reflect::get(error, &JsValue::from_str("source"))
         .ok()
         .and_then(|v| v.as_string());
+
+    if source.as_deref() != Some("stream") {
+        return;
+    }
+
     let stream_error_code = js_sys::Reflect::get(error, &JsValue::from_str("streamErrorCode"))
         .ok()
         .and_then(|v| v.as_f64());
@@ -36,15 +41,12 @@ fn log_webtransport_error(error: &JsValue, context: &str) {
         })
         .unwrap_or_else(|| format!("{:?}", error));
 
-    let formatted = match (&source, stream_error_code) {
-        (Some(src), Some(code)) => format!(
-            "[WasmTransport] {context}: WebTransportError source={src} \
-             streamErrorCode={code} ({message})"
+    let formatted = match stream_error_code {
+        Some(code) => format!(
+            "[WasmTransport] {context}: STOP_SENDING/RESET_STREAM streamErrorCode={code} \
+             ({message})"
         ),
-        (Some(src), None) => {
-            format!("[WasmTransport] {context}: WebTransportError source={src} ({message})")
-        }
-        (None, _) => format!("[WasmTransport] {context}: {message}"),
+        None => format!("[WasmTransport] {context}: stream error ({message})"),
     };
 
     if let Ok(console) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("console")) {
@@ -73,6 +75,18 @@ fn resolve_stream_readable(recv_stream: &JsValue) -> Result<JsValue, JsValue> {
     match readable {
         Ok(val) if !val.is_undefined() && !val.is_null() => Ok(val),
         _ => Ok(recv_stream.clone()),
+    }
+}
+
+/// Release a `WritableStreamDefaultWriter`'s lock on its stream. Called after
+/// `writer.close()` (or on write failure) so the runtime does not interpret an
+/// abandoned locked writer as an abort, which would surface as STOP_SENDING to
+/// the peer. Errors are ignored — `releaseLock` is best-effort cleanup.
+fn release_writer_lock(writer: &JsValue) {
+    if let Ok(release) = js_sys::Reflect::get(writer, &JsValue::from_str("releaseLock"))
+        .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
+    {
+        let _ = release.call0(writer);
     }
 }
 
@@ -216,7 +230,8 @@ impl WasmTransport {
             .call1(&writer_val, &chunk)
             .map_err(|e| js_error(&format!("write failed: {:?}", e)))?;
         if let Err(e) = JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await {
-            log_webtransport_error(&e, "send_frame write");
+            log_stream_error_code(&e, "send_frame write");
+            release_writer_lock(&writer_val);
             return Err(e);
         }
 
@@ -228,9 +243,16 @@ impl WasmTransport {
             .call0(&writer_val)
             .map_err(|e| js_error(&format!("close failed: {:?}", e)))?;
         if let Err(e) = JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await {
-            log_webtransport_error(&e, "send_frame close");
-            return Err(e);
+            // The write already succeeded; a STOP_SENDING on close just means
+            // the peer stopped reading before we could send FIN. The data is in
+            // flight, so this is not a send failure — log and return success.
+            log_stream_error_code(&e, "send_frame close");
         }
+
+        // Always release the writer's lock on the WritableStream. Abandoning a
+        // locked writer (e.g. via drop) can be interpreted by the runtime as an
+        // abort, which may surface as STOP_SENDING to the peer.
+        release_writer_lock(&writer_val);
 
         Ok(())
     }
@@ -263,17 +285,17 @@ impl WasmTransport {
             .map_err(|_| js_error("missing read"))?
             .dyn_into::<js_sys::Function>()
             .map_err(|_| js_error("read not a function"))?;
-        let result = JsFuture::from(
-            read_fn
-                .call0(&streams_reader)
-                .map_err(|_| js_error("read call failed"))?
-                .unchecked_into::<js_sys::Promise>(),
-        )
-        .await
-        .map_err(|e| {
-            log_webtransport_error(&e, "open_next_stream accept");
-            js_error(&format!("accept stream failed: {:?}", e))
-        })?;
+        let promise = read_fn
+            .call0(&streams_reader)
+            .map_err(|_| js_error("read call failed"))?
+            .unchecked_into::<js_sys::Promise>();
+        let result = match JsFuture::from(promise).await {
+            Ok(r) => r,
+            Err(e) => {
+                log_stream_error_code(&e, "open_next_stream accept");
+                return Err(js_error(&format!("accept stream failed: {:?}", e)));
+            }
+        };
 
         let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
             .ok()
@@ -308,17 +330,17 @@ impl WasmTransport {
             .map_err(|_| js_error("missing read"))?
             .dyn_into::<js_sys::Function>()
             .map_err(|_| js_error("read not a function"))?;
-        let result = JsFuture::from(
-            read_fn
-                .call0(&reader)
-                .map_err(|_| js_error("read call failed"))?
-                .unchecked_into::<js_sys::Promise>(),
-        )
-        .await
-        .map_err(|e| {
-            log_webtransport_error(&e, "read_chunk");
-            js_error(&format!("read failed: {:?}", e))
-        })?;
+        let promise = read_fn
+            .call0(&reader)
+            .map_err(|_| js_error("read call failed"))?
+            .unchecked_into::<js_sys::Promise>();
+        let result = match JsFuture::from(promise).await {
+            Ok(r) => r,
+            Err(e) => {
+                log_stream_error_code(&e, "read_chunk");
+                return Err(js_error(&format!("read failed: {:?}", e)));
+            }
+        };
 
         let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
             .ok()

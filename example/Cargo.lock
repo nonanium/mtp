@@ -902,7 +902,6 @@ dependencies = [
  "mtp-crypto",
  "mtp-files",
  "mtp-host",
- "mtp-transport",
  "mtp-type-map",
 ]
 
