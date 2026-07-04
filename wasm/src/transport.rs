@@ -10,6 +10,52 @@ use crate::frame::parse_frame_value;
 
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 
+/// Inspect a JS error value for a WebTransport stream error and log the
+/// `streamErrorCode` carried by STOP_SENDING / RESET_STREAM.
+///
+/// The browser's WebTransport API rejects write/close/read promises with a
+/// `WebTransportError` whose `source` is `"stream"` and whose
+/// `streamErrorCode` is the application error code from the peer's
+/// STOP_SENDING (for send streams) or RESET_STREAM (for receive streams).
+/// Per draft-ietf-webtrans-http3-15 §4.4, a WebTransport application MUST
+/// provide an error code for those operations, so it is always present on
+/// stream-level errors.
+fn log_webtransport_error(error: &JsValue, context: &str) {
+    let source = js_sys::Reflect::get(error, &JsValue::from_str("source"))
+        .ok()
+        .and_then(|v| v.as_string());
+    let stream_error_code = js_sys::Reflect::get(error, &JsValue::from_str("streamErrorCode"))
+        .ok()
+        .and_then(|v| v.as_f64());
+    let message = error
+        .as_string()
+        .or_else(|| {
+            js_sys::Reflect::get(error, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|v| v.as_string())
+        })
+        .unwrap_or_else(|| format!("{:?}", error));
+
+    let formatted = match (&source, stream_error_code) {
+        (Some(src), Some(code)) => format!(
+            "[WasmTransport] {context}: WebTransportError source={src} \
+             streamErrorCode={code} ({message})"
+        ),
+        (Some(src), None) => {
+            format!("[WasmTransport] {context}: WebTransportError source={src} ({message})")
+        }
+        (None, _) => format!("[WasmTransport] {context}: {message}"),
+    };
+
+    if let Ok(console) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("console")) {
+        if let Ok(warn) = js_sys::Reflect::get(&console, &JsValue::from_str("warn"))
+            .and_then(|f| f.dyn_into::<js_sys::Function>())
+        {
+            let _ = warn.call1(&console, &JsValue::from_str(&formatted));
+        }
+    }
+}
+
 /// Given a `SendStream` (old API with `.writable` or new API where stream IS a WritableStream),
 /// return the object to call `.getWriter()` on.
 fn resolve_stream_writable(send_stream: &JsValue) -> Result<JsValue, JsValue> {
@@ -169,7 +215,10 @@ impl WasmTransport {
         let write_promise = write_fn
             .call1(&writer_val, &chunk)
             .map_err(|e| js_error(&format!("write failed: {:?}", e)))?;
-        JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await?;
+        if let Err(e) = JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await {
+            log_webtransport_error(&e, "send_frame write");
+            return Err(e);
+        }
 
         let close_fn = js_sys::Reflect::get(&writer_val, &JsValue::from_str("close"))
             .map_err(|_| js_error("missing close"))?
@@ -178,7 +227,10 @@ impl WasmTransport {
         let close_promise = close_fn
             .call0(&writer_val)
             .map_err(|e| js_error(&format!("close failed: {:?}", e)))?;
-        JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await?;
+        if let Err(e) = JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await {
+            log_webtransport_error(&e, "send_frame close");
+            return Err(e);
+        }
 
         Ok(())
     }
@@ -218,7 +270,10 @@ impl WasmTransport {
                 .unchecked_into::<js_sys::Promise>(),
         )
         .await
-        .map_err(|e| js_error(&format!("accept stream failed: {:?}", e)))?;
+        .map_err(|e| {
+            log_webtransport_error(&e, "open_next_stream accept");
+            js_error(&format!("accept stream failed: {:?}", e))
+        })?;
 
         let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
             .ok()
@@ -260,7 +315,10 @@ impl WasmTransport {
                 .unchecked_into::<js_sys::Promise>(),
         )
         .await
-        .map_err(|e| js_error(&format!("read failed: {:?}", e)))?;
+        .map_err(|e| {
+            log_webtransport_error(&e, "read_chunk");
+            js_error(&format!("read failed: {:?}", e))
+        })?;
 
         let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
             .ok()

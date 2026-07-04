@@ -129,19 +129,30 @@ impl Sender {
             return Err(CommunicationError::MessageTooLarge);
         }
 
-        use tokio::io::AsyncWriteExt;
+        let len_bytes = (bytes.len() as u32).to_be_bytes();
+        let write_result = async {
+            stream.write_all(&len_bytes).await?;
+            stream.write_all(&bytes).await?;
+            Ok::<(), wtransport::error::StreamWriteError>(())
+        };
 
-        timeout(policy.write_timeout, stream.write_u32(bytes.len() as u32))
-            .await
-            .map_err(|_| CommunicationError::StreamError)?
-            .map_err(|_| CommunicationError::StreamError)?;
-
-        timeout(policy.write_timeout, stream.write_all(&bytes))
-            .await
-            .map_err(|_| CommunicationError::StreamError)?
-            .map_err(CommunicationError::from)?;
-
-        Ok(())
+        match timeout(policy.write_timeout, write_result).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
+                log::warn!(
+                    "[Sender] write failed: peer sent STOP_SENDING (error code {code})"
+                );
+                Err(CommunicationError::StreamClosed)
+            }
+            Ok(Err(other)) => {
+                log::warn!("[Sender] write failed: {other}");
+                Err(CommunicationError::StreamError)
+            }
+            Err(_) => {
+                log::warn!("[Sender] write timed out (len={})", bytes.len());
+                Err(CommunicationError::StreamError)
+            }
+        }
     }
 
     fn normalize_send_error(error: CommunicationError) -> CommunicationError {
@@ -227,12 +238,23 @@ impl Sender {
         let mut stream = Self::open_uni_stream(conn, policy).await?;
         Self::write_frame(&mut stream, data, policy).await?;
 
-        timeout(policy.write_timeout, stream.finish())
-            .await
-            .map_err(|_| CommunicationError::StreamError)?
-            .map_err(|_| CommunicationError::StreamError)?;
-
-        Ok(())
+        match timeout(policy.write_timeout, stream.finish()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
+                log::warn!(
+                    "[Sender] finish failed: peer sent STOP_SENDING (error code {code})"
+                );
+                Err(CommunicationError::StreamClosed)
+            }
+            Ok(Err(other)) => {
+                log::warn!("[Sender] finish failed: {other}");
+                Err(CommunicationError::StreamError)
+            }
+            Err(_) => {
+                log::warn!("[Sender] finish timed out");
+                Err(CommunicationError::StreamError)
+            }
+        }
     }
     async fn send_close_frame(
         conn: &Connection,
@@ -240,20 +262,35 @@ impl Sender {
     ) -> Result<(), CommunicationError> {
         let mut stream = Self::open_uni_stream(conn, policy).await?;
 
-        use tokio::io::AsyncWriteExt;
-        timeout(
-            policy.write_timeout,
-            stream.write_u32(policy.close_frame_len),
-        )
-        .await
-        .map_err(|_| CommunicationError::StreamError)?
-        .map_err(|_| CommunicationError::StreamError)?;
+        let len_bytes = policy.close_frame_len.to_be_bytes();
+        match timeout(policy.write_timeout, stream.write_all(&len_bytes)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
+                log::warn!(
+                    "[Sender] close frame write failed: peer sent STOP_SENDING (error code {code})"
+                );
+            }
+            Ok(Err(other)) => {
+                log::warn!("[Sender] close frame write failed: {other}");
+            }
+            Err(_) => {
+                log::warn!("[Sender] close frame write timed out");
+            }
+        }
 
-        if let Err(e) = timeout(policy.write_timeout, stream.finish())
-            .await
-            .map_err(|_| CommunicationError::StreamError)?
-        {
-            log::warn!("[Sender] close frame finish failed: {e}");
+        match timeout(policy.write_timeout, stream.finish()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
+                log::warn!(
+                    "[Sender] close frame finish failed: peer sent STOP_SENDING (error code {code})"
+                );
+            }
+            Ok(Err(other)) => {
+                log::warn!("[Sender] close frame finish failed: {other}");
+            }
+            Err(_) => {
+                log::warn!("[Sender] close frame finish timed out");
+            }
         }
 
         Ok(())
@@ -318,10 +355,23 @@ impl Sender {
         let _send_lock = self.send_guard.lock().await;
         let mut stream_opt = self.stream_guard.lock().await;
         if let Some(mut stream) = stream_opt.take() {
-            timeout(self.policy.write_timeout, stream.finish())
-                .await
-                .map_err(|_| CommunicationError::StreamError)?
-                .map_err(|_| CommunicationError::StreamError)?;
+            match timeout(self.policy.write_timeout, stream.finish()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
+                    log::warn!(
+                        "[Sender] finish_stream: peer sent STOP_SENDING (error code {code})"
+                    );
+                    return Err(CommunicationError::StreamClosed);
+                }
+                Ok(Err(other)) => {
+                    log::warn!("[Sender] finish_stream failed: {other}");
+                    return Err(CommunicationError::StreamError);
+                }
+                Err(_) => {
+                    log::warn!("[Sender] finish_stream timed out");
+                    return Err(CommunicationError::StreamError);
+                }
+            }
         }
         Ok(())
     }
@@ -345,7 +395,12 @@ impl Sender {
             if let Some(mut stream) = stream_guard.lock().await.take() {
                 match timeout(policy.write_timeout, stream.finish()).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(e)) => log::warn!("[Sender] persistent stream finish failed: {e}"),
+                    Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => log::warn!(
+                        "[Sender] persistent stream finish failed: peer sent STOP_SENDING (error code {code})"
+                    ),
+                    Ok(Err(e)) => {
+                        log::warn!("[Sender] persistent stream finish failed: {e}")
+                    }
                     Err(_) => log::warn!("[Sender] persistent stream finish timed out"),
                 }
             }
@@ -500,46 +555,67 @@ impl Receiver {
         stream: &mut wtransport::RecvStream,
         policy: &Policy,
     ) -> Result<ReceivedFrame, CommunicationError> {
-        use std::io::ErrorKind;
-        use tokio::io::AsyncReadExt;
+        use wtransport::error::{StreamReadError, StreamReadExactError};
 
-        let mut attempts = 0;
-        let len = loop {
-            match stream.read_u32().await {
-                Ok(len) => break len,
-                Err(e) => {
-                    if e.kind() == ErrorKind::Interrupted && attempts < 3 {
-                        attempts += 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                        continue;
-                    }
-                    if e.kind() == ErrorKind::UnexpectedEof {
-                        return Ok(ReceivedFrame::Idle);
-                    }
-                    log::warn!("[Receiver] read_u32 failed: {e}");
-                    return Err(CommunicationError::StreamError);
-                }
+        let mut len_buf = [0u8; 4];
+        match timeout(policy.read_timeout, stream.read_exact(&mut len_buf)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(StreamReadExactError::FinishedEarly(0))) => {
+                return Ok(ReceivedFrame::Idle);
             }
-        };
+            Ok(Err(StreamReadExactError::FinishedEarly(n))) => {
+                log::warn!(
+                    "[Receiver] length-prefix read ended early ({n}/4 bytes): stream closed by peer"
+                );
+                return Err(CommunicationError::StreamError);
+            }
+            Ok(Err(StreamReadExactError::Read(StreamReadError::Reset(code)))) => {
+                log::warn!(
+                    "[Receiver] length-prefix read failed: peer sent RESET_STREAM (error code {code})"
+                );
+                return Err(CommunicationError::StreamError);
+            }
+            Ok(Err(other)) => {
+                log::warn!("[Receiver] length-prefix read failed: {other}");
+                return Err(CommunicationError::StreamError);
+            }
+            Err(_) => {
+                log::warn!("[Receiver] length-prefix read timed out");
+                return Err(CommunicationError::StreamError);
+            }
+        }
 
+        let len = u32::from_be_bytes(len_buf);
         if len == policy.close_frame_len {
             return Ok(ReceivedFrame::ClosedByPeer);
         }
 
-        let len = len as usize;
+        let len_usize = len as usize;
         if len as u64 > policy.max_message_size {
             return Err(CommunicationError::MessageTooLarge);
         }
 
-        let mut buf = vec![0u8; len];
+        let mut buf = vec![0u8; len_usize];
         match timeout(policy.read_timeout, stream.read_exact(&mut buf)).await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => match timeout(policy.read_timeout, stream.read_exact(&mut buf)).await {
-                Ok(Ok(())) => {}
-                _ => return Err(e.into()),
-            },
+            Ok(Err(StreamReadExactError::FinishedEarly(n))) => {
+                log::warn!(
+                    "[Receiver] body read ended early ({n}/{len_usize} bytes): stream closed by peer"
+                );
+                return Err(CommunicationError::StreamError);
+            }
+            Ok(Err(StreamReadExactError::Read(StreamReadError::Reset(code)))) => {
+                log::warn!(
+                    "[Receiver] body read failed: peer sent RESET_STREAM (error code {code})"
+                );
+                return Err(CommunicationError::StreamError);
+            }
+            Ok(Err(other)) => {
+                log::warn!("[Receiver] body read failed: {other}");
+                return Err(CommunicationError::StreamError);
+            }
             Err(_) => {
-                log::warn!("[Receiver] read_exact timed out (len={})", len);
+                log::warn!("[Receiver] body read timed out (len={len_usize})");
                 return Err(CommunicationError::StreamError);
             }
         }
