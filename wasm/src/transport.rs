@@ -90,6 +90,19 @@ fn release_writer_lock(writer: &JsValue) {
     }
 }
 
+/// Release a `ReadableStreamDefaultReader`'s lock on its stream. Mirrors
+/// `release_writer_lock`: abandoning a locked reader can be interpreted by the
+/// runtime as a `reader.cancel()` (sending STOP_SENDING to the peer) even on an
+/// already-closed or errored stream. Calling `releaseLock` explicitly avoids
+/// that. Errors are ignored — best-effort cleanup.
+fn release_reader_lock(reader: &JsValue) {
+    if let Ok(release) = js_sys::Reflect::get(reader, &JsValue::from_str("releaseLock"))
+        .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
+    {
+        let _ = release.call0(reader);
+    }
+}
+
 /// Outcome of reading the next framed message from the incoming stream(s).
 enum FrameOutcome {
     /// A complete application frame.
@@ -408,7 +421,12 @@ impl WasmTransport {
                     // Current stream finished; the next frame (if any) is on a
                     // subsequent stream. Any trailing partial bytes are dropped
                     // since the host never splits a frame across streams.
-                    *self.stream_reader.borrow_mut() = None;
+                    // Release the reader's lock explicitly so the runtime does
+                    // not treat the abandoned lock as a cancel (which would send
+                    // STOP_SENDING to the peer on an already-closed stream).
+                    if let Some(reader) = self.stream_reader.borrow_mut().take() {
+                        release_reader_lock(&reader);
+                    }
                     self.buffer.borrow_mut().clear();
                 }
             }
@@ -452,6 +470,17 @@ impl WasmTransport {
     }
 
     pub fn close(&self) {
+        // Release any held reader locks before tearing down the session, so the
+        // runtime does not interpret an abandoned locked reader as a cancel
+        // (which would send STOP_SENDING to the peer). Once the locks are
+        // released the underlying streams can be torn down cleanly.
+        if let Some(reader) = self.stream_reader.borrow_mut().take() {
+            release_reader_lock(&reader);
+        }
+        if let Some(reader) = self.streams_reader.borrow_mut().take() {
+            release_reader_lock(&reader);
+        }
+
         if let Ok(close) = js_sys::Reflect::get(&self.inner, &JsValue::from_str("close"))
             .and_then(|value| value.dyn_into::<js_sys::Function>().map_err(Into::into))
         {
