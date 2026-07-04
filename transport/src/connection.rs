@@ -695,7 +695,7 @@ mod tests {
     #[test]
     fn test_policy_clone() {
         let p = Policy::default();
-        let cloned = p.clone();
+        let cloned = p;
         assert_eq!(p.send_mode, cloned.send_mode);
     }
 
