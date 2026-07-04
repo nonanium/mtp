@@ -687,9 +687,39 @@ impl WasmClient {
 
     fn set_state(&self, new_state: ConnectionState) {
         self.state.set(new_state);
-        let _ = self
-            .on_state_change
-            .call1(&JsValue::NULL, &JsValue::from(new_state as u8));
+
+        // Defer the callback to a microtask so re-entrant &mut self calls don't alias.
+        let cb = self.on_state_change.clone();
+        let val = JsValue::from(new_state as u8);
+        let closure = Closure::wrap(Box::new(move || {
+            let _ = cb.call1(&JsValue::NULL, &val);
+        }) as Box<dyn FnMut()>);
+
+        let global = js_sys::global();
+        let mut closure_opt = Some(closure);
+
+        let qmt = js_sys::Reflect::get(&global, &JsValue::from_str("queueMicrotask"))
+            .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into));
+        let scheduled = match qmt {
+            Ok(qmt) => {
+                if let Some(c) = closure_opt.take() {
+                    let _ = qmt.call1(&global, c.as_ref());
+                    c.forget();
+                }
+                true
+            }
+            Err(_) => false,
+        };
+        if !scheduled {
+            if let Ok(set_timeout) = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+                .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
+            {
+                if let Some(c) = closure_opt.take() {
+                    let _ = set_timeout.call2(&global, c.as_ref(), &JsValue::from_f64(0.0));
+                    c.forget();
+                }
+            }
+        }
     }
 
     fn start_receive_loop(&mut self, transport: WasmTransport) {

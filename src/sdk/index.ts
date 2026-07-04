@@ -19,8 +19,8 @@ export interface MTPCredentialStorage {
 export type MTPStorage = MTPCredentialStorage;
 
 export type MTPLogEvent =
-  | { hint: "info" | "warning"; type: string; data: unknown }
-  | { hint: "error"; type: string | "error"; error: string; data?: unknown };
+  | { hint: "info" | "warning"; type: string; data: unknown; direction?: "send" | "recv" }
+  | { hint: "error"; type: string | "error"; error: string; data?: unknown; direction?: "send" | "recv" };
 
 export type ParsedFrame = RawBindings.ParsedFrame;
 
@@ -605,13 +605,14 @@ export class MTPClient {
     try {
       const frame = this.raw.bindings.parse_frame(message);
       emit(this.#options.logger, isErrorType(frame.type)
-        ? { hint: "error", type: frame.type, error: errorMessage(frame), data: frame.data }
-        : { hint: "info", type: frame.type, data: frame.data });
+        ? { hint: "error", type: frame.type, error: errorMessage(frame), data: frame.data, direction: "send" }
+        : { hint: "info", type: frame.type, data: frame.data, direction: "send" });
     } catch (error) {
       emit(this.#options.logger, {
         hint: "error",
         type: "error",
         error: String(error),
+        direction: "send",
       });
     }
 
@@ -622,6 +623,19 @@ export class MTPClient {
   async request(type: MTPCommunicationType, data: Record<string, unknown>, options?: MTPRequestOptions): Promise<ParsedFrame>;
   async request(typeOrFrame: Uint8Array | MTPCommunicationType, data?: Record<string, unknown>, options: MTPRequestOptions = {}): Promise<ParsedFrame> {
     const frame = this.#buildFrame(typeOrFrame, data, options);
+    try {
+      const parsed = this.raw.bindings.parse_frame(frame);
+      emit(this.#options.logger, isErrorType(parsed.type)
+        ? { hint: "error", type: parsed.type, error: errorMessage(parsed), data: parsed.data, direction: "send" }
+        : { hint: "info", type: parsed.type, data: parsed.data, direction: "send" });
+    } catch (error) {
+      emit(this.#options.logger, {
+        hint: "error",
+        type: "error",
+        error: String(error),
+        direction: "send",
+      });
+    }
     return await this.raw.client.request(frame, options.responseType ?? null);
   }
 
@@ -643,12 +657,14 @@ export class MTPClient {
         type: frame.type,
         error: errorMessage(frame),
         data: frame.data,
+        direction: "recv",
       });
     } else {
       emit(this.#options.logger, {
         hint: "info",
         type: frame.type,
         data: frame.data,
+        direction: "recv",
       });
     }
   }

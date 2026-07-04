@@ -10,16 +10,7 @@ use crate::frame::parse_frame_value;
 
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 
-/// Inspect a JS error value for a WebTransport **stream-level** error and, if
-/// present, log the `streamErrorCode` carried by STOP_SENDING / RESET_STREAM.
-///
-/// Per draft-ietf-webtrans-http3-15 §4.4, a WebTransport application MUST
-/// provide an error code for those operations. The browser surfaces these as
-/// `WebTransportError` with `source = "stream"` and a numeric `streamErrorCode`.
-///
-/// Session-level errors (`source = "session"`) are normal connection
-/// closures and are **not** logged here — they propagate to `on_error`
-/// in the receive loop like any other transport error.
+/// Logs the `streamErrorCode` from a stream-level WebTransportError (STOP_SENDING / RESET_STREAM). Session errors are skipped.
 fn log_stream_error_code(error: &JsValue, context: &str) {
     let source = js_sys::Reflect::get(error, &JsValue::from_str("source"))
         .ok()
@@ -78,10 +69,7 @@ fn resolve_stream_readable(recv_stream: &JsValue) -> Result<JsValue, JsValue> {
     }
 }
 
-/// Release a `WritableStreamDefaultWriter`'s lock on its stream. Called after
-/// `writer.close()` (or on write failure) so the runtime does not interpret an
-/// abandoned locked writer as an abort, which would surface as STOP_SENDING to
-/// the peer. Errors are ignored — `releaseLock` is best-effort cleanup.
+/// Releases a writer's lock so an abandoned writer isn't treated as an abort (which sends STOP_SENDING).
 fn release_writer_lock(writer: &JsValue) {
     if let Ok(release) = js_sys::Reflect::get(writer, &JsValue::from_str("releaseLock"))
         .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
@@ -90,11 +78,7 @@ fn release_writer_lock(writer: &JsValue) {
     }
 }
 
-/// Release a `ReadableStreamDefaultReader`'s lock on its stream. Mirrors
-/// `release_writer_lock`: abandoning a locked reader can be interpreted by the
-/// runtime as a `reader.cancel()` (sending STOP_SENDING to the peer) even on an
-/// already-closed or errored stream. Calling `releaseLock` explicitly avoids
-/// that. Errors are ignored — best-effort cleanup.
+/// Releases a reader's lock so an abandoned reader isn't treated as a cancel (which sends STOP_SENDING).
 fn release_reader_lock(reader: &JsValue) {
     if let Ok(release) = js_sys::Reflect::get(reader, &JsValue::from_str("releaseLock"))
         .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
@@ -256,15 +240,11 @@ impl WasmTransport {
             .call0(&writer_val)
             .map_err(|e| js_error(&format!("close failed: {:?}", e)))?;
         if let Err(e) = JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await {
-            // The write already succeeded; a STOP_SENDING on close just means
-            // the peer stopped reading before we could send FIN. The data is in
-            // flight, so this is not a send failure — log and return success.
+            // Write succeeded; STOP_SENDING on close just means peer stopped reading before FIN.
             log_stream_error_code(&e, "send_frame close");
         }
 
-        // Always release the writer's lock on the WritableStream. Abandoning a
-        // locked writer (e.g. via drop) can be interpreted by the runtime as an
-        // abort, which may surface as STOP_SENDING to the peer.
+        // Release the lock so the writer isn't treated as an abort.
         release_writer_lock(&writer_val);
 
         Ok(())
@@ -418,12 +398,7 @@ impl WasmTransport {
                     }
                 }
                 None => {
-                    // Current stream finished; the next frame (if any) is on a
-                    // subsequent stream. Any trailing partial bytes are dropped
-                    // since the host never splits a frame across streams.
-                    // Release the reader's lock explicitly so the runtime does
-                    // not treat the abandoned lock as a cancel (which would send
-                    // STOP_SENDING to the peer on an already-closed stream).
+                    // Stream finished; release the reader's lock to avoid a spurious cancel.
                     if let Some(reader) = self.stream_reader.borrow_mut().take() {
                         release_reader_lock(&reader);
                     }
@@ -470,10 +445,7 @@ impl WasmTransport {
     }
 
     pub fn close(&self) {
-        // Release any held reader locks before tearing down the session, so the
-        // runtime does not interpret an abandoned locked reader as a cancel
-        // (which would send STOP_SENDING to the peer). Once the locks are
-        // released the underlying streams can be torn down cleanly.
+        // Release reader locks before closing so they aren't treated as cancels.
         if let Some(reader) = self.stream_reader.borrow_mut().take() {
             release_reader_lock(&reader);
         }
