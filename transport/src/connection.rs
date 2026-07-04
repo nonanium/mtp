@@ -139,9 +139,7 @@ impl Sender {
         match timeout(policy.write_timeout, write_result).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
-                log::warn!(
-                    "[Sender] write failed: peer sent STOP_SENDING (error code {code})"
-                );
+                log::warn!("[Sender] write failed: peer sent STOP_SENDING (error code {code})");
                 Err(CommunicationError::StreamClosed)
             }
             Ok(Err(other)) => {
@@ -241,9 +239,7 @@ impl Sender {
         match timeout(policy.write_timeout, stream.finish()).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
-                log::warn!(
-                    "[Sender] finish failed: peer sent STOP_SENDING (error code {code})"
-                );
+                log::warn!("[Sender] finish failed: peer sent STOP_SENDING (error code {code})");
                 Err(CommunicationError::StreamClosed)
             }
             Ok(Err(other)) => {
@@ -256,6 +252,7 @@ impl Sender {
             }
         }
     }
+
     async fn send_close_frame(
         conn: &Connection,
         policy: &Policy,
