@@ -26,6 +26,8 @@ export type ParsedFrame = RawBindings.ParsedFrame;
 
 export type Ed25519GenerateResult = ReturnType<typeof bindings.ed25519_generate>;
 
+export type WasmEncapsulated = RawBindings.WasmEncapsulated;
+
 export interface MTPCrypto {
   generateKeyring(): Uint8Array;
   generateEd25519(): Ed25519GenerateResult;
@@ -35,6 +37,13 @@ export interface MTPCrypto {
   hkdfExpand(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, len: number): Uint8Array;
   sha256(data: Uint8Array): Uint8Array;
   sha256Double(data: Uint8Array): Uint8Array;
+  encrypt(secret: string, input: Uint8Array): Promise<Uint8Array>;
+  decrypt(secret: string, input: Uint8Array): Promise<Uint8Array>;
+  encryptText(secret: string, plaintext: string): Promise<string>;
+  decryptText(secret: string, ciphertext: string): Promise<string>;
+  encapsulate(otherPublicKey: Uint8Array): WasmEncapsulated;
+  decapsulate(ownPrivateKey: Uint8Array, ciphertext: Uint8Array): Uint8Array;
+  getSharedSecret(ownPrivateKey: string, ownPublicKey: string, otherPublicKey: string): Promise<string>;
 }
 
 export const crypto: MTPCrypto = {
@@ -46,6 +55,67 @@ export const crypto: MTPCrypto = {
   hkdfExpand: (ikm, salt, info, len) => bindings.wasm_hkdf_expand(ikm, salt, info, len),
   sha256: (data) => bindings.wasm_sha256(data),
   sha256Double: (data) => bindings.wasm_sha256_double(data),
+
+  encrypt: async (secret, input) => {
+    const key = secretKeyFromString(secret);
+    const cipher = new bindings.WasmChaCha20Poly1305(key);
+    try {
+      return cipher.encrypt(input, new Uint8Array(0));
+    } finally {
+      cipher.free();
+    }
+  },
+
+  decrypt: async (secret, input) => {
+    const key = secretKeyFromString(secret);
+    const cipher = new bindings.WasmChaCha20Poly1305(key);
+    try {
+      return cipher.decrypt(input, new Uint8Array(0));
+    } finally {
+      cipher.free();
+    }
+  },
+
+  encryptText: async (secret, plaintext) => {
+    const key = secretKeyFromString(secret);
+    const cipher = new bindings.WasmChaCha20Poly1305(key);
+    try {
+      const ciphertext = cipher.encrypt(utf8Encode(plaintext), new Uint8Array(0));
+      return bytesToBase64(ciphertext);
+    } finally {
+      cipher.free();
+    }
+  },
+
+  decryptText: async (secret, ciphertext) => {
+    const key = secretKeyFromString(secret);
+    const cipher = new bindings.WasmChaCha20Poly1305(key);
+    try {
+      const decoded = bytesFromString(ciphertext, "ciphertext");
+      const plaintext = cipher.decrypt(decoded, new Uint8Array(0));
+      return utf8Decode(plaintext);
+    } finally {
+      cipher.free();
+    }
+  },
+
+  encapsulate: (otherPublicKey) => bindings.wasm_kem_encapsulate(otherPublicKey),
+
+  decapsulate: (ownPrivateKey, ciphertext) =>
+    bindings.wasm_kem_decapsulate(ownPrivateKey, ciphertext),
+
+  getSharedSecret: async (ownPrivateKey, ownPublicKey, otherPublicKey) => {
+    const ownPub = bytesFromString(ownPublicKey, "ownPublicKey");
+    const otherPub = bytesFromString(otherPublicKey, "otherPublicKey");
+    const enc = bindings.wasm_kem_encapsulate(otherPub);
+    try {
+      const sharedSecret = enc.shared_secret;
+      const derived = bindings.wasm_hkdf_expand(sharedSecret, ownPub, otherPub, 32);
+      return bytesToHex(derived);
+    } finally {
+      enc.free();
+    }
+  },
 };
 
 export type MTPRawBindings = typeof bindings;
@@ -248,6 +318,130 @@ function bytesFromString(value, name) {
   }
 
   throw new TypeError(`${name} must be bytes, hex, or base64`);
+}
+
+const HEX_DIGITS = "0123456789abcdef";
+
+function bytesToHex(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    out += HEX_DIGITS[(bytes[i] >> 4) & 0xf] + HEX_DIGITS[bytes[i] & 0xf];
+  }
+  return out;
+}
+
+function bytesToBase64(bytes) {
+  if (typeof btoa === "function") {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 1) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("base64");
+  }
+  throw new TypeError("base64 encoding is not available in this environment");
+}
+
+function utf8Encode(text) {
+  if (typeof TextEncoder !== "undefined") {
+    return new TextEncoder().encode(text);
+  }
+  if (typeof Buffer !== "undefined") {
+    return new Uint8Array(Buffer.from(text, "utf-8"));
+  }
+  const bytes = new Uint8Array(text.length * 4);
+  let len = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.codePointAt(i);
+    if (code < 0x80) {
+      bytes[len++] = code;
+    } else if (code < 0x800) {
+      bytes[len++] = 0xc0 | (code >> 6);
+      bytes[len++] = 0x80 | (code & 0x3f);
+    } else if (code < 0x10000) {
+      bytes[len++] = 0xe0 | (code >> 12);
+      bytes[len++] = 0x80 | ((code >> 6) & 0x3f);
+      bytes[len++] = 0x80 | (code & 0x3f);
+    } else {
+      bytes[len++] = 0xf0 | (code >> 18);
+      bytes[len++] = 0x80 | ((code >> 12) & 0x3f);
+      bytes[len++] = 0x80 | ((code >> 6) & 0x3f);
+      bytes[len++] = 0x80 | (code & 0x3f);
+      i += 1;
+    }
+  }
+  return bytes.subarray(0, len);
+}
+
+function utf8Decode(bytes) {
+  if (typeof TextDecoder !== "undefined") {
+    return new TextDecoder().decode(bytes);
+  }
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("utf-8");
+  }
+  let out = "";
+  let i = 0;
+  while (i < bytes.length) {
+    const b = bytes[i];
+    if (b < 0x80) {
+      out += String.fromCharCode(b);
+      i += 1;
+    } else if (b < 0xc0) {
+      i += 1;
+    } else if (b < 0xe0) {
+      out += String.fromCharCode(((b & 0x1f) << 6) | (bytes[i + 1] & 0x3f));
+      i += 2;
+    } else if (b < 0xf0) {
+      out += String.fromCharCode(
+        ((b & 0x0f) << 12) | ((bytes[i + 1] & 0x3f) << 6) | (bytes[i + 2] & 0x3f),
+      );
+      i += 3;
+    } else {
+      const cp =
+        ((b & 0x07) << 18) |
+        ((bytes[i + 1] & 0x3f) << 12) |
+        ((bytes[i + 2] & 0x3f) << 6) |
+        (bytes[i + 3] & 0x3f);
+      out += String.fromCodePoint(cp);
+      i += 4;
+    }
+  }
+  return out;
+}
+
+const SYMMETRIC_KEY_SALT = utf8Encode("mtp-symmetric-key");
+
+function secretKeyFromString(secret) {
+  if (typeof secret !== "string" || !secret.trim()) {
+    throw new TypeError("secret must be a non-empty string");
+  }
+
+  const trimmed = secret.trim();
+  const hex = trimmed.replace(/^(0x)/i, "").replace(/[\s:_-]/g, "");
+  if (/^[0-9a-fA-F]+$/.test(hex) && hex.length === 64) {
+    const bytes = new Uint8Array(32);
+    for (let i = 0; i < 32; i += 1) {
+      bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    }
+    return bytes;
+  }
+
+  if (typeof atob === "function" || typeof Buffer !== "undefined") {
+    try {
+      const decoded = bytesFromString(trimmed, "secret");
+      if (decoded.length === 32) {
+        return decoded;
+      }
+    } catch {
+      // fall through to HKDF derivation
+    }
+  }
+
+  const ikm = utf8Encode(trimmed);
+  return bindings.wasm_derive_encryption_key(ikm, SYMMETRIC_KEY_SALT, SYMMETRIC_KEY_SALT);
 }
 
 function normalizeBytes(value, name) {

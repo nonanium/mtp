@@ -1,9 +1,9 @@
 use wasm_bindgen::prelude::*;
 
 use mtp_crypto::{
-    AeadDecrypt, AeadEncrypt, ChaCha20Poly1305, Ed25519Signer, KemPrivateKey, KemPublicKey,
-    Keyring, PublicKeyBundle, SignaturePqPrivateKey, SignaturePqPublicKey, SignaturePrivateKey,
-    SignaturePublicKey, SignatureScheme, sha256, sha256_double,
+    AeadDecrypt, AeadEncrypt, ChaCha20Poly1305, Ed25519Signer, HybridKem, KemPrivateKey,
+    KemPublicKey, Keyring, PublicKeyBundle, SignaturePqPrivateKey, SignaturePqPublicKey,
+    SignaturePrivateKey, SignaturePublicKey, SignatureScheme, sha256, sha256_double,
 };
 
 use crate::error::js_error;
@@ -108,6 +108,66 @@ impl WasmPublicKeyBundle {
             .map_err(|e| js_error(&format!("PublicKeyBundle::from_bytes: {}", e)))?;
         Ok(Self { inner })
     }
+}
+
+// ===========================================================================
+// Hybrid KEM (X25519 + ML-KEM-768)
+// ===========================================================================
+
+/// KEM encapsulation result returned to JavaScript.
+///
+/// `shared_secret` is the symmetric key both parties will derive; `ciphertext`
+/// is the KEM ciphertext that must be sent to the recipient so they can
+/// decapsulate and recover the same shared secret.
+#[wasm_bindgen]
+pub struct WasmEncapsulated {
+    inner_shared_secret: Vec<u8>,
+    inner_ciphertext: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl WasmEncapsulated {
+    /// Symmetric secret derived during encapsulation.
+    #[wasm_bindgen(getter)]
+    pub fn shared_secret(&self) -> Vec<u8> {
+        self.inner_shared_secret.clone()
+    }
+
+    /// KEM ciphertext to transmit to the recipient.
+    #[wasm_bindgen(getter)]
+    pub fn ciphertext(&self) -> Vec<u8> {
+        self.inner_ciphertext.clone()
+    }
+}
+
+/// Encapsulate a fresh shared secret for `recipient_public_key`.
+///
+/// Returns a [`WasmEncapsulated`] containing the shared secret and the KEM
+/// ciphertext that the recipient needs to recover it via
+/// [`wasm_kem_decapsulate`].
+#[wasm_bindgen]
+pub fn wasm_kem_encapsulate(recipient_public_key: &[u8]) -> Result<WasmEncapsulated, JsValue> {
+    let pk = KemPublicKey::new(recipient_public_key.to_vec());
+    let enc = HybridKem::encapsulate(&pk)
+        .map_err(|e| js_error(&format!("kem_encapsulate failed: {}", e)))?;
+    Ok(WasmEncapsulated {
+        inner_shared_secret: enc.shared_secret,
+        inner_ciphertext: enc.ciphertext,
+    })
+}
+
+/// Decapsulate a KEM `ciphertext` with the recipient's `private_key`.
+///
+/// Returns the same shared secret the initiator obtained from
+/// [`wasm_kem_encapsulate`].
+#[wasm_bindgen]
+pub fn wasm_kem_decapsulate(
+    recipient_private_key: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let sk = KemPrivateKey::new(recipient_private_key.to_vec());
+    HybridKem::decapsulate(&sk, ciphertext)
+        .map_err(|e| js_error(&format!("kem_decapsulate failed: {}", e)))
 }
 
 // ===========================================================================
@@ -324,6 +384,31 @@ mod tests {
         let bytes = bundle.to_bytes();
         let restored = WasmPublicKeyBundle::from_bytes(&bytes).expect("from_bytes failed");
         assert_eq!(restored.sig_cl_public_key(), pk);
+    }
+
+    // ------------------------------------------------------------------
+    // KEM encapsulate / decapsulate
+    // ------------------------------------------------------------------
+
+    #[wasm_bindgen_test]
+    fn kem_encapsulate_decapsulate_roundtrip() {
+        let (sk, pk) = HybridKem::generate_keypair();
+        let enc = wasm_kem_encapsulate(pk.as_bytes()).expect("encapsulate failed");
+        let ss = wasm_kem_decapsulate(sk.as_bytes(), &enc.ciphertext()).expect("decapsulate failed");
+        assert_eq!(enc.shared_secret(), ss);
+    }
+
+    #[wasm_bindgen_test]
+    fn kem_encapsulate_invalid_public_key_fails() {
+        let bad = vec![0u8; 16];
+        assert!(wasm_kem_encapsulate(&bad).is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn kem_decapsulate_invalid_ciphertext_fails() {
+        let (sk, _pk) = HybridKem::generate_keypair();
+        let bad = vec![0u8; 32];
+        assert!(wasm_kem_decapsulate(sk.as_bytes(), &bad).is_err());
     }
 
     // ------------------------------------------------------------------

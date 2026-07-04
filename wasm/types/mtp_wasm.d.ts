@@ -75,6 +75,19 @@ export class WasmChaCha20Poly1305 implements DisposableWasmObject {
   encrypt(plaintext: Uint8Array, aad: Uint8Array): Uint8Array;
 }
 
+export interface KemEncapsulateResult {
+  shared_secret: Uint8Array;
+  ciphertext: Uint8Array;
+}
+
+export class WasmEncapsulated implements DisposableWasmObject {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  readonly shared_secret: Uint8Array;
+  readonly ciphertext: Uint8Array;
+}
+
 export class WasmClient implements DisposableWasmObject {
   constructor(
     on_state_change: StateChangeCallback,
@@ -166,6 +179,8 @@ export function parse_auth_response(response: Uint8Array): AuthResponse;
 export function parse_frame(frame: Uint8Array): ParsedFrame;
 export function wasm_derive_encryption_key(ikm: Uint8Array, salt: Uint8Array, context: Uint8Array): Uint8Array;
 export function wasm_hkdf_expand(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, len: number): Uint8Array;
+export function wasm_kem_decapsulate(recipient_private_key: Uint8Array, ciphertext: Uint8Array): Uint8Array;
+export function wasm_kem_encapsulate(recipient_public_key: Uint8Array): WasmEncapsulated;
 export function wasm_sha256(data: Uint8Array): Uint8Array;
 export function wasm_sha256_double(data: Uint8Array): Uint8Array;
 
