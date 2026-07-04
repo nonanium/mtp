@@ -51,8 +51,6 @@ edition = "2024"
 mtp-common = { version = "0.1.0", path = "common" }
 mtp-type-map = { version = "0.1.0", path = "type-map" }
 mtp-codec = { version = "0.1.0", path = "codec" }
-mtp-transport = { version = "0.1.0", path = "transport" }
-
 # --- optional, behind features ---
 mtp-crypto = { version = "0.1.0", path = "crypto", optional = true, features = [
     "serde",
@@ -78,7 +76,7 @@ crypto = [
 ]
 
 # MTP server host - version negotiation, Registry, incoming QUIC connections.
-host = ["dep:mtp-host", "mtp-codec/registry", "mtp-transport/host"]
+host = ["dep:mtp-host", "mtp-codec/registry"]
 
 # MTP client - outgoing QUIC connections to a host.
 client = ["dep:mtp-client"]
