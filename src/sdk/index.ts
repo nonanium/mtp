@@ -37,13 +37,13 @@ export interface MTPCrypto {
   hkdfExpand(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, len: number): Uint8Array;
   sha256(data: Uint8Array): Uint8Array;
   sha256Double(data: Uint8Array): Uint8Array;
-  encrypt(secret: string, input: Uint8Array): Promise<Uint8Array>;
-  decrypt(secret: string, input: Uint8Array): Promise<Uint8Array>;
-  encryptText(secret: string, plaintext: string): Promise<string>;
-  decryptText(secret: string, ciphertext: string): Promise<string>;
+  keyringToKeys(keyring: string | MTPBytesInput): MTPKeyringKeys;
+  encrypt(key: Uint8Array, input: Uint8Array): Promise<Uint8Array>;
+  decrypt(key: Uint8Array, input: Uint8Array): Promise<Uint8Array>;
+  encryptText(key: Uint8Array, plaintext: string): Promise<string>;
+  decryptText(key: Uint8Array, ciphertext: string): Promise<string>;
   encapsulate(otherPublicKey: Uint8Array): WasmEncapsulated;
   decapsulate(ownPrivateKey: Uint8Array, ciphertext: Uint8Array): Uint8Array;
-  getSharedSecret(ownPrivateKey: string, ownPublicKey: string, otherPublicKey: string): Promise<string>;
 }
 
 export const crypto: MTPCrypto = {
@@ -55,9 +55,9 @@ export const crypto: MTPCrypto = {
   hkdfExpand: (ikm, salt, info, len) => bindings.wasm_hkdf_expand(ikm, salt, info, len),
   sha256: (data) => bindings.wasm_sha256(data),
   sha256Double: (data) => bindings.wasm_sha256_double(data),
+  keyringToKeys: (keyring) => keyringToKeys(keyring),
 
-  encrypt: async (secret, input) => {
-    const key = secretKeyFromString(secret);
+  encrypt: async (key, input) => {
     const cipher = new bindings.WasmChaCha20Poly1305(key);
     try {
       return cipher.encrypt(input, new Uint8Array(0));
@@ -66,8 +66,7 @@ export const crypto: MTPCrypto = {
     }
   },
 
-  decrypt: async (secret, input) => {
-    const key = secretKeyFromString(secret);
+  decrypt: async (key, input) => {
     const cipher = new bindings.WasmChaCha20Poly1305(key);
     try {
       return cipher.decrypt(input, new Uint8Array(0));
@@ -76,8 +75,7 @@ export const crypto: MTPCrypto = {
     }
   },
 
-  encryptText: async (secret, plaintext) => {
-    const key = secretKeyFromString(secret);
+  encryptText: async (key, plaintext) => {
     const cipher = new bindings.WasmChaCha20Poly1305(key);
     try {
       const ciphertext = cipher.encrypt(utf8Encode(plaintext), new Uint8Array(0));
@@ -87,8 +85,7 @@ export const crypto: MTPCrypto = {
     }
   },
 
-  decryptText: async (secret, ciphertext) => {
-    const key = secretKeyFromString(secret);
+  decryptText: async (key, ciphertext) => {
     const cipher = new bindings.WasmChaCha20Poly1305(key);
     try {
       const decoded = bytesFromString(ciphertext, "ciphertext");
@@ -103,19 +100,6 @@ export const crypto: MTPCrypto = {
 
   decapsulate: (ownPrivateKey, ciphertext) =>
     bindings.wasm_kem_decapsulate(ownPrivateKey, ciphertext),
-
-  getSharedSecret: async (ownPrivateKey, ownPublicKey, otherPublicKey) => {
-    const ownPub = bytesFromString(ownPublicKey, "ownPublicKey");
-    const otherPub = bytesFromString(otherPublicKey, "otherPublicKey");
-    const enc = bindings.wasm_kem_encapsulate(otherPub);
-    try {
-      const sharedSecret = enc.shared_secret;
-      const derived = bindings.wasm_hkdf_expand(sharedSecret, ownPub, otherPub, 32);
-      return bytesToHex(derived);
-    } finally {
-      enc.free();
-    }
-  },
 };
 
 export type MTPRawBindings = typeof bindings;
@@ -189,6 +173,15 @@ export interface MTPClientCredentials {
   /** @deprecated Use keyring. Kept as a migration alias for existing callers. */
   keyringBytes: Uint8Array;
   hostPublicKey?: Uint8Array;
+}
+
+export interface MTPKeyringKeys {
+  kemPublicKey: Uint8Array;
+  kemSecretKey: Uint8Array;
+  sigPqPublicKey: Uint8Array;
+  sigPqSecretKey: Uint8Array;
+  sigClPublicKey: Uint8Array;
+  sigClSecretKey: Uint8Array;
 }
 
 export interface MTPClientOptions {
@@ -330,7 +323,7 @@ function bytesToHex(bytes) {
   return out;
 }
 
-function bytesToBase64(bytes) {
+export function bytesToBase64(bytes) {
   if (typeof btoa === "function") {
     let binary = "";
     for (let i = 0; i < bytes.length; i += 1) {
@@ -342,6 +335,21 @@ function bytesToBase64(bytes) {
     return Buffer.from(bytes).toString("base64");
   }
   throw new TypeError("base64 encoding is not available in this environment");
+}
+
+export function base64ToBytes(input) {
+  if (typeof atob === "function") {
+    const binary = atob(input);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+  if (typeof Buffer !== "undefined") {
+    return new Uint8Array(Buffer.from(input, "base64"));
+  }
+  throw new TypeError("base64 decoding is not available in this environment");
 }
 
 function utf8Encode(text) {
@@ -414,7 +422,7 @@ function utf8Decode(bytes) {
 
 const SYMMETRIC_KEY_SALT = utf8Encode("mtp-symmetric-key");
 
-function secretKeyFromString(secret) {
+export function secretKeyFromString(secret) {
   if (typeof secret !== "string" || !secret.trim()) {
     throw new TypeError("secret must be a non-empty string");
   }
@@ -472,6 +480,34 @@ function toBigInt(value) {
 
 function generateKeyringBytes() {
   return keyring_generate();
+}
+
+export function keyringToKeys(keyring) {
+  const bytes = typeof keyring === "string"
+    ? bytesFromString(keyring, "keyring")
+    : bytesFrom(keyring, "keyring");
+
+  if (bytes.length < 12) {
+    throw new TypeError("keyring data is too short to contain 6 keys");
+  }
+
+  let offset = 0;
+  const readKey = () => {
+    const len = (bytes[offset] << 8) | bytes[offset + 1];
+    offset += 2;
+    const key = bytes.slice(offset, offset + len);
+    offset += len;
+    return key;
+  };
+
+  return {
+    kemPublicKey: readKey(),
+    kemSecretKey: readKey(),
+    sigPqPublicKey: readKey(),
+    sigPqSecretKey: readKey(),
+    sigClPublicKey: readKey(),
+    sigClSecretKey: readKey(),
+  };
 }
 
 function serializeCredentials(credentials) {
