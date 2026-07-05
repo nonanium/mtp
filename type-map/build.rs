@@ -185,10 +185,23 @@ fn main() {
             serde_yaml::from_str(&content).expect("Failed to parse type-maps.yaml")
         }
         Err(_) => {
-            eprint!("warning: MTP_TYPE_MAPS not set; generating types with reserved entries only");
-            Config {
-                protocol_version: String::new(),
-                type_maps: BTreeMap::new(),
+            let manifest_dir =
+                std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+            let default_path = manifest_dir.join("../example/type-maps.yaml");
+            if default_path.exists() {
+                println!("cargo:rerun-if-changed={}", default_path.display());
+                let content = std::fs::read_to_string(&default_path)
+                    .expect("Failed to read default example/type-maps.yaml");
+                serde_yaml::from_str(&content)
+                    .expect("Failed to parse default example/type-maps.yaml")
+            } else {
+                eprint!(
+                    "warning: MTP_TYPE_MAPS not set; generating types with reserved entries only"
+                );
+                Config {
+                    protocol_version: String::new(),
+                    type_maps: BTreeMap::new(),
+                }
             }
         }
     };
@@ -317,6 +330,7 @@ fn generate_comm_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
         "#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]"
     )
     .unwrap();
+    writeln!(out, "#[allow(clippy::enum_variant_names)]").unwrap();
     writeln!(out, "pub enum CommunicationType {{").unwrap();
 
     for entry in RESERVED_COMM_TYPES {
@@ -401,6 +415,7 @@ fn generate_data_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
         "#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]"
     )
     .unwrap();
+    writeln!(out, "#[allow(clippy::enum_variant_names)]").unwrap();
     writeln!(out, "pub enum DataType {{").unwrap();
 
     for entry in RESERVED_DATA_TYPES {

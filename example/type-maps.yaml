@@ -6,6 +6,7 @@ type_maps:
     DataTypes:
   "1.0":
     CommunicationTypes:
+      CommunicationType: 32
     DataTypes:
       Data: 32
       Flags: 33
@@ -15,8 +16,11 @@ type_maps:
       EncryptedPayload: 37
       SignedPayload: 38
       SecurePayload: 39
+      CommunicationType: 40
+      DataType: 41
   "2.0":
     CommunicationTypes:
+      CommunicationType: 32
     DataTypes:
       Data: 34
       Flags: 33
@@ -26,3 +30,5 @@ type_maps:
       EncryptedPayload: 38
       SignedPayload: 39
       SecurePayload: 40
+      CommunicationType: 41
+      DataType: 42

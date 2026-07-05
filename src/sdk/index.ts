@@ -7,6 +7,24 @@ import initWasm, {
 import * as bindings from "mtp/raw";
 import type * as RawBindings from "../raw/index";
 import type { MTPCommunicationType } from "../type-map/index";
+import type { MTPSessionStorage, MTPSessionState } from "./session";
+import {
+  MTPSessionManager,
+  getConversationId,
+  deriveSessionKeys,
+} from "./session.js";
+import type {
+  EncryptedDeviceSecretRecord,
+  MTPEncryptedDeviceSecretProvider,
+} from "./encrypted-device-secret";
+import { InMemoryEncryptedDeviceSecretProvider } from "./encrypted-device-secret.js";
+import { InMemorySessionStorage } from "./session.js";
+import {
+  parseEncryptedMessage,
+  encryptPayload,
+  decryptPayload,
+  FLAG_INIT,
+} from "./encrypted-message.js";
 
 export type StorageValue = string | null;
 
@@ -19,12 +37,25 @@ export interface MTPCredentialStorage {
 export type MTPStorage = MTPCredentialStorage;
 
 export type MTPLogEvent =
-  | { hint: "info" | "warning"; type: string; data: unknown; direction?: "send" | "recv" }
-  | { hint: "error"; type: string | "error"; error: string; data?: unknown; direction?: "send" | "recv" };
+  | {
+      hint: "info" | "warning";
+      type: string;
+      data: unknown;
+      direction?: "send" | "recv";
+    }
+  | {
+      hint: "error";
+      type: string | "error";
+      error: string;
+      data?: unknown;
+      direction?: "send" | "recv";
+    };
 
 export type ParsedFrame = RawBindings.ParsedFrame;
 
-export type Ed25519GenerateResult = ReturnType<typeof bindings.ed25519_generate>;
+export type Ed25519GenerateResult = ReturnType<
+  typeof bindings.ed25519_generate
+>;
 
 export type WasmEncapsulated = RawBindings.WasmEncapsulated;
 
@@ -32,12 +63,26 @@ export interface MTPCrypto {
   generateKeyring(): Uint8Array;
   generateEd25519(): Ed25519GenerateResult;
   keyringFromEd25519(secretKey: Uint8Array, publicKey: Uint8Array): Uint8Array;
-  verifyEd25519(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): void;
-  deriveEncryptionKey(ikm: Uint8Array, salt: Uint8Array, context: Uint8Array): Uint8Array;
-  hkdfExpand(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, len: number): Uint8Array;
+  verifyEd25519(
+    publicKey: Uint8Array,
+    message: Uint8Array,
+    signature: Uint8Array,
+  ): void;
+  deriveEncryptionKey(
+    ikm: Uint8Array,
+    salt: Uint8Array,
+    context: Uint8Array,
+  ): Uint8Array;
+  hkdfExpand(
+    ikm: Uint8Array,
+    salt: Uint8Array,
+    info: Uint8Array,
+    len: number,
+  ): Uint8Array;
   sha256(data: Uint8Array): Uint8Array;
   sha256Double(data: Uint8Array): Uint8Array;
   keyringToKeys(keyring: string | MTPBytesInput): MTPKeyringKeys;
+  publicKeyBundleToKeys(publicKeyBundle: string | MTPBytesInput): MTPPublicKeyBundleKeys;
   encrypt(key: Uint8Array, input: Uint8Array): Promise<Uint8Array>;
   decrypt(key: Uint8Array, input: Uint8Array): Promise<Uint8Array>;
   encryptText(key: Uint8Array, plaintext: string): Promise<string>;
@@ -49,13 +94,19 @@ export interface MTPCrypto {
 export const crypto: MTPCrypto = {
   generateKeyring: () => bindings.keyring_generate(),
   generateEd25519: () => bindings.ed25519_generate(),
-  keyringFromEd25519: (secretKey, publicKey) => bindings.keyring_from_ed25519(secretKey, publicKey),
-  verifyEd25519: (publicKey, message, signature) => bindings.ed25519_verify(publicKey, message, signature),
-  deriveEncryptionKey: (ikm, salt, context) => bindings.wasm_derive_encryption_key(ikm, salt, context),
-  hkdfExpand: (ikm, salt, info, len) => bindings.wasm_hkdf_expand(ikm, salt, info, len),
+  keyringFromEd25519: (secretKey, publicKey) =>
+    bindings.keyring_from_ed25519(secretKey, publicKey),
+  verifyEd25519: (publicKey, message, signature) =>
+    bindings.ed25519_verify(publicKey, message, signature),
+  deriveEncryptionKey: (ikm, salt, context) =>
+    bindings.wasm_derive_encryption_key(ikm, salt, context),
+  hkdfExpand: (ikm, salt, info, len) =>
+    bindings.wasm_hkdf_expand(ikm, salt, info, len),
   sha256: (data) => bindings.wasm_sha256(data),
   sha256Double: (data) => bindings.wasm_sha256_double(data),
   keyringToKeys: (keyring) => keyringToKeys(keyring),
+  publicKeyBundleToKeys: (publicKeyBundle) =>
+    publicKeyBundleToKeys(publicKeyBundle),
 
   encrypt: async (key, input) => {
     const cipher = new bindings.WasmChaCha20Poly1305(key);
@@ -78,7 +129,10 @@ export const crypto: MTPCrypto = {
   encryptText: async (key, plaintext) => {
     const cipher = new bindings.WasmChaCha20Poly1305(key);
     try {
-      const ciphertext = cipher.encrypt(utf8Encode(plaintext), new Uint8Array(0));
+      const ciphertext = cipher.encrypt(
+        utf8Encode(plaintext),
+        new Uint8Array(0),
+      );
       return bytesToBase64(ciphertext);
     } finally {
       cipher.free();
@@ -96,7 +150,8 @@ export const crypto: MTPCrypto = {
     }
   },
 
-  encapsulate: (otherPublicKey) => bindings.wasm_kem_encapsulate(otherPublicKey),
+  encapsulate: (otherPublicKey) =>
+    bindings.wasm_kem_encapsulate(otherPublicKey),
 
   decapsulate: (ownPrivateKey, ciphertext) =>
     bindings.wasm_kem_decapsulate(ownPrivateKey, ciphertext),
@@ -136,12 +191,20 @@ export interface MTPCodecOptions {
 }
 
 export interface MTPCodec {
-  encode(type: MTPCommunicationType, data: Record<string, unknown>, options?: MTPCodecOptions): Uint8Array;
+  encode(
+    type: MTPCommunicationType,
+    data: Record<string, unknown>,
+    options?: MTPCodecOptions,
+  ): Uint8Array;
   decode(frame: MTPBytesInput): ParsedFrame;
   format(frame: MTPBytesInput): string;
 }
 
-export function encode(type: MTPCommunicationType, data: Record<string, unknown>, options?: MTPCodecOptions): Uint8Array {
+export function encode(
+  type: MTPCommunicationType,
+  data: Record<string, unknown>,
+  options?: MTPCodecOptions,
+): Uint8Array {
   return bindings.build_frame(type, data, options ?? {});
 }
 
@@ -184,6 +247,12 @@ export interface MTPKeyringKeys {
   sigClSecretKey: Uint8Array;
 }
 
+export interface MTPPublicKeyBundleKeys {
+  kemPublicKey: Uint8Array;
+  sigPqPublicKey: Uint8Array;
+  sigClPublicKey: Uint8Array;
+}
+
 export interface MTPClientOptions {
   url: string;
   descriptor?: string;
@@ -195,8 +264,15 @@ export interface MTPClientOptions {
   maxMessageSize?: number;
   authTimeoutMs?: number;
   pings?: boolean | { intervalMs?: number };
-  wasm?: RawBindings.InitInput | Promise<RawBindings.InitInput> | { module_or_path: RawBindings.InitInput | Promise<RawBindings.InitInput> };
+  wasm?:
+    | RawBindings.InitInput
+    | Promise<RawBindings.InitInput>
+    | {
+        module_or_path: RawBindings.InitInput | Promise<RawBindings.InitInput>;
+      };
   logger?: (event: MTPLogEvent) => void;
+  sessionStorage?: MTPSessionStorage;
+  encryptedDeviceSecretProvider?: MTPEncryptedDeviceSecretProvider;
 }
 
 export type Unsubscribe = () => void;
@@ -211,7 +287,10 @@ export interface MTPRequestOptions extends MTPSendOptions {
   responseType?: MTPCommunicationType;
 }
 
-type InternalCredentials = Omit<MTPCredentials, "clientId" | "keyring" | "hostPublicKey"> & {
+type InternalCredentials = Omit<
+  MTPCredentials,
+  "clientId" | "keyring" | "hostPublicKey"
+> & {
   clientId: bigint | null;
   keyringBytes: Uint8Array;
   hostPublicKey?: Uint8Array;
@@ -231,22 +310,31 @@ function emit(logger, event) {
 }
 
 function isErrorType(type) {
-  return type === "Error" || type.startsWith("Error") || [
-    "BadRequest",
-    "Unauthorized",
-    "Forbidden",
-    "NotFound",
-    "TooManyRequests",
-    "InternalServerError",
-    "BadGateway",
-    "ServiceUnavailable",
-    "GatewayTimeout",
-  ].includes(type);
+  return (
+    type === "Error" ||
+    type.startsWith("Error") ||
+    [
+      "BadRequest",
+      "Unauthorized",
+      "Forbidden",
+      "NotFound",
+      "TooManyRequests",
+      "InternalServerError",
+      "BadGateway",
+      "ServiceUnavailable",
+      "GatewayTimeout",
+    ].includes(type)
+  );
 }
 
 function errorMessage(frame) {
   const data = frame?.data ?? {};
-  return String(data.ErrorMessage ?? data.Error ?? data.Description ?? `Received ${frame?.type ?? "error"} frame`);
+  return String(
+    data.ErrorMessage ??
+      data.Error ??
+      data.Description ??
+      `Received ${frame?.type ?? "error"} frame`,
+  );
 }
 
 async function storageGet(storage, key) {
@@ -404,7 +492,9 @@ function utf8Decode(bytes) {
       i += 2;
     } else if (b < 0xf0) {
       out += String.fromCharCode(
-        ((b & 0x0f) << 12) | ((bytes[i + 1] & 0x3f) << 6) | (bytes[i + 2] & 0x3f),
+        ((b & 0x0f) << 12) |
+          ((bytes[i + 1] & 0x3f) << 6) |
+          (bytes[i + 2] & 0x3f),
       );
       i += 3;
     } else {
@@ -449,7 +539,11 @@ export function secretKeyFromString(secret) {
   }
 
   const ikm = utf8Encode(trimmed);
-  return bindings.wasm_derive_encryption_key(ikm, SYMMETRIC_KEY_SALT, SYMMETRIC_KEY_SALT);
+  return bindings.wasm_derive_encryption_key(
+    ikm,
+    SYMMETRIC_KEY_SALT,
+    SYMMETRIC_KEY_SALT,
+  );
 }
 
 function normalizeBytes(value, name) {
@@ -483,9 +577,10 @@ function generateKeyringBytes() {
 }
 
 export function keyringToKeys(keyring) {
-  const bytes = typeof keyring === "string"
-    ? bytesFromString(keyring, "keyring")
-    : bytesFrom(keyring, "keyring");
+  const bytes =
+    typeof keyring === "string"
+      ? bytesFromString(keyring, "keyring")
+      : bytesFrom(keyring, "keyring");
 
   if (bytes.length < 12) {
     throw new TypeError("keyring data is too short to contain 6 keys");
@@ -510,11 +605,51 @@ export function keyringToKeys(keyring) {
   };
 }
 
+export function publicKeyBundleToKeys(publicKeyBundle) {
+  const bytes =
+    typeof publicKeyBundle === "string"
+      ? bytesFromString(publicKeyBundle, "publicKeyBundle")
+      : bytesFrom(publicKeyBundle, "publicKeyBundle");
+
+  if (bytes.length < 6) {
+    throw new TypeError("public key bundle data is too short to contain 3 keys");
+  }
+
+  let offset = 0;
+  const readKey = () => {
+    if (offset + 2 > bytes.length) {
+      throw new TypeError("public key bundle is truncated");
+    }
+    const len = (bytes[offset] << 8) | bytes[offset + 1];
+    offset += 2;
+    if (offset + len > bytes.length) {
+      throw new TypeError("public key bundle is truncated");
+    }
+    const key = bytes.slice(offset, offset + len);
+    offset += len;
+    return key;
+  };
+
+  const result = {
+    kemPublicKey: readKey(),
+    sigPqPublicKey: readKey(),
+    sigClPublicKey: readKey(),
+  };
+
+  if (offset !== bytes.length) {
+    throw new TypeError("public key bundle has trailing data");
+  }
+
+  return result;
+}
+
 function serializeCredentials(credentials) {
   return JSON.stringify({
     clientId: credentials.clientId?.toString() ?? null,
     keyring: Array.from(credentials.keyringBytes ?? []),
-    hostPublicKey: credentials.hostPublicKey ? Array.from(credentials.hostPublicKey) : undefined,
+    hostPublicKey: credentials.hostPublicKey
+      ? Array.from(credentials.hostPublicKey)
+      : undefined,
   });
 }
 
@@ -532,9 +667,10 @@ function deserializeCredentials(credentials) {
   return {
     clientId: toBigInt(normalized.clientId),
     keyringBytes: bytesFrom(keyring, "credentials.keyring"),
-    hostPublicKey: normalized.hostPublicKey == null
-      ? undefined
-      : normalizeBytes(normalized.hostPublicKey, "credentials.hostPublicKey"),
+    hostPublicKey:
+      normalized.hostPublicKey == null
+        ? undefined
+        : normalizeBytes(normalized.hostPublicKey, "credentials.hostPublicKey"),
   };
 }
 
@@ -567,10 +703,17 @@ function validateOptions(options) {
       }
     }
   }
-  if (options.maxMessageSize != null && (!Number.isSafeInteger(options.maxMessageSize) || options.maxMessageSize <= 0)) {
+  if (
+    options.maxMessageSize != null &&
+    (!Number.isSafeInteger(options.maxMessageSize) ||
+      options.maxMessageSize <= 0)
+  ) {
     throw new TypeError("maxMessageSize must be a positive safe integer");
   }
-  if (options.authTimeoutMs != null && (!Number.isSafeInteger(options.authTimeoutMs) || options.authTimeoutMs <= 0)) {
+  if (
+    options.authTimeoutMs != null &&
+    (!Number.isSafeInteger(options.authTimeoutMs) || options.authTimeoutMs <= 0)
+  ) {
     throw new TypeError("authTimeoutMs must be a positive safe integer");
   }
 }
@@ -604,10 +747,22 @@ export class MTPClient {
   readonly crypto = MTPClient.crypto;
   readonly codec = MTPClient.codec;
 
-  private constructor(options: NormalizedMTPClientOptions, client: RawBindings.WasmClient) {
+  readonly sessionManager: MTPSessionManager;
+  readonly encryptedDeviceSecretProvider: MTPEncryptedDeviceSecretProvider;
+
+  private constructor(
+    options: NormalizedMTPClientOptions,
+    client: RawBindings.WasmClient,
+  ) {
     this.#options = options;
     this.#credentials = deserializeCredentials(options.credentials);
     this.raw = { client, bindings };
+    this.encryptedDeviceSecretProvider =
+      options.encryptedDeviceSecretProvider ??
+      new InMemoryEncryptedDeviceSecretProvider();
+    this.sessionManager = new MTPSessionManager(
+      options.sessionStorage ?? new InMemorySessionStorage(),
+    );
   }
 
   static async create(options: MTPClientOptions): Promise<MTPClient> {
@@ -616,28 +771,31 @@ export class MTPClient {
 
     const normalizedOptions = {
       ...options,
-      hostPublicKey: options.hostPublicKey == null
-        ? undefined
-        : normalizeBytes(options.hostPublicKey, "hostPublicKey"),
+      hostPublicKey:
+        options.hostPublicKey == null
+          ? undefined
+          : normalizeBytes(options.hostPublicKey, "hostPublicKey"),
     };
 
     let sdk: MTPClient | undefined;
     const client = new WasmClient(
-      (state) => emit(normalizedOptions.logger, {
-        hint: "info",
-        type: "state",
-        data: ConnectionState[state] ?? state,
-      }),
+      (state) =>
+        emit(normalizedOptions.logger, {
+          hint: "info",
+          type: "state",
+          data: ConnectionState[state] ?? state,
+        }),
       (frame) => {
         if (sdk) {
           sdk.#handleFrame(frame);
         }
       },
-      (error) => emit(normalizedOptions.logger, {
-        hint: "error",
-        type: "Error",
-        error: String(error),
-      }),
+      (error) =>
+        emit(normalizedOptions.logger, {
+          hint: "error",
+          type: "Error",
+          error: String(error),
+        }),
     );
 
     sdk = new MTPClient(normalizedOptions, client);
@@ -648,10 +806,22 @@ export class MTPClient {
         keyringBytes: generateKeyringBytes(),
         hostPublicKey: normalizedOptions.hostPublicKey,
       };
-    } else if (!sdk.#credentials.hostPublicKey && normalizedOptions.hostPublicKey) {
-      sdk.#credentials = { ...sdk.#credentials, hostPublicKey: normalizedOptions.hostPublicKey };
-    } else if (!normalizedOptions.hostPublicKey && sdk.#credentials.hostPublicKey) {
-      sdk.#options = { ...sdk.#options, hostPublicKey: sdk.#credentials.hostPublicKey };
+    } else if (
+      !sdk.#credentials.hostPublicKey &&
+      normalizedOptions.hostPublicKey
+    ) {
+      sdk.#credentials = {
+        ...sdk.#credentials,
+        hostPublicKey: normalizedOptions.hostPublicKey,
+      };
+    } else if (
+      !normalizedOptions.hostPublicKey &&
+      sdk.#credentials.hostPublicKey
+    ) {
+      sdk.#options = {
+        ...sdk.#options,
+        hostPublicKey: sdk.#credentials.hostPublicKey,
+      };
     }
     return sdk;
   }
@@ -660,7 +830,9 @@ export class MTPClient {
     return WasmClient.is_supported();
   }
 
-  static async init(wasm?: MTPClientOptions["wasm"]): Promise<Awaited<ReturnType<typeof initWasm>>> {
+  static async init(
+    wasm?: MTPClientOptions["wasm"],
+  ): Promise<Awaited<ReturnType<typeof initWasm>>> {
     wasmInitPromise ??= initWasm(wasm);
     return await wasmInitPromise;
   }
@@ -729,10 +901,17 @@ export class MTPClient {
 
   async #connectAuthenticated() {
     if (!this.#options.hostPublicKey) {
-      throw new Error("MTPClient.connect requires hostPublicKey for authenticated connections");
+      throw new Error(
+        "MTPClient.connect requires hostPublicKey for authenticated connections",
+      );
     }
-    if (!this.#credentials?.keyringBytes?.length || this.#credentials.clientId == null) {
-      throw new Error("MTPClient.connect requires credentials with clientId and keyring");
+    if (
+      !this.#credentials?.keyringBytes?.length ||
+      this.#credentials.clientId == null
+    ) {
+      throw new Error(
+        "MTPClient.connect requires credentials with clientId and keyring",
+      );
     }
 
     const config = this.#connectionConfig();
@@ -810,7 +989,8 @@ export class MTPClient {
       this.raw.client.stop_protocol_pings();
       return;
     }
-    const intervalMs = typeof pings === "object" ? pings.intervalMs ?? 30_000 : 30_000;
+    const intervalMs =
+      typeof pings === "object" ? (pings.intervalMs ?? 30_000) : 30_000;
     this.raw.client.start_protocol_pings(intervalMs, clientId);
   }
 
@@ -819,7 +999,9 @@ export class MTPClient {
       return typeOrFrame;
     }
     if (typeof typeOrFrame !== "string" || !typeOrFrame) {
-      throw new TypeError("message type must be a non-empty string or Uint8Array frame");
+      throw new TypeError(
+        "message type must be a non-empty string or Uint8Array frame",
+      );
     }
     if (data == null || typeof data !== "object" || Array.isArray(data)) {
       throw new TypeError("message data must be an object");
@@ -828,15 +1010,37 @@ export class MTPClient {
   }
 
   async send(message: Uint8Array): Promise<void>;
-  async send(type: MTPCommunicationType, data: Record<string, unknown>, options?: MTPSendOptions): Promise<void>;
-  async send(typeOrFrame: Uint8Array | MTPCommunicationType, data?: Record<string, unknown>, options?: MTPSendOptions): Promise<void> {
+  async send(
+    type: MTPCommunicationType,
+    data: Record<string, unknown>,
+    options?: MTPSendOptions,
+  ): Promise<void>;
+  async send(
+    typeOrFrame: Uint8Array | MTPCommunicationType,
+    data?: Record<string, unknown>,
+    options?: MTPSendOptions,
+  ): Promise<void> {
     const message = this.#buildFrame(typeOrFrame, data, options);
 
     try {
       const frame = this.raw.bindings.parse_frame(message);
-      emit(this.#options.logger, isErrorType(frame.type)
-        ? { hint: "error", type: frame.type, error: errorMessage(frame), data: frame.data, direction: "send" }
-        : { hint: "info", type: frame.type, data: frame.data, direction: "send" });
+      emit(
+        this.#options.logger,
+        isErrorType(frame.type)
+          ? {
+              hint: "error",
+              type: frame.type,
+              error: errorMessage(frame),
+              data: frame.data,
+              direction: "send",
+            }
+          : {
+              hint: "info",
+              type: frame.type,
+              data: frame.data,
+              direction: "send",
+            },
+      );
     } catch (error) {
       emit(this.#options.logger, {
         hint: "error",
@@ -849,15 +1053,41 @@ export class MTPClient {
     await this.raw.client.send(message);
   }
 
-  async request(message: Uint8Array, data?: never, options?: MTPRequestOptions): Promise<ParsedFrame>;
-  async request(type: MTPCommunicationType, data: Record<string, unknown>, options?: MTPRequestOptions): Promise<ParsedFrame>;
-  async request(typeOrFrame: Uint8Array | MTPCommunicationType, data?: Record<string, unknown>, options: MTPRequestOptions = {}): Promise<ParsedFrame> {
+  async request(
+    message: Uint8Array,
+    data?: never,
+    options?: MTPRequestOptions,
+  ): Promise<ParsedFrame>;
+  async request(
+    type: MTPCommunicationType,
+    data: Record<string, unknown>,
+    options?: MTPRequestOptions,
+  ): Promise<ParsedFrame>;
+  async request(
+    typeOrFrame: Uint8Array | MTPCommunicationType,
+    data?: Record<string, unknown>,
+    options: MTPRequestOptions = {},
+  ): Promise<ParsedFrame> {
     const frame = this.#buildFrame(typeOrFrame, data, options);
     try {
       const parsed = this.raw.bindings.parse_frame(frame);
-      emit(this.#options.logger, isErrorType(parsed.type)
-        ? { hint: "error", type: parsed.type, error: errorMessage(parsed), data: parsed.data, direction: "send" }
-        : { hint: "info", type: parsed.type, data: parsed.data, direction: "send" });
+      emit(
+        this.#options.logger,
+        isErrorType(parsed.type)
+          ? {
+              hint: "error",
+              type: parsed.type,
+              error: errorMessage(parsed),
+              data: parsed.data,
+              direction: "send",
+            }
+          : {
+              hint: "info",
+              type: parsed.type,
+              data: parsed.data,
+              direction: "send",
+            },
+      );
     } catch (error) {
       emit(this.#options.logger, {
         hint: "error",
@@ -869,7 +1099,10 @@ export class MTPClient {
     return await this.raw.client.request(frame, options.responseType ?? null);
   }
 
-  subscribe(type: MTPCommunicationType, handler: (message: ParsedFrame) => void): Unsubscribe {
+  subscribe(
+    type: MTPCommunicationType,
+    handler: (message: ParsedFrame) => void,
+  ): Unsubscribe {
     if (typeof type !== "string" || !type) {
       throw new TypeError("subscription type must be a non-empty string");
     }
@@ -899,6 +1132,420 @@ export class MTPClient {
     }
   }
 
+  #getKemPublicKey(): Uint8Array {
+    if (!this.#credentials?.keyringBytes?.length) {
+      throw new Error("No keyring available");
+    }
+    const keys = keyringToKeys(this.#credentials.keyringBytes);
+    return keys.kemPublicKey;
+  }
+
+  #getKemSecretKey(): Uint8Array {
+    if (!this.#credentials?.keyringBytes?.length) {
+      throw new Error("No keyring available");
+    }
+    const keys = keyringToKeys(this.#credentials.keyringBytes);
+    return keys.kemSecretKey;
+  }
+
+  async sendEncrypted(
+    type: number | string,
+    data: Record<string, unknown>,
+    options: MTPSendOptions & {
+      recipientClientId: bigint | number | string;
+      recipientPublicKey: string | MTPBytesInput;
+      senderUserId?: string;
+      recipientUserId?: string;
+      recipientDeviceId?: string;
+    },
+  ): Promise<void> {
+    const ownId = this.#credentials?.clientId;
+    if (ownId == null) {
+      throw new Error("Client not registered");
+    }
+    if (options.recipientClientId == null) {
+      throw new Error("recipientClientId is required");
+    }
+    const recipientClientId = BigInt(options.recipientClientId);
+
+    const plaintext = this.raw.bindings.build_frame(type as string, data, {
+      sender: ownId,
+      receiver: recipientClientId,
+      ...options,
+    });
+
+    let session = await this.sessionManager.getSession(
+      ownId,
+      recipientClientId,
+    );
+    let kemCiphertext: Uint8Array | undefined;
+
+    if (!session) {
+      if (options.recipientPublicKey == null) {
+        throw new Error("recipientPublicKey is required for new encrypted sessions");
+      }
+      const recipientPublicKey = publicKeyBundleToKeys(
+        options.recipientPublicKey,
+      );
+      const enc = bindings.wasm_kem_encapsulate(
+        recipientPublicKey.kemPublicKey,
+      );
+      kemCiphertext = enc.ciphertext;
+      const conversationId = getConversationId(ownId, recipientClientId);
+
+      session = await this.sessionManager.createSession({
+        ownClientId: ownId,
+        peerClientId: recipientClientId,
+        peerPublicKey: recipientPublicKey.kemPublicKey,
+        sharedSecret: enc.shared_secret,
+        role: "initiator",
+        transcriptContext: {
+          senderUserId: (options as { senderUserId?: string }).senderUserId,
+          senderClientId: ownId,
+          recipientUserId: options.recipientUserId,
+          recipientClientId,
+          recipientPublicKey: recipientPublicKey.kemPublicKey,
+          kemCiphertext,
+          conversationId,
+        },
+      });
+      enc.shared_secret.fill(0);
+    }
+
+    const { payload, session: newSession } = await encryptPayload({
+      plaintext,
+      session,
+      kemCiphertext,
+    });
+
+    await this.sessionManager.saveSession(newSession);
+
+    const messageId = String(Date.now());
+    const createdAt = Date.now();
+    const senderUserId = (options as { senderUserId?: string }).senderUserId;
+    const frame = this.raw.bindings.build_frame(
+      "EncryptedMessage",
+      {
+        MessageId: messageId,
+        ConversationId: session.conversationId,
+        SenderClientId: ownId,
+        RecipientClientId: recipientClientId,
+        SenderUserId: senderUserId,
+        RecipientUserId: options.recipientUserId,
+        CreatedAt: createdAt,
+        EncryptionVersion: 1,
+        EncryptedPayload: payload,
+      },
+      {
+        sender: ownId,
+        receiver: recipientClientId,
+      },
+    );
+    await this.raw.client.send(frame);
+
+    if (senderUserId && options.recipientUserId) {
+      const ownKemPublicKey = this.#getKemPublicKey();
+      const archiveEnc = bindings.wasm_kem_encapsulate(ownKemPublicKey);
+      const archiveSession = await this.sessionManager.createSession({
+        ownClientId: ownId,
+        peerClientId: ownId,
+        peerPublicKey: ownKemPublicKey,
+        sharedSecret: archiveEnc.shared_secret,
+        role: "initiator",
+        transcriptContext: {
+          senderUserId,
+          senderClientId: ownId,
+          recipientUserId: options.recipientUserId,
+          recipientClientId: ownId,
+          recipientPublicKey: ownKemPublicKey,
+          kemCiphertext: archiveEnc.ciphertext,
+          conversationId: `archive:${session.conversationId}:${messageId}`,
+        },
+      });
+      archiveEnc.shared_secret.fill(0);
+      const { payload: archivePayload } = await encryptPayload({
+        plaintext,
+        session: archiveSession,
+        kemCiphertext: archiveEnc.ciphertext,
+      });
+      const archiveFrame = this.raw.bindings.build_frame(
+        "EncryptedMessage",
+        {
+          MessageId: `${messageId}:sender`,
+          ConversationId: session.conversationId,
+          SenderClientId: ownId,
+          RecipientClientId: ownId,
+          SenderUserId: senderUserId,
+          RecipientUserId: options.recipientUserId,
+          CreatedAt: createdAt,
+          EncryptionVersion: 1,
+          EncryptedPayload: archivePayload,
+        },
+        {
+          sender: ownId,
+          receiver: ownId,
+        },
+      );
+      await this.raw.client.send(archiveFrame);
+    }
+  }
+
+  subscribeEncrypted(
+    type: number | string,
+    handler: (data: unknown, meta: ParsedFrame) => void | Promise<void>,
+  ): Unsubscribe;
+  subscribeEncrypted(
+    handler: (data: {
+      type: string;
+      data: Record<string, unknown>;
+      sender?: bigint;
+      receiver?: bigint;
+    }) => void | Promise<void>,
+  ): Unsubscribe;
+  subscribeEncrypted(
+    typeOrHandler:
+      | number
+      | string
+      | ((data: {
+          type: string;
+          data: Record<string, unknown>;
+          sender?: bigint;
+          receiver?: bigint;
+        }) => void | Promise<void>),
+    maybeHandler?: (data: unknown, meta: ParsedFrame) => void | Promise<void>,
+  ): Unsubscribe {
+    const expectedInnerType =
+      typeof typeOrHandler === "function" ? null : String(typeOrHandler);
+    const legacyHandler =
+      typeof typeOrHandler === "function" ? typeOrHandler : null;
+    const sub = this.raw.client.subscribe(
+      "EncryptedMessage",
+      async (frame: ParsedFrame) => {
+        const raw =
+          frame.data?.["encryptedPayload"] ??
+          frame.data?.["EncryptedPayload"] ??
+          frame.data?.["encrypted_payload"];
+        if (!raw) return;
+
+        let payloadBytes: Uint8Array;
+        if (raw instanceof Uint8Array) {
+          payloadBytes = raw;
+        } else if (Array.isArray(raw)) {
+          payloadBytes = new Uint8Array(raw);
+        } else {
+          return;
+        }
+
+        try {
+          const parsed = parseEncryptedMessage(payloadBytes);
+
+          const ownId = this.#credentials?.clientId;
+          if (ownId == null) return;
+          if (parsed.recipientClientId !== ownId) return;
+
+          const peerClientId = parsed.senderClientId;
+          let session = await this.sessionManager.getSession(
+            ownId,
+            peerClientId,
+          );
+
+          if (!session) {
+            if (!(parsed.flags & FLAG_INIT) || !parsed.kemCiphertext) {
+              return;
+            }
+
+            const ownKemSecret = this.#getKemSecretKey();
+            const sharedSecret = bindings.wasm_kem_decapsulate(
+              ownKemSecret,
+              parsed.kemCiphertext,
+            );
+
+            session = await this.sessionManager.createSession({
+              ownClientId: ownId,
+              peerClientId,
+              peerPublicKey: new Uint8Array(0),
+              sharedSecret,
+              role: "receiver",
+              transcriptContext: {
+                senderUserId: String(
+                  frame.data?.["SenderUserId"] ??
+                    frame.data?.["senderUserId"] ??
+                    "",
+                ),
+                senderClientId: peerClientId,
+                recipientUserId: String(
+                  frame.data?.["RecipientUserId"] ??
+                    frame.data?.["recipientUserId"] ??
+                    "",
+                ),
+                recipientClientId: ownId,
+                recipientPublicKey: this.#getKemPublicKey(),
+                kemCiphertext: parsed.kemCiphertext,
+                conversationId: getConversationId(peerClientId, ownId),
+              },
+            });
+            sharedSecret.fill(0);
+          }
+
+          const { plaintext, session: newSession } = await decryptPayload({
+            payload: payloadBytes,
+            session,
+            expectedRecipientClientId: ownId,
+          });
+
+          await this.sessionManager.saveSession(newSession);
+
+          let parsedFrame: ParsedFrame;
+          try {
+            parsedFrame = this.raw.bindings.parse_frame(plaintext);
+          } catch {
+            return;
+          }
+
+          if (expectedInnerType && parsedFrame.type !== expectedInnerType) {
+            return;
+          }
+          if (legacyHandler) {
+            await legacyHandler({
+              type: parsedFrame.type,
+              data: parsedFrame.data,
+              sender: parsedFrame.sender,
+              receiver: parsedFrame.receiver,
+            });
+          } else if (maybeHandler) {
+            await maybeHandler(parsedFrame.data, parsedFrame);
+          }
+        } catch (e) {
+          emit(this.#options.logger, {
+            hint: "error",
+            type: "E2EE",
+            error: String(e),
+            direction: "recv",
+          });
+        }
+      },
+    );
+
+    return () => this.raw.client.unsubscribe(sub);
+  }
+
+  async decryptEncryptedRecord(
+    frameData: Record<string, unknown>,
+  ): Promise<ParsedFrame> {
+    const raw =
+      frameData["encryptedPayload"] ??
+      frameData["EncryptedPayload"] ??
+      frameData["encrypted_payload"];
+    if (!raw) throw new Error("EncryptedPayload is required");
+
+    const payloadBytes =
+      raw instanceof Uint8Array
+        ? raw
+        : Array.isArray(raw)
+          ? new Uint8Array(raw)
+          : bytesFrom(raw as MTPBytesInput, "EncryptedPayload");
+
+    const parsed = parseEncryptedMessage(payloadBytes);
+    const ownId = this.#credentials?.clientId;
+    if (ownId == null) throw new Error("Client not registered");
+    if (parsed.recipientClientId !== ownId) {
+      throw new Error("Encrypted message recipient mismatch");
+    }
+
+    const peerClientId = parsed.senderClientId;
+    let session = await this.sessionManager.getSession(ownId, peerClientId);
+
+    const isSenderArchive =
+      parsed.senderClientId === ownId && parsed.recipientClientId === ownId;
+
+    if (isSenderArchive && (parsed.flags & FLAG_INIT) && parsed.kemCiphertext) {
+      const ownKemSecret = this.#getKemSecretKey();
+      const sharedSecret = bindings.wasm_kem_decapsulate(
+        ownKemSecret,
+        parsed.kemCiphertext,
+      );
+      const archiveMessageId = String(
+        frameData["MessageId"] ?? frameData["messageId"] ?? "",
+      ).replace(/:sender$/, "");
+      session = await this.sessionManager.createSession({
+        ownClientId: ownId,
+        peerClientId: ownId,
+        peerPublicKey: this.#getKemPublicKey(),
+        sharedSecret,
+        role: "receiver",
+        transcriptContext: {
+          senderUserId: String(
+            frameData["SenderUserId"] ?? frameData["senderUserId"] ?? "",
+          ),
+          senderClientId: ownId,
+          recipientUserId: String(
+            frameData["RecipientUserId"] ?? frameData["recipientUserId"] ?? "",
+          ),
+          recipientClientId: ownId,
+          recipientPublicKey: this.#getKemPublicKey(),
+          kemCiphertext: parsed.kemCiphertext,
+          conversationId: `archive:${String(frameData["ConversationId"] ?? frameData["conversationId"] ?? "")}:${archiveMessageId}`,
+        },
+      });
+      sharedSecret.fill(0);
+    } else if (!session) {
+      if (!(parsed.flags & FLAG_INIT) || !parsed.kemCiphertext) {
+        throw new Error("No session for non-init encrypted message");
+      }
+      const ownKemSecret = this.#getKemSecretKey();
+      const sharedSecret = bindings.wasm_kem_decapsulate(
+        ownKemSecret,
+        parsed.kemCiphertext,
+      );
+
+      session = await this.sessionManager.createSession({
+        ownClientId: ownId,
+        peerClientId,
+        peerPublicKey: new Uint8Array(0),
+        sharedSecret,
+        role: "receiver",
+        transcriptContext: {
+          senderUserId: String(
+            frameData["SenderUserId"] ?? frameData["senderUserId"] ?? "",
+          ),
+          senderClientId: peerClientId,
+          recipientUserId: String(
+            frameData["RecipientUserId"] ?? frameData["recipientUserId"] ?? "",
+          ),
+          recipientClientId: ownId,
+          recipientPublicKey: this.#getKemPublicKey(),
+          kemCiphertext: parsed.kemCiphertext,
+          conversationId: getConversationId(peerClientId, ownId),
+        },
+      });
+      sharedSecret.fill(0);
+    }
+
+    const { plaintext, session: newSession } = await decryptPayload({
+      payload: payloadBytes,
+      session,
+      expectedRecipientClientId: ownId,
+    });
+    if (!isSenderArchive) {
+      await this.sessionManager.saveSession(newSession);
+    }
+    return this.raw.bindings.parse_frame(plaintext);
+  }
+
+  async setEncryptedDeviceSecret(
+    record: EncryptedDeviceSecretRecord,
+  ): Promise<void> {
+    await this.encryptedDeviceSecretProvider.setEncryptedDeviceSecret(record);
+  }
+
+  async getEncryptedDeviceSecret(query: {
+    userId: string;
+    deviceId?: string;
+    secretId?: string;
+  }): Promise<EncryptedDeviceSecretRecord | null> {
+    return this.encryptedDeviceSecretProvider.getEncryptedDeviceSecret(query);
+  }
+
   disconnect(): void {
     this.raw.client.stop_protocol_pings();
     this.raw.client.disconnect();
@@ -906,3 +1553,37 @@ export class MTPClient {
 }
 
 export { ConnectionState, bindings as raw };
+
+// E2EE exports
+export type {
+  MTPSessionState,
+  MTPSessionStorage,
+  MTPSessionTranscriptContext,
+} from "./session";
+export {
+  MTPSessionManager,
+  InMemorySessionStorage,
+  getConversationId,
+  deriveSessionKeys,
+  buildSessionTranscript,
+} from "./session.js";
+export { MTPRatchet } from "./ratchet.js";
+export type { RatchetStep } from "./ratchet.js";
+export {
+  serializeEncryptedMessage,
+  parseEncryptedMessage,
+  encryptPayload,
+  decryptPayload,
+  MTP_E2EE_VERSION,
+  FLAG_INIT,
+  MAX_RATCHET_SKIP,
+} from "./encrypted-message.js";
+export type {
+  EncryptedMessageHeader,
+  SerializedEncryptedMessage,
+} from "./encrypted-message";
+export type {
+  EncryptedDeviceSecretRecord,
+  MTPEncryptedDeviceSecretProvider,
+} from "./encrypted-device-secret";
+export { InMemoryEncryptedDeviceSecretProvider } from "./encrypted-device-secret.js";

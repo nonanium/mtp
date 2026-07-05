@@ -12,17 +12,17 @@
     "ignoreDeprecations": "6.0",
     "paths": {
       "mtp/raw": ["src/raw/index.ts"],
-      "mtp/type-map": ["src/type-map/index.ts"]
+      "mtp/type-map": ["src/type-map/index.ts"],
     },
     "strict": false,
     "skipLibCheck": true,
     "isolatedModules": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
   },
   "include": [
     "src/raw/**/*.ts",
     "src/sdk/**/*.ts",
     "src/type-map/**/*.ts",
-    "src/vite/**/*.ts"
-  ]
+    "src/vite/**/*.ts",
+  ],
 }
