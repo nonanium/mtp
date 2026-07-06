@@ -142,7 +142,7 @@ export const crypto: MTPCrypto = {
   decryptText: async (key, ciphertext) => {
     const cipher = new bindings.WasmChaCha20Poly1305(key);
     try {
-      const decoded = bytesFromString(ciphertext, "ciphertext");
+      const decoded = base64ToBytes(ciphertext);
       const plaintext = cipher.decrypt(decoded, new Uint8Array(0));
       return utf8Decode(plaintext);
     } finally {
