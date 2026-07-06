@@ -168,7 +168,7 @@ impl MTPClient {
      */
     pub async fn connect(config: ClientConfig) -> Result<MTPConnection, CommunicationError> {
         let (sender, receiver) =
-            mtp_transport::connect(&config.url, config.server_cert(), Policy::default()).await?;
+            mtp_transport::connect(&config.url, config.server_cert(), config.policy).await?;
 
         let version_str = format!("{}", PROTOCOL_VERSION);
         let mut ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)

@@ -5,6 +5,16 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use wtransport::{Connection as WTConnection, Endpoint, ServerConfig};
 
+fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
+    let key_pair = rcgen::KeyPair::generate().unwrap();
+    let params =
+        rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
+    let cert = params.self_signed(&key_pair).unwrap();
+    let cert_pem = cert.pem();
+    let key_pem = key_pair.serialize_pem();
+    (cert_pem.into_bytes(), key_pem.into_bytes())
+}
+
 pub struct Host {
     incoming: tokio::sync::mpsc::Receiver<(Sender, Receiver)>,
     local_addr: std::net::SocketAddr,
@@ -46,7 +56,16 @@ pub async fn host(
 ) -> Result<Host, CommunicationError> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let server_config = configure_server(ip, port, cert_pem, key_pem, &policy).await?;
+    // When MTP_INSECURE is set, generate a self-signed cert so the host can
+    // run without externally-provided TLS credentials.
+    let is_insecure = std::env::var("MTP_INSECURE").is_ok();
+    let (use_cert_pem, use_key_pem) = if is_insecure {
+        generate_self_signed_cert()
+    } else {
+        (cert_pem, key_pem)
+    };
+
+    let server_config = configure_server(ip, port, use_cert_pem, use_key_pem, &policy).await?;
     let endpoint = Endpoint::server(server_config)
         .map_err(|e| CommunicationError::Other(format!("Endpoint creation failed: {}", e)))?;
 
