@@ -14,6 +14,7 @@ pub use MTPConnection as Connection;
 pub use MTPHost as Host;
 pub use mtp_transport::Policy;
 pub use mtp_transport::Receiver;
+#[cfg(feature = "streaming")]
 pub use mtp_transport::SendMode;
 pub use mtp_transport::Sender;
 
@@ -55,6 +56,7 @@ pub struct HostConfig {
     pub tls_key: Vec<u8>,
 
     pub policy: Policy,
+    pub send_pongs: bool,
 
     #[cfg(feature = "crypto")]
     pub authentication_policy: AuthenticationPolicy,
@@ -76,6 +78,7 @@ impl HostConfig {
             tls_fullchain,
             tls_key,
             policy: Policy::default(),
+            send_pongs: true,
             #[cfg(feature = "crypto")]
             authentication_policy: AuthenticationPolicy::Unauthenticated,
             #[cfg(feature = "crypto")]
@@ -98,6 +101,11 @@ impl HostConfig {
 
     pub fn with_policy(mut self, policy: Policy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    pub fn with_pongs(mut self, send_pongs: bool) -> Self {
+        self.send_pongs = send_pongs;
         self
     }
 
@@ -186,7 +194,6 @@ pub struct MTPConnection {
 pub struct MTPHost {
     transport: mtp_transport::Host,
     registry: Registry,
-    #[cfg(feature = "crypto")]
     config: HostConfig,
 }
 
@@ -206,7 +213,6 @@ impl MTPHost {
         Ok(Self {
             transport,
             registry,
-            #[cfg(feature = "crypto")]
             config,
         })
     }
@@ -228,7 +234,7 @@ impl MTPHost {
         match self.config.authentication_policy {
             AuthenticationPolicy::ForceAuthentication => {
                 let timeout = self.config.auth_timeout;
-                return match tokio::time::timeout(
+                let connection = match tokio::time::timeout(
                     timeout,
                     self.accept_authenticated(sender, receiver),
                 )
@@ -237,9 +243,11 @@ impl MTPHost {
                     Ok(result) => result,
                     Err(_) => Err(AcceptError::AuthenticationTimedOut),
                 };
+                return Ok(self.configure_pongs(connection?));
             }
             AuthenticationPolicy::AllowAuthentication => {
-                return self.accept_allow_auth(sender, receiver).await;
+                let connection = self.accept_allow_auth(sender, receiver).await?;
+                return Ok(self.configure_pongs(connection));
             }
             AuthenticationPolicy::Unauthenticated => {
                 let first_msg = match receiver.receive().await {
@@ -265,12 +273,13 @@ impl MTPHost {
                     Some(v) => v,
                     None => return Err(AcceptError::UnsupportedVersion(client_version)),
                 };
-                let codec = VersionedCodec::new(self.registry.clone());
+                let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
+                    .expect("negotiated version must be registered");
                 let description = match first_msg.get_data(DataType::Description) {
                     DataValue::Str(s) => Some(s.clone()),
                     _ => None,
                 };
-                Ok(Some(MTPConnection {
+                Ok(self.configure_pongs(Some(MTPConnection {
                     version: negotiated,
                     codec,
                     sender,
@@ -282,7 +291,7 @@ impl MTPHost {
                     client_id: rand::random(),
                     #[cfg(feature = "crypto")]
                     client_public_key: None,
-                }))
+                })))
             }
         }
 
@@ -304,18 +313,19 @@ impl MTPHost {
                 Some(v) => v,
                 None => return Err(AcceptError::UnsupportedVersion(client_version)),
             };
-            let codec = VersionedCodec::new(self.registry.clone());
+            let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
+                .expect("negotiated version must be registered");
             let description = match first_msg.get_data(DataType::Description) {
                 DataValue::Str(s) => Some(s.clone()),
                 _ => None,
             };
-            return Ok(Some(MTPConnection {
+            return Ok(self.configure_pongs(Some(MTPConnection {
                 version: negotiated,
                 codec,
                 sender,
                 receiver,
                 description,
-            }));
+            })));
         }
     }
 
@@ -325,6 +335,19 @@ impl MTPHost {
 
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    fn configure_pongs(&self, connection: Option<MTPConnection>) -> Option<MTPConnection> {
+        if let Some(connection) = connection {
+            if self.config.send_pongs {
+                connection
+                    .receiver
+                    .respond_to_pings(connection.sender.clone());
+            }
+            Some(connection)
+        } else {
+            None
+        }
     }
 }
 
@@ -480,6 +503,13 @@ impl MTPHost {
         };
 
         let tm = mtp_codec::TypeMap::latest();
+        let negotiated = self
+            .registry
+            .negotiate(std::slice::from_ref(&client_version))
+            .ok_or_else(|| {
+                sender.close();
+                AcceptError::UnsupportedVersion(client_version.clone())
+            })?;
         let pq_enabled = !self
             .config
             .host_keyring
@@ -636,18 +666,8 @@ impl MTPHost {
             return Err(AcceptError::Send(e));
         }
 
-        // ===== Version negotiation =====
-        let negotiated = match self
-            .registry
-            .negotiate(std::slice::from_ref(&client_version))
-        {
-            Some(v) => v,
-            None => {
-                sender.close();
-                return Err(AcceptError::UnsupportedVersion(client_version));
-            }
-        };
-        let codec = VersionedCodec::new(self.registry.clone());
+        let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
+            .expect("negotiated version must be registered");
 
         Ok(Some(MTPConnection {
             version: negotiated,
@@ -761,7 +781,8 @@ impl MTPHost {
                 Some(v) => v,
                 None => return Err(AcceptError::UnsupportedVersion(client_version)),
             };
-            let codec = VersionedCodec::new(self.registry.clone());
+            let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
+                .expect("negotiated version must be registered");
             return Ok(Some(MTPConnection {
                 version: negotiated,
                 codec,
@@ -841,5 +862,12 @@ mod tests {
     fn auth_state_unauthenticated_is_not_authenticated() {
         assert_ne!(AuthState::Unauthenticated, AuthState::Authenticated);
         assert_ne!(AuthState::Pending, AuthState::Authenticated);
+    }
+
+    #[test]
+    fn host_config_pongs_default_to_enabled() {
+        let config = HostConfig::new("127.0.0.1".parse().unwrap(), 4433, Vec::new(), Vec::new());
+        assert!(config.send_pongs);
+        assert!(!config.with_pongs(false).send_pongs);
     }
 }

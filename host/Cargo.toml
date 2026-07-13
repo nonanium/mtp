@@ -13,3 +13,6 @@ tokio = { version = "1", features = ["time"] }
 
 [features]
 crypto = ["dep:mtp-crypto", "mtp-codec/crypto"]
+# Stream mode is optional at the facade boundary. The underlying transport
+# remains framed/stream based so the default API stays backwards compatible.
+streaming = ["mtp-transport/streaming"]

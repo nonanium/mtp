@@ -149,6 +149,39 @@ If hashes are omitted, the browser uses its normal TLS root store.
 `maxMessageSize` caps inbound and outbound MTP frames before buffering/sending.
 `authTimeoutMs` bounds connect/login/register promises at the SDK layer.
 
+## Streams
+
+The browser client uses one WebTransport session per `MTPClient` instance.
+`send()`, `request()`, and `subscribe()` all operate over that session; the SDK
+does not expose browser stream objects directly.
+
+Use the normal message APIs to send and receive over that session:
+
+```typescript
+const client = await MTPClient.create({ url, hostPublicKey });
+await client.connect();
+
+const unsubscribe = client.subscribe("SomeType", (message) => {
+  console.log(message.data);
+});
+
+await client.send("SomeType", { value: "hello" });
+unsubscribe();
+```
+
+Internally, each outbound MTP frame is written to a new WebTransport
+unidirectional stream as a four-byte big-endian length followed by the frame,
+then that stream is closed. Incoming frames are read from the session's
+incoming unidirectional streams. The reader accepts both one-frame streams and
+native peers that place several frames on a persistent stream, so browser and
+native clients interoperate without stream configuration.
+
+The SDK deliberately owns stream lifetime and framing. Do not create browser
+streams for MTP frames yourself through the SDK. For direct generated bindings,
+use `client.raw.client` or import `WasmClient` from `mtp/raw`; a `WasmClient`
+still owns one active WebTransport session, so create another instance for an
+independent connection.
+
 ## Sending, Requests, Subscriptions, And Pings
 
 `send` accepts either a typed message or a prebuilt raw frame:

@@ -7,6 +7,9 @@ pub mod logging;
 pub mod subscription;
 pub mod transport;
 
+pub use client::WasmClient;
+pub use config::{ConnectionConfig, WasmClientConfig};
+
 #[cfg(not(test))]
 use wasm_bindgen::prelude::*;
 

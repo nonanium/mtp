@@ -27,3 +27,9 @@ required-features = ["host"]
 default = []
 # Enables hosting a MTP server
 host = []
+# Documents and exposes the framed uni-directional stream transport used by
+# the host and client facades. The transport is stream based by design, so
+# keeping this as a marker feature lets facade crates opt into their
+# stream-specific convenience exports without making the core transport
+# unusable for existing consumers.
+streaming = []

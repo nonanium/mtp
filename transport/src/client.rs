@@ -2,10 +2,9 @@ use std::sync::Arc;
 
 use mtp_common::CommunicationError;
 use rustls::{
-    ClientConfig as RustlsClientConfig, RootCertStore,
+    ClientConfig as RustlsClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     pki_types::{ServerName, UnixTime, pem::PemObject},
-    DigitallySignedStruct, SignatureScheme,
 };
 use wtransport::{ClientConfig, Endpoint};
 

@@ -18,10 +18,14 @@ mtp = { path = "/path/to/mtp", features = ["client", "crypto"] }
 
 ```rust
 use mtp::client::{ClientConfig, ClientTlsConfig};
+use std::time::Duration;
 
 let config = ClientConfig::new("https://host.example.com:4433")
     .with_tls(ClientTlsConfig::SystemRoots)
-    .with_client_id(0);
+    .with_client_id(0)
+    .with_ping_interval(Duration::from_secs(5))
+    .with_max_missed_pings(3)
+    .with_ping_timestamp(true);
 ```
 
 | Field         | Type               | Description                                         |
@@ -30,6 +34,9 @@ let config = ClientConfig::new("https://host.example.com:4433")
 | `tls`         | `ClientTlsConfig`  | `SystemRoots` or `PinnedPem(pem_bytes)`              |
 | `client_id`   | `u64`              | Client identifier (ignored during `auth_register`)  |
 | `description` | `Option<String>`   | Optional label sent during handshake (e.g. `"phone"`) |
+| `ping_interval` | `Duration`       | Interval between Ping frames; zero disables pings |
+| `max_missed_pings` | `usize`        | Unanswered Ping frames allowed before the connection closes |
+| `ping_timestamp` | `bool`          | Adds a `Timestamp` entry to each Ping frame |
 | `auth_timeout` | `Duration` (crypto) | Authentication handshake timeout (default 30s)     |
 
 ### TLS Certificate Handling
@@ -73,6 +80,46 @@ pub struct MTPConnection {
 - `sender` / `receiver` -- for message I/O
 - `description` -- the label sent during handshake (set via `ClientConfig::with_description`)
 - `client_id` -- the confirmed/assigned client identifier (crypto only)
+
+When `ping_interval` is non-zero, MTP sends Ping frames in the background and
+consumes their Pong responses before application message handling. `get_ping()`
+returns the round-trip duration of the latest matched Pong, or `None` until a
+Pong arrives. A connection closes when the configured unanswered Ping limit is
+reached.
+
+### Ping-Pong
+
+Ping/Pong is part of the protocol, not just a transport keepalive. Each Ping
+frame is matched against a Pong with the same frame id, and the client uses the
+response to update `get_ping()`. If the host does not answer within the
+configured limit, the connection closes.
+
+Enable it in `ClientConfig`, then inspect the latest round-trip time on the
+connection. Pings start after the connection has been established; `None` is
+normal until the first matching Pong arrives.
+
+```rust
+use mtp::client::{ClientConfig, MTPClient};
+use std::time::Duration;
+
+let config = ClientConfig::new("https://host.example.com:4433")
+    .with_client_id(42)
+    .with_ping_interval(Duration::from_secs(5))
+    .with_max_missed_pings(3)
+    .with_ping_timestamp(true);
+
+let conn = MTPClient::connect(config).await?;
+
+if let Some(round_trip) = conn.get_ping() {
+    println!("latest MTP round trip: {round_trip:?}");
+}
+```
+
+The client consumes the Pong frames used by this loop, so they are not returned
+by `conn.receiver.receive()`. Set `ping_interval` to `Duration::ZERO` (the
+default) to disable protocol pings. `max_missed_pings` is the number of
+outstanding Ping frames allowed before the client closes the connection; use a
+host with automatic Pong responses, or provide an equivalent responder.
 
 ### Unauthenticated Connect
 

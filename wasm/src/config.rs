@@ -9,6 +9,13 @@ pub struct ConnectionConfig {
     pub(crate) description: Option<String>,
 }
 
+/// Newer API name for the browser connection configuration.
+///
+/// `ConnectionConfig` remains the concrete wasm-bindgen class for backwards
+/// compatibility with the existing raw JavaScript bindings. The alias keeps
+/// Rust consumers aligned with the native/WASM naming used by the public API.
+pub type WasmClientConfig = ConnectionConfig;
+
 #[wasm_bindgen]
 impl ConnectionConfig {
     #[wasm_bindgen(constructor)]

@@ -1,12 +1,15 @@
 use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Version};
 use mtp_common::CommunicationError;
-#[cfg(feature = "crypto")]
-use tokio::time::Duration;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{Duration, Instant};
 
 pub use MTPClient as Client;
 pub use MTPConnection as Connection;
 pub use mtp_transport::Policy;
 pub use mtp_transport::Receiver;
+#[cfg(feature = "streaming")]
 pub use mtp_transport::SendMode;
 pub use mtp_transport::Sender;
 
@@ -30,6 +33,9 @@ pub struct ClientConfig {
     pub client_id: u64,
     pub description: Option<String>,
     pub policy: Policy,
+    pub ping_interval: Duration,
+    pub max_missed_pings: usize,
+    pub ping_timestamp: bool,
     #[cfg(feature = "crypto")]
     pub auth_timeout: Duration,
 }
@@ -48,6 +54,9 @@ impl ClientConfig {
             client_id: 0,
             description: None,
             policy: Policy::default(),
+            ping_interval: Duration::ZERO,
+            max_missed_pings: 3,
+            ping_timestamp: true,
             #[cfg(feature = "crypto")]
             auth_timeout: Duration::from_secs(30),
         }
@@ -77,6 +86,21 @@ impl ClientConfig {
         self
     }
 
+    pub fn with_ping_interval(mut self, interval: Duration) -> Self {
+        self.ping_interval = interval;
+        self
+    }
+
+    pub fn with_max_missed_pings(mut self, max_missed_pings: usize) -> Self {
+        self.max_missed_pings = max_missed_pings;
+        self
+    }
+
+    pub fn with_ping_timestamp(mut self, ping_timestamp: bool) -> Self {
+        self.ping_timestamp = ping_timestamp;
+        self
+    }
+
     #[cfg(feature = "crypto")]
     pub fn with_auth_timeout(mut self, timeout: Duration) -> Self {
         self.auth_timeout = timeout;
@@ -97,13 +121,36 @@ pub struct MTPConnection {
     pub sender: Sender,
     pub receiver: Receiver,
     pub description: Option<String>,
+    ping: Option<PingSession>,
     #[cfg(feature = "crypto")]
     pub auth_state: AuthState,
     #[cfg(feature = "crypto")]
     pub client_id: u64,
 }
 
+struct PingSession {
+    last_ping: Arc<Mutex<Option<Duration>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl PingSession {
+    fn get_ping(&self) -> Option<Duration> {
+        self.last_ping.try_lock().ok().and_then(|ping| *ping)
+    }
+}
+
+impl Drop for PingSession {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 impl MTPConnection {
+    /* Returns the round-trip time for the latest Ping/Pong exchange. */
+    pub fn get_ping(&self) -> Option<Duration> {
+        self.ping.as_ref().and_then(PingSession::get_ping)
+    }
+
     /*
      * Send a request frame and wait for the response with the same frame id.
      * Any expected response type is validated after the id match. Frames with
@@ -148,6 +195,97 @@ impl MTPConnection {
     }
 }
 
+fn start_ping_session(
+    config: &ClientConfig,
+    sender: Sender,
+    receiver: &Receiver,
+) -> Option<PingSession> {
+    if config.ping_interval.is_zero() {
+        return None;
+    }
+
+    let (pong_tx, mut pong_rx) = mpsc::unbounded_channel();
+    receiver.observe_pongs(pong_tx);
+    let last_ping = Arc::new(Mutex::new(None));
+    let ping_state = last_ping.clone();
+    let interval = config.ping_interval;
+    let max_missed_pings = config.max_missed_pings;
+    let ping_timestamp = config.ping_timestamp;
+    let mut close_rx = receiver.handle().subscribe_close();
+
+    let task = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await;
+        let mut pending = HashMap::new();
+
+        loop {
+            tokio::select! {
+                _ = close_rx.changed() => {
+                    if close_rx.borrow().is_some() {
+                        break;
+                    }
+                }
+                _ = ticker.tick() => {
+                    if max_missed_pings > 0 && !pending.is_empty() && pending.len() >= max_missed_pings {
+                        sender.close();
+                        break;
+                    }
+
+                    let mut ping = CommunicationValue::new(mtp_codec::CommunicationType::Ping);
+                    if ping_timestamp {
+                        let sent_at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis();
+                        ping = ping.add_typed_default(
+                            DataType::Timestamp,
+                            DataValue::UnsignedNumber(sent_at),
+                        );
+                    }
+                    let id = ping.get_id();
+                    if sender.send(&ping).await.is_err() {
+                        sender.close();
+                        break;
+                    }
+                    pending.insert(id, Instant::now());
+                }
+                pong = pong_rx.recv() => match pong {
+                    Some(pong) => {
+                        if let Some(sent_at) = pending.remove(&pong.get_id()) {
+                            let mut last_ping = ping_state.lock().await;
+                            *last_ping = Some(sent_at.elapsed());
+                        }
+                    }
+                    None => break,
+                },
+            }
+        }
+    });
+
+    Some(PingSession { last_ping, task })
+}
+
+fn connection_from_parts(
+    config: ClientConfig,
+    sender: Sender,
+    receiver: Receiver,
+    #[cfg(feature = "crypto")] auth_state: AuthState,
+    #[cfg(feature = "crypto")] client_id: u64,
+) -> MTPConnection {
+    let ping = start_ping_session(&config, sender.clone(), &receiver);
+    MTPConnection {
+        version: PROTOCOL_VERSION,
+        sender,
+        receiver,
+        description: config.description,
+        ping,
+        #[cfg(feature = "crypto")]
+        auth_state,
+        #[cfg(feature = "crypto")]
+        client_id,
+    }
+}
+
 #[cfg(feature = "crypto")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthState {
@@ -183,16 +321,18 @@ impl MTPClient {
 
         sender.send(&ident).await?;
 
-        Ok(MTPConnection {
-            version: PROTOCOL_VERSION,
+        #[cfg(feature = "crypto")]
+        let client_id = config.client_id;
+        #[cfg(feature = "crypto")]
+        return Ok(connection_from_parts(
+            config,
             sender,
             receiver,
-            description: config.description,
-            #[cfg(feature = "crypto")]
-            auth_state: AuthState::Unauthenticated,
-            #[cfg(feature = "crypto")]
-            client_id: config.client_id,
-        })
+            AuthState::Unauthenticated,
+            client_id,
+        ));
+        #[cfg(not(feature = "crypto"))]
+        Ok(connection_from_parts(config, sender, receiver))
     }
 }
 
@@ -488,14 +628,14 @@ impl MTPClient {
             return Err(e);
         }
 
-        Ok(MTPConnection {
-            version: PROTOCOL_VERSION,
+        let client_id = config.client_id;
+        Ok(connection_from_parts(
+            config,
             sender,
             receiver,
-            description: config.description,
-            auth_state: AuthState::Authenticated,
-            client_id: config.client_id,
-        })
+            AuthState::Authenticated,
+            client_id,
+        ))
     }
 
     pub async fn auth_register(
@@ -636,14 +776,13 @@ impl MTPClient {
             return Err(e);
         }
 
-        Ok(MTPConnection {
-            version: PROTOCOL_VERSION,
+        Ok(connection_from_parts(
+            config,
             sender,
             receiver,
-            description: config.description,
-            auth_state: AuthState::Authenticated,
-            client_id: assigned_id,
-        })
+            AuthState::Authenticated,
+            assigned_id,
+        ))
     }
 }
 
@@ -669,6 +808,17 @@ mod tests {
             ClientTlsConfig::PinnedPem(vec![0x01, 0x02, 0x03])
         );
         assert_eq!(config.client_id, 42);
+    }
+
+    #[test]
+    fn test_ping_config() {
+        let config = ClientConfig::new("https://localhost:4433")
+            .with_ping_interval(Duration::from_secs(5))
+            .with_max_missed_pings(2)
+            .with_ping_timestamp(false);
+        assert_eq!(config.ping_interval, Duration::from_secs(5));
+        assert_eq!(config.max_missed_pings, 2);
+        assert!(!config.ping_timestamp);
     }
 
     #[cfg(feature = "crypto")]

@@ -267,16 +267,17 @@ pub struct WasmClient {
 impl WasmClient {
     #[wasm_bindgen(constructor)]
     pub fn new(
-        on_state_change: &js_sys::Function,
-        on_message: &js_sys::Function,
-        on_error: &js_sys::Function,
+        on_state_change: Option<js_sys::Function>,
+        on_message: Option<js_sys::Function>,
+        on_error: Option<js_sys::Function>,
     ) -> Self {
+        let noop = || js_sys::Function::new_no_args("");
         Self {
             transport: Rc::new(RefCell::new(None)),
             state: Rc::new(Cell::new(ConnectionState::Disconnected)),
-            on_state_change: on_state_change.clone(),
-            on_message: on_message.clone(),
-            on_error: on_error.clone(),
+            on_state_change: on_state_change.unwrap_or_else(noop),
+            on_message: on_message.unwrap_or_else(noop),
+            on_error: on_error.unwrap_or_else(noop),
             subscriptions: Rc::new(RefCell::new(HashMap::new())),
             next_subscription_id: Rc::new(Cell::new(1)),
             pending_requests: Rc::new(RefCell::new(HashMap::new())),

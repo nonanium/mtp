@@ -51,6 +51,7 @@ edition = "2024"
 mtp-common = { version = "0.1.0", path = "common" }
 mtp-type-map = { version = "0.1.0", path = "type-map" }
 mtp-codec = { version = "0.1.0", path = "codec" }
+mtp-transport = { version = "0.1.0", path = "transport", optional = true }
 # --- optional, behind features ---
 mtp-crypto = { version = "0.1.0", path = "crypto", optional = true, features = [
     "serde",
@@ -76,10 +77,23 @@ crypto = [
 ]
 
 # MTP server host - version negotiation, Registry, incoming QUIC connections.
-host = ["dep:mtp-host", "mtp-codec/registry"]
+host = ["dep:mtp-host", "mtp-codec/registry", "transport"]
 
 # MTP client - outgoing QUIC connections to a host.
-client = ["dep:mtp-client"]
+client = ["dep:mtp-client", "transport"]
+
+# Opt into stream-specific host/client facade APIs. The transport itself is
+# always framed over QUIC/WebTransport streams for compatibility.
+streaming = [
+    "transport",
+    "mtp-transport/streaming",
+    "mtp-host?/streaming",
+    "mtp-client?/streaming",
+]
+
+# Direct access to the framed QUIC transport. Host/client features enable it
+# automatically; this feature is useful for low-level integrations.
+transport = ["dep:mtp-transport"]
 
 # On-disk storage for keyrings (`.mk`) and public key bundles (`.mpkb`).
 # Pulls in `crypto` so the `Keyring` / `PublicKeyBundle` types are in scope.

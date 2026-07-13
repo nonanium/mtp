@@ -48,6 +48,7 @@ let config = HostConfig::new(
 | `port`                 | `u16`                                   | Listen port                                    |
 | `tls_fullchain`        | `Vec<u8>`                               | PEM-encoded TLS certificate chain              |
 | `tls_key`              | `Vec<u8>`                               | PEM-encoded TLS private key                    |
+| `send_pongs`           | `bool`                                  | Sends a Pong for each received Ping (default `true`) |
 | `authentication_policy` | `AuthenticationPolicy` (crypto)       | `ForceAuthentication`, `AllowAuthentication`, or `Unauthenticated` |
 | `host_keyring`         | `Keyring` (crypto)                      | Host's signing and KEM keys                    |
 | `get_existing_user`    | `Fn(u64) -> Pin<Box<dyn Future<Output = Option<PublicKeyBundle>> + Send>> + Send + Sync` (crypto) | Async lookup callback for login |
@@ -76,6 +77,35 @@ let config = HostConfig::new(ip, port, cert, key);
 
 The host requires a TLS certificate. For development, generate a self-signed
 certificate using `rcgen`. For production, use a CA-signed certificate.
+
+### Ping-Pong
+
+The host handles protocol Ping/Pong automatically unless you disable it with
+`with_pongs(false)`. Enable the default responder explicitly when constructing
+the host if you want to make the choice visible in application configuration:
+
+```rust
+let config = HostConfig::new(ip, port, cert, key)
+    .with_pongs(true);
+```
+
+For every received Ping, the responder sends a Pong with the same frame id and
+copies the optional `Timestamp` data entry. Ping and Pong frames handled this
+way are not delivered by `conn.receiver.receive()`. This lets native clients
+use `ClientConfig::with_ping_interval` and `MTPConnection::get_ping()` without
+adding application-level handlers.
+
+Disable it only when the application needs to handle Ping frames itself:
+
+```rust
+let config = HostConfig::new(ip, port, cert, key)
+    .with_pongs(false);
+```
+
+With automatic responses disabled, Ping frames are delivered through the normal
+receiver and the application is responsible for sending a compatible Pong (the
+same frame id, and normally the Ping's `Timestamp`) if it wants clients to
+continue their protocol ping loop.
 
 ## Accepting Connections
 

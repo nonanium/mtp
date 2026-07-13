@@ -2,7 +2,7 @@ use crate::ConnectionHandle;
 use mtp_codec::CommunicationValue;
 use mtp_common::CommunicationError;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
 use tokio::time::{Duration, sleep, timeout};
 use wtransport::Connection;
 
@@ -29,7 +29,10 @@ pub struct Policy {
     pub force_close_delay: Duration,
     pub max_transient_recv_errors: usize,
     pub transient_recv_backoff: Duration,
+    pub persistent_stream_max_retries: usize,
+    pub persistent_stream_retry_backoff: Duration,
     pub receiver_queue_capacity: usize,
+    pub max_concurrent_stream_tasks: usize,
 }
 
 impl Default for Policy {
@@ -48,7 +51,10 @@ impl Default for Policy {
             force_close_delay: Duration::from_millis(300),
             max_transient_recv_errors: 20,
             transient_recv_backoff: Duration::from_millis(100),
+            persistent_stream_max_retries: 4,
+            persistent_stream_retry_backoff: Duration::from_millis(20),
             receiver_queue_capacity: 1000,
+            max_concurrent_stream_tasks: 128,
         }
     }
 }
@@ -90,6 +96,24 @@ impl Policy {
         self.receiver_queue_capacity = receiver_queue_capacity;
         self
     }
+
+    pub fn with_persistent_stream_retries(
+        mut self,
+        persistent_stream_max_retries: usize,
+        persistent_stream_retry_backoff: Duration,
+    ) -> Self {
+        self.persistent_stream_max_retries = persistent_stream_max_retries;
+        self.persistent_stream_retry_backoff = persistent_stream_retry_backoff;
+        self
+    }
+
+    pub fn with_max_concurrent_stream_tasks(
+        mut self,
+        max_concurrent_stream_tasks: usize,
+    ) -> Self {
+        self.max_concurrent_stream_tasks = max_concurrent_stream_tasks;
+        self
+    }
 }
 
 enum ReceivedFrame {
@@ -98,8 +122,9 @@ enum ReceivedFrame {
     Idle,
 }
 
+#[derive(Clone)]
 pub struct Sender {
-    send_guard: Mutex<()>,
+    send_guard: Arc<Mutex<()>>,
     stream_guard: Arc<Mutex<Option<wtransport::SendStream>>>,
     handle: Arc<ConnectionHandle>,
     connection: Connection,
@@ -109,7 +134,7 @@ pub struct Sender {
 impl Sender {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>, policy: Arc<Policy>) -> Self {
         Self {
-            send_guard: Mutex::new(()),
+            send_guard: Arc::new(Mutex::new(())),
             stream_guard: Arc::new(Mutex::new(None)),
             handle,
             connection,
@@ -208,23 +233,24 @@ impl Sender {
                 return Err(CommunicationError::StreamClosed);
             }
 
-            let res = {
-                let stream = Self::ensure_stream(conn, stream_opt, policy).await?;
-                Self::write_frame(stream, data, policy).await
+            let res = match Self::ensure_stream(conn, stream_opt, policy).await {
+                Ok(stream) => Self::write_frame(stream, data, policy).await,
+                Err(e) => Err(e),
             };
 
             if res.is_ok() {
                 return Ok(());
             }
 
+            let err = res.err().unwrap_or(CommunicationError::StreamError);
             *stream_opt = None;
             tries += 1;
-            if tries >= 4 {
-                let stream = Self::ensure_stream(conn, stream_opt, policy).await?;
-                return Self::write_frame(stream, data, policy).await;
+            if tries > policy.persistent_stream_max_retries {
+                return Err(err);
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(20 * tries as u64)).await;
+            let backoff = policy.persistent_stream_retry_backoff * tries as u32;
+            tokio::time::sleep(backoff).await;
         }
     }
 
@@ -433,6 +459,13 @@ pub struct Receiver {
     rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
     _accept_task: tokio::task::JoinHandle<()>,
     handle: Arc<ConnectionHandle>,
+    ping_control: Arc<RwLock<PingControl>>,
+}
+
+#[derive(Clone, Default)]
+struct PingControl {
+    pong_sender: Option<Sender>,
+    pong_observer: Option<mpsc::UnboundedSender<CommunicationValue>>,
 }
 
 impl Drop for Receiver {
@@ -456,6 +489,10 @@ impl Receiver {
         let conn_handle = handle.clone();
         let accept_connection = connection.clone();
         let accept_policy = policy.clone();
+        let ping_control = Arc::new(RwLock::new(PingControl::default()));
+        let accept_ping_control = ping_control.clone();
+        let stream_limit = Arc::new(Semaphore::new(policy.max_concurrent_stream_tasks.max(1)));
+        let accept_stream_limit = stream_limit.clone();
 
         let accept_task = tokio::spawn(async move {
             let mut close_rx = conn_handle.subscribe_close();
@@ -474,15 +511,62 @@ impl Receiver {
                     ) => {
                         match accepted {
                             Ok(Ok(stream)) => {
+                                let permit = match accept_stream_limit.clone().acquire_owned().await {
+                                    Ok(permit) => permit,
+                                    Err(_) => break,
+                                };
                                 let tx_stream = tx.clone();
                                 let stream_handle = conn_handle.clone();
                                 let stream_policy = accept_policy.clone();
+                                let stream_ping_control = accept_ping_control.clone();
 
                                 tokio::spawn(async move {
+                                    let _permit = permit;
                                     let mut s = stream;
                                     loop {
                                         match Self::read_one_frame(&mut s, &stream_policy).await {
                                             Ok(ReceivedFrame::Message(msg)) => {
+                                                let ping_type = mtp_codec::CommunicationType::Ping
+                                                    .to_id(&mtp_codec::TypeMap::latest());
+                                                let pong_type = mtp_codec::CommunicationType::Pong
+                                                    .to_id(&mtp_codec::TypeMap::latest());
+                                                let control = {
+                                                    let control = stream_ping_control.read().await;
+                                                    if msg.get_type() == ping_type {
+                                                        control
+                                                            .pong_sender
+                                                            .clone()
+                                                            .map(|sender| (Some(sender), None))
+                                                    } else if msg.get_type() == pong_type {
+                                                        control
+                                                            .pong_observer
+                                                            .clone()
+                                                            .map(|observer| (None, Some(observer)))
+                                                    } else {
+                                                        None
+                                                    }
+                                                };
+
+                                                if let Some((Some(sender), _)) = control {
+                                                    let mut pong = CommunicationValue::new(mtp_codec::CommunicationType::Pong)
+                                                        .with_id(msg.get_id());
+                                                    if let Some(timestamp) = msg.get_data_opt(mtp_codec::DataType::Timestamp) {
+                                                            pong = pong.add_typed_default(
+                                                                mtp_codec::DataType::Timestamp,
+                                                                timestamp.clone(),
+                                                            );
+                                                    }
+                                                    if let Err(e) = sender.send(&pong).await {
+                                                        log::warn!("[Receiver] failed to send Pong: {e}");
+                                                    }
+                                                    continue;
+                                                }
+
+                                                if let Some((_, Some(observer))) = control {
+                                                    let _ = observer.send(msg);
+                                                    continue;
+                                                }
+
                                                 if tx_stream.send(Ok(msg)).await.is_err() {
                                                     break;
                                                 }
@@ -545,6 +629,25 @@ impl Receiver {
             rx: Mutex::new(rx),
             _accept_task: accept_task,
             handle,
+            ping_control,
+        }
+    }
+
+    /* Respond to reserved Ping frames without exposing them to application I/O. */
+    pub fn respond_to_pings(&self, sender: Sender) {
+        if let Ok(mut control) = self.ping_control.try_write() {
+            control.pong_sender = Some(sender);
+        } else {
+            log::warn!("[Receiver] could not register Ping responder: control lock busy");
+        }
+    }
+
+    /* Route reserved Pong frames to a connection-level observer. */
+    pub fn observe_pongs(&self, observer: mpsc::UnboundedSender<CommunicationValue>) {
+        if let Ok(mut control) = self.ping_control.try_write() {
+            control.pong_observer = Some(observer);
+        } else {
+            log::warn!("[Receiver] could not register Pong observer: control lock busy");
         }
     }
 
@@ -689,7 +792,10 @@ mod tests {
         assert_eq!(p.force_close_delay, Duration::from_millis(300));
         assert_eq!(p.max_transient_recv_errors, 20);
         assert_eq!(p.transient_recv_backoff, Duration::from_millis(100));
+        assert_eq!(p.persistent_stream_max_retries, 4);
+        assert_eq!(p.persistent_stream_retry_backoff, Duration::from_millis(20));
         assert_eq!(p.receiver_queue_capacity, 1000);
+        assert_eq!(p.max_concurrent_stream_tasks, 128);
     }
 
     #[test]

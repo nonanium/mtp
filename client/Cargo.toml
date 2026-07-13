@@ -9,7 +9,9 @@ mtp-codec = { version = "0.1.0", path = "../codec" }
 mtp-transport = { version = "0.1.0", path = "../transport" }
 mtp-crypto = { version = "0.1.0", path = "../crypto", optional = true }
 rand = "0.8"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [features]
 crypto = ["dep:mtp-crypto", "mtp-codec/crypto"]
+# Enables stream-specific convenience exports and configuration.
+streaming = ["mtp-transport/streaming"]

@@ -402,7 +402,14 @@ impl WasmTransport {
                     if let Some(reader) = self.stream_reader.borrow_mut().take() {
                         release_reader_lock(&reader);
                     }
-                    self.buffer.borrow_mut().clear();
+                    // A frame is never allowed to span stream boundaries. The
+                    // native persistent-stream sender packs frames on one
+                    // stream, while the WASM sender uses one stream per frame;
+                    // either mode must reject a truncated frame instead of
+                    // silently dropping its prefix.
+                    if !self.buffer.borrow().is_empty() {
+                        return Err(js_error("stream ended in the middle of a frame"));
+                    }
                 }
             }
         }
