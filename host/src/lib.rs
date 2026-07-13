@@ -14,7 +14,6 @@ pub use MTPConnection as Connection;
 pub use MTPHost as Host;
 pub use mtp_transport::Policy;
 pub use mtp_transport::Receiver;
-#[cfg(feature = "streaming")]
 pub use mtp_transport::SendMode;
 pub use mtp_transport::Sender;
 
