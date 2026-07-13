@@ -2,9 +2,10 @@ use crate::ConnectionHandle;
 use mtp_codec::CommunicationValue;
 use mtp_common::CommunicationError;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
+use tokio::sync::{mpsc, Mutex, Notify, RwLock, Semaphore};
 use tokio::time::{Duration, sleep, timeout};
 use wtransport::Connection;
+use tracing::{debug, info, instrument, trace};
 
 const APPLICATION_CLOSE_REASON: &str = "mtp-close";
 
@@ -33,6 +34,7 @@ pub struct Policy {
     pub persistent_stream_retry_backoff: Duration,
     pub receiver_queue_capacity: usize,
     pub max_concurrent_stream_tasks: usize,
+    pub max_frames_per_stream: Option<usize>,
 }
 
 impl Default for Policy {
@@ -55,6 +57,7 @@ impl Default for Policy {
             persistent_stream_retry_backoff: Duration::from_millis(20),
             receiver_queue_capacity: 1000,
             max_concurrent_stream_tasks: 128,
+            max_frames_per_stream: None,
         }
     }
 }
@@ -114,6 +117,11 @@ impl Policy {
         self.max_concurrent_stream_tasks = max_concurrent_stream_tasks;
         self
     }
+
+    pub fn with_max_frames_per_stream(mut self, max_frames_per_stream: Option<usize>) -> Self {
+        self.max_frames_per_stream = max_frames_per_stream;
+        self
+    }
 }
 
 enum ReceivedFrame {
@@ -142,6 +150,7 @@ impl Sender {
         }
     }
 
+    #[instrument(skip(stream, data, policy), level = "trace")]
     async fn write_frame(
         stream: &mut wtransport::SendStream,
         data: &CommunicationValue,
@@ -189,6 +198,7 @@ impl Sender {
         }
     }
 
+    #[instrument(skip(conn, policy), level = "trace")]
     async fn open_uni_stream(
         conn: &Connection,
         policy: &Policy,
@@ -221,6 +231,7 @@ impl Sender {
         }
     }
 
+    #[instrument(skip(conn, stream_opt, data, policy), level = "trace")]
     async fn send_on_persistent_stream(
         conn: &Connection,
         stream_opt: &mut Option<wtransport::SendStream>,
@@ -254,6 +265,7 @@ impl Sender {
         }
     }
 
+    #[instrument(skip(conn, data, policy), level = "trace")]
     async fn send_on_single_stream(
         conn: &Connection,
         data: &CommunicationValue,
@@ -279,6 +291,7 @@ impl Sender {
         }
     }
 
+    #[instrument(skip(conn, policy), level = "trace")]
     async fn send_close_frame(
         conn: &Connection,
         policy: &Policy,
@@ -319,6 +332,7 @@ impl Sender {
         Ok(())
     }
 
+    #[instrument(skip(self, data), level = "trace")]
     pub async fn send(&self, data: &CommunicationValue) -> Result<(), CommunicationError> {
         if self.handle.is_closed() {
             return Err(self
@@ -374,6 +388,7 @@ impl Sender {
         }
     }
 
+    #[instrument(skip(self), level = "trace")]
     pub async fn finish_stream(&self) -> Result<(), CommunicationError> {
         let _send_lock = self.send_guard.lock().await;
         let mut stream_opt = self.stream_guard.lock().await;
@@ -403,7 +418,9 @@ impl Sender {
         &self.handle
     }
 
+    #[instrument(skip(self), level = "trace")]
     pub fn close(&self) {
+        info!(target = "mtp.transport", "fire-and-forget close requested");
         let connection = self.connection.clone();
         let handle = self.handle.clone();
         let policy = self.policy.clone();
@@ -431,6 +448,7 @@ impl Sender {
             let _ = Self::send_close_frame(&connection, &policy).await;
 
             handle.close(Some(CommunicationError::StreamClosed));
+            info!(target = "mtp.transport", "connection closed");
 
             sleep(policy.force_close_delay).await;
             if connection.quic_connection().close_reason().is_none() {
@@ -440,6 +458,51 @@ impl Sender {
                 );
             }
         });
+    }
+
+    #[instrument(skip(self), level = "trace")]
+    /// Initiate a best-effort graceful close and wait for the configured force-close delay.
+    pub async fn close_and_wait(&self) {
+        info!(target = "mtp.transport", "graceful close initiated");
+        let connection = self.connection.clone();
+        let handle = self.handle.clone();
+        let policy = self.policy.clone();
+        let mut stream_opt = self.stream_guard.lock().await;
+
+        if connection.quic_connection().close_reason().is_some() || handle.is_closed() {
+            handle.close(Some(CommunicationError::StreamClosed));
+            return;
+        }
+
+        if let Some(mut stream) = stream_opt.take() {
+            let close_bytes = policy.close_frame_len.to_be_bytes();
+            let close_write = async {
+                stream.write_all(&close_bytes).await?;
+                stream.finish().await
+            };
+
+            match timeout(policy.write_timeout, close_write).await {
+                Ok(Ok(())) => {}
+                Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => log::warn!(
+                    "[Sender] close_and_wait failed: peer sent STOP_SENDING (error code {code})"
+                ),
+                Ok(Err(e)) => log::warn!("[Sender] close_and_wait failed: {e}"),
+                Err(_) => log::warn!("[Sender] close_and_wait timed out"),
+            }
+        } else {
+            let _ = Self::send_close_frame(&connection, &policy).await;
+        }
+
+        handle.close(Some(CommunicationError::StreamClosed));
+        info!(target = "mtp.transport", "connection closed");
+
+        sleep(policy.force_close_delay).await;
+        if connection.quic_connection().close_reason().is_none() {
+            connection.quic_connection().close(
+                policy.application_close_code.into(),
+                APPLICATION_CLOSE_REASON.as_bytes(),
+            );
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -455,11 +518,17 @@ impl Sender {
     }
 }
 
+/// Single-consumer framed message receiver.
+///
+/// `receive()` is intended to be driven by one task at a time. Internally the
+/// underlying `mpsc::Receiver` is protected by a mutex so the type remains
+/// `Sync`, but it is not a multi-consumer queue.
 pub struct Receiver {
     rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
     _accept_task: tokio::task::JoinHandle<()>,
     handle: Arc<ConnectionHandle>,
     ping_control: Arc<RwLock<PingControl>>,
+    queue_notify: Arc<Notify>,
 }
 
 #[derive(Clone, Default)]
@@ -491,13 +560,40 @@ impl Receiver {
         let accept_policy = policy.clone();
         let ping_control = Arc::new(RwLock::new(PingControl::default()));
         let accept_ping_control = ping_control.clone();
+        let queue_notify = Arc::new(Notify::new());
+        let accept_queue_notify = queue_notify.clone();
         let stream_limit = Arc::new(Semaphore::new(policy.max_concurrent_stream_tasks.max(1)));
         let accept_stream_limit = stream_limit.clone();
+        debug!(
+            target = "mtp.transport",
+            max_concurrent_stream_tasks = policy.max_concurrent_stream_tasks,
+            receiver_queue_capacity = policy.receiver_queue_capacity,
+            "receiver accept loop started"
+        );
+        info!(
+            target = "mtp.transport",
+            max_concurrent_stream_tasks = policy.max_concurrent_stream_tasks,
+            receiver_queue_capacity = policy.receiver_queue_capacity,
+            "connection accepted"
+        );
 
         let accept_task = tokio::spawn(async move {
             let mut close_rx = conn_handle.subscribe_close();
 
             loop {
+                if tx.capacity() == 0 {
+                    trace!(target = "mtp.transport", "accept loop paused: receiver queue full");
+                    tokio::select! {
+                        _ = close_rx.changed() => {
+                            if close_rx.borrow().is_some() {
+                                break;
+                            }
+                        }
+                        _ = accept_queue_notify.notified() => {}
+                    }
+                    continue;
+                }
+
                 tokio::select! {
                     _ = close_rx.changed() => {
                         if close_rx.borrow().is_some() {
@@ -523,9 +619,20 @@ impl Receiver {
                                 tokio::spawn(async move {
                                     let _permit = permit;
                                     let mut s = stream;
+                                    let mut frame_count = 0usize;
                                     loop {
+                                        if let Some(max_frames) = stream_policy.max_frames_per_stream
+                                            && frame_count >= max_frames
+                                        {
+                                            let close_error = CommunicationError::StreamError;
+                                            let _ = tx_stream.send(Err(close_error.clone())).await;
+                                            stream_handle.close(Some(close_error));
+                                            break;
+                                        }
+
                                         match Self::read_one_frame(&mut s, &stream_policy).await {
                                             Ok(ReceivedFrame::Message(msg)) => {
+                                                frame_count += 1;
                                                 let ping_type = mtp_codec::CommunicationType::Ping
                                                     .to_id(&mtp_codec::TypeMap::latest());
                                                 let pong_type = mtp_codec::CommunicationType::Pong
@@ -630,6 +737,7 @@ impl Receiver {
             _accept_task: accept_task,
             handle,
             ping_control,
+            queue_notify,
         }
     }
 
@@ -651,6 +759,7 @@ impl Receiver {
         }
     }
 
+    #[instrument(skip(stream, policy), level = "trace")]
     async fn read_one_frame(
         stream: &mut wtransport::RecvStream,
         policy: &Policy,
@@ -726,6 +835,7 @@ impl Receiver {
         Ok(ReceivedFrame::Message(message))
     }
 
+    #[instrument(skip(self), level = "trace")]
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
         if self.handle.is_closed() {
             return Err(self
@@ -736,7 +846,10 @@ impl Receiver {
 
         let mut rx = self.rx.lock().await;
         match rx.recv().await {
-            Some(result) => result,
+            Some(result) => {
+                self.queue_notify.notify_one();
+                result
+            }
             _ => Err(self
                 .handle
                 .close_reason()
@@ -796,6 +909,7 @@ mod tests {
         assert_eq!(p.persistent_stream_retry_backoff, Duration::from_millis(20));
         assert_eq!(p.receiver_queue_capacity, 1000);
         assert_eq!(p.max_concurrent_stream_tasks, 128);
+        assert_eq!(p.max_frames_per_stream, None);
     }
 
     #[test]

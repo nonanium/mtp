@@ -2,14 +2,14 @@ use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Versi
 use mtp_common::CommunicationError;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use rand::Rng;
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, Instant};
 
 pub use MTPClient as Client;
 pub use MTPConnection as Connection;
 pub use mtp_transport::Policy;
 pub use mtp_transport::Receiver;
-#[cfg(feature = "streaming")]
 pub use mtp_transport::SendMode;
 pub use mtp_transport::Sender;
 
@@ -34,6 +34,7 @@ pub struct ClientConfig {
     pub description: Option<String>,
     pub policy: Policy,
     pub ping_interval: Duration,
+    pub ping_jitter: Option<Duration>,
     pub max_missed_pings: usize,
     pub ping_timestamp: bool,
     #[cfg(feature = "crypto")]
@@ -55,6 +56,7 @@ impl ClientConfig {
             description: None,
             policy: Policy::default(),
             ping_interval: Duration::ZERO,
+            ping_jitter: None,
             max_missed_pings: 3,
             ping_timestamp: true,
             #[cfg(feature = "crypto")]
@@ -88,6 +90,11 @@ impl ClientConfig {
 
     pub fn with_ping_interval(mut self, interval: Duration) -> Self {
         self.ping_interval = interval;
+        self
+    }
+
+    pub fn with_ping_jitter(mut self, jitter: Option<Duration>) -> Self {
+        self.ping_jitter = jitter;
         self
     }
 
@@ -209,6 +216,7 @@ fn start_ping_session(
     let last_ping = Arc::new(Mutex::new(None));
     let ping_state = last_ping.clone();
     let interval = config.ping_interval;
+    let ping_jitter = config.ping_jitter;
     let max_missed_pings = config.max_missed_pings;
     let ping_timestamp = config.ping_timestamp;
     let mut close_rx = receiver.handle().subscribe_close();
@@ -229,6 +237,12 @@ fn start_ping_session(
                     if max_missed_pings > 0 && !pending.is_empty() && pending.len() >= max_missed_pings {
                         sender.close();
                         break;
+                    }
+
+                    if let Some(jitter) = ping_jitter && !jitter.is_zero() {
+                        let max_ms = jitter.as_millis() as u64;
+                        let extra = rand::thread_rng().gen_range(0..=max_ms);
+                        tokio::time::sleep(Duration::from_millis(extra)).await;
                     }
 
                     let mut ping = CommunicationValue::new(mtp_codec::CommunicationType::Ping);
@@ -817,6 +831,7 @@ mod tests {
             .with_max_missed_pings(2)
             .with_ping_timestamp(false);
         assert_eq!(config.ping_interval, Duration::from_secs(5));
+        assert_eq!(config.ping_jitter, None);
         assert_eq!(config.max_missed_pings, 2);
         assert!(!config.ping_timestamp);
     }

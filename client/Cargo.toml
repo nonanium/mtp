@@ -10,6 +10,12 @@ mtp-transport = { version = "0.1.0", path = "../transport" }
 mtp-crypto = { version = "0.1.0", path = "../crypto", optional = true }
 rand = "0.8"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+mtp-host = { version = "0.1.0", path = "../host" }
+mtp-transport = { version = "0.1.0", path = "../transport", features = ["host"] }
+rcgen = "0.14"
 
 [features]
 crypto = ["dep:mtp-crypto", "mtp-codec/crypto"]

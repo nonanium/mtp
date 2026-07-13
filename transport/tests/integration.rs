@@ -199,3 +199,149 @@ async fn test_drop_receiver_keeps_sender_alive() {
     client_tx.close();
     host_tx.close();
 }
+
+#[tokio::test]
+async fn test_persistent_stream_reopens_after_local_finish() {
+    let (_h, client_tx, client_rx, host_tx, host_rx) = connected_pair().await;
+
+    let tm = TypeMap::latest();
+    let msg1 = numbered_message(CommunicationType::Ping, 11, &tm);
+    client_tx.send(&msg1).await.unwrap();
+    let received1 = host_rx.receive().await.unwrap();
+    assert_numbered_message(&received1, CommunicationType::Ping, 11, &tm);
+
+    client_tx.finish_stream().await.unwrap();
+
+    let msg2 = numbered_message(CommunicationType::Pong, 22, &tm);
+    client_tx.send(&msg2).await.unwrap();
+    let received2 = host_rx.receive().await.unwrap();
+    assert_numbered_message(&received2, CommunicationType::Pong, 22, &tm);
+
+    client_tx.close();
+    host_tx.close();
+    drop(client_rx);
+}
+
+#[tokio::test]
+async fn test_receiver_backpressure_with_small_queue() {
+    let (cert_pem, key_pem) = generate_self_signed_cert();
+    let mut h = start_test_host(cert_pem.clone(), key_pem).await;
+    let url = format!("https://127.0.0.1:{}", h.local_addr().port());
+    let policy = Policy::default().with_receiver_queue_capacity(1);
+    let (client_tx, client_rx) = connect(&url, Some(cert_pem), policy.clone())
+        .await
+        .unwrap();
+    let (_host_tx, host_rx) = h.next().await.unwrap();
+
+    let tm = TypeMap::latest();
+    for i in 0..8u128 {
+        client_tx
+            .send(&numbered_message(CommunicationType::Ping, i, &tm))
+            .await
+            .unwrap();
+    }
+
+    for i in 0..8u128 {
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            host_rx.receive(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_numbered_message(&received, CommunicationType::Ping, i, &tm);
+    }
+
+    client_tx.close();
+    drop(client_rx);
+    h.shutdown();
+}
+
+#[tokio::test]
+async fn test_max_frames_per_stream_enforced() {
+    let (cert_pem, key_pem) = generate_self_signed_cert();
+    let policy = Policy::default().with_max_frames_per_stream(Some(1));
+    let mut h = host(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+        cert_pem.clone(),
+        key_pem,
+        policy,
+    )
+    .await
+    .unwrap();
+    let url = format!("https://127.0.0.1:{}", h.local_addr().port());
+    let (client_tx, _client_rx) = connect(&url, Some(cert_pem), Policy::default())
+        .await
+        .unwrap();
+    let (_host_tx, host_rx) = h.next().await.unwrap();
+
+    let tm = TypeMap::latest();
+    client_tx
+        .send(&numbered_message(CommunicationType::Ping, 1, &tm))
+        .await
+        .unwrap();
+    let first = host_rx.receive().await.unwrap();
+    assert_numbered_message(&first, CommunicationType::Ping, 1, &tm);
+
+    client_tx
+        .send(&numbered_message(CommunicationType::Ping, 2, &tm))
+        .await
+        .unwrap();
+    let second = host_rx.receive().await;
+    assert!(second.is_err(), "stream should be closed after frame limit");
+
+    client_tx.close();
+    h.shutdown();
+}
+
+#[tokio::test]
+async fn test_semaphore_saturation_with_concurrent_streams() {
+    let (cert_pem, key_pem) = generate_self_signed_cert();
+    let policy = Policy::default()
+        .with_send_mode(mtp_transport::SendMode::SingleStreamPerMessage)
+        .with_receiver_queue_capacity(1)
+        .with_max_concurrent_stream_tasks(1);
+    let mut h = host(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+        cert_pem.clone(),
+        key_pem,
+        policy,
+    )
+    .await
+    .unwrap();
+    let url = format!("https://127.0.0.1:{}", h.local_addr().port());
+    let (client_tx, _client_rx) = connect(&url, Some(cert_pem), Policy::default())
+        .await
+        .unwrap();
+    let (_host_tx, host_rx) = h.next().await.unwrap();
+
+    let tm = TypeMap::latest();
+    let mut joins = Vec::new();
+    for i in 0..6u128 {
+        let tx = client_tx.clone();
+        let msg = numbered_message(CommunicationType::Ping, i, &tm);
+        joins.push(tokio::spawn(async move { tx.send(&msg).await }));
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    for join in joins {
+        join.await.unwrap().unwrap();
+    }
+
+    for i in 0..6u128 {
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            host_rx.receive(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_numbered_message(&received, CommunicationType::Ping, i, &tm);
+    }
+
+    client_tx.close();
+    h.shutdown();
+}
