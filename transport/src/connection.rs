@@ -1109,13 +1109,11 @@ impl Receiver {
                     Ok(Some(reader))
                 }
                 Err(mpsc::error::TryRecvError::Empty) => Ok(None),
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    return Err(self
-                        .inner
-                        .handle
-                        .close_reason()
-                        .unwrap_or(CommunicationError::StreamClosed));
-                }
+                Err(mpsc::error::TryRecvError::Disconnected) => Err(self
+                    .inner
+                    .handle
+                    .close_reason()
+                    .unwrap_or(CommunicationError::StreamClosed)),
             },
             Err(_) => Ok(None),
         }
