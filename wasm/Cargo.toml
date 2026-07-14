@@ -23,9 +23,13 @@ getrandom-v02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 mtp-common = { version = "0.1.0", path = "../common" }
 mtp-type-map = { version = "0.1.0", path = "../type-map" }
-mtp-codec = { version = "0.1.0", path = "../codec", features = ["crypto"] }
+mtp-codec = { version = "0.1.0", path = "../codec", features = ["crypto", "pipes"] }
 mtp-crypto = { version = "0.1.0", path = "../crypto", features = ["wasm"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 hex = "0.4"
+
+[features]
+default = []
+pipes = []

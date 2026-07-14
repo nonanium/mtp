@@ -208,6 +208,7 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "mtp",
+ "rand 0.8.6",
  "tokio",
 ]
 
@@ -902,6 +903,7 @@ dependencies = [
  "mtp-crypto",
  "mtp-files",
  "mtp-host",
+ "mtp-transport",
  "mtp-type-map",
 ]
 
@@ -915,6 +917,7 @@ dependencies = [
  "mtp-transport",
  "rand 0.8.6",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -984,9 +987,11 @@ dependencies = [
  "log",
  "mtp-codec",
  "mtp-common",
+ "rcgen",
  "rustls",
  "rustls-native-certs",
  "tokio",
+ "tracing",
  "wtransport",
 ]
 
@@ -1574,6 +1579,7 @@ dependencies = [
  "mtp",
  "rcgen",
  "serde_json",
+ "time",
  "tokio",
 ]
 

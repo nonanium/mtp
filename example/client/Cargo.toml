@@ -8,5 +8,6 @@ name = "client"
 path = "src/main.rs"
 
 [dependencies]
-mtp = { version = "0.1.0", path = "../../", features = ["client", "crypto", "files"] }
+mtp = { version = "0.1.0", path = "../../", features = ["client", "crypto", "files", "pipes"] }
 tokio = { version = "1", features = ["full"] }
+rand = "0.8"

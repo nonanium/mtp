@@ -96,13 +96,12 @@ pub async fn send_and_receive(
     println!("Sending: {msg}");
     conn.sender.send(&msg).await?;
 
-    match conn.receiver.receive().await {
+    match conn.receive().await {
         Ok(resp) => {
             println!("Received: {resp}");
         }
         Err(e) => eprintln!("Receive error: {e}"),
     }
 
-    conn.sender.close();
     Ok(())
 }

@@ -2,6 +2,7 @@ import initWasm, {
   ConnectionConfig,
   ConnectionState,
   WasmClient,
+  WasmPipeHandle,
   keyring_generate,
 } from "mtp/raw";
 import * as bindings from "mtp/raw";
@@ -285,6 +286,30 @@ export interface MTPSendOptions {
 
 export interface MTPRequestOptions extends MTPSendOptions {
   responseType?: MTPCommunicationType;
+}
+
+export interface MTPPipeWriter {
+  write(data: Uint8Array): Promise<void>;
+  close(): Promise<void>;
+  abort(): void;
+  readonly pipeId: number;
+}
+
+export interface MTPPipeReader {
+  read(): Promise<Uint8Array | null>;
+  readonly pipeId: number;
+  readonly description: string;
+}
+
+export interface MTPPipeRequest {
+  pipeId: number;
+  description: string;
+}
+
+export interface MTPOutgoingPipeHandle {
+  readonly pipeId: number;
+  readonly description: string;
+  wait(): Promise<MTPPipeWriter | null>;
 }
 
 type InternalCredentials = Omit<
@@ -1544,6 +1569,80 @@ export class MTPClient {
     secretId?: string;
   }): Promise<EncryptedDeviceSecretRecord | null> {
     return this.encryptedDeviceSecretProvider.getEncryptedDeviceSecret(query);
+  }
+
+  setOnPipeRequest(
+    handler: ((request: MTPPipeRequest) => void) | null,
+  ): void {
+    if (handler == null) {
+      this.raw.client.set_on_pipe_request(null);
+      return;
+    }
+    this.raw.client.set_on_pipe_request(
+      (event: { pipeId: number; description: string }) => {
+        emit(this.#options.logger, {
+          hint: "info",
+          type: "PipeRequest",
+          data: event,
+          direction: "recv",
+        });
+        handler({ pipeId: event.pipeId, description: event.description });
+      },
+    );
+  }
+
+  async createPipe(description: string): Promise<MTPOutgoingPipeHandle> {
+    if (typeof description !== "string") {
+      throw new TypeError("description must be a string");
+    }
+    const handle: WasmPipeHandle = await this.raw.client.create_pipe(
+      description,
+    );
+    const sdk = this;
+    return {
+      pipeId: handle.pipeId,
+      description: handle.description,
+      async wait(): Promise<MTPPipeWriter | null> {
+        const result = await handle.wait();
+        if (result == null) {
+          return null;
+        }
+        emit(sdk.#options.logger, {
+          hint: "info",
+          type: "PipeCreated",
+          data: { pipeId: result.pipeId },
+          direction: "send",
+        });
+        return result as unknown as MTPPipeWriter;
+      },
+    };
+  }
+
+  async acceptPipe(pipeId: number): Promise<MTPPipeReader> {
+    if (typeof pipeId !== "number" || !Number.isFinite(pipeId)) {
+      throw new TypeError("pipeId must be a finite number");
+    }
+    const reader = await this.raw.client.accept_pipe(pipeId);
+    emit(this.#options.logger, {
+      hint: "info",
+      type: "PipeAccepted",
+      data: { pipeId: reader.pipeId, description: reader.description },
+      direction: "send",
+    });
+    return reader as unknown as MTPPipeReader;
+  }
+
+  async denyPipe(pipeId: number): Promise<void> {
+    if (typeof pipeId !== "number" || !Number.isFinite(pipeId)) {
+      throw new TypeError("pipeId must be a finite number");
+    }
+    await this.raw.client.deny_pipe(pipeId);
+    emit(this.#options.logger, {
+      hint: "info",
+      type: "PipeDenied",
+      data: { pipeId },
+      direction: "send",
+    });
   }
 
   disconnect(): void {

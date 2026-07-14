@@ -116,6 +116,21 @@ const RESERVED_COMM_TYPES: &[ReservedEntry] = &[
         name: "GatewayTimeout",
         id: 22,
     },
+    #[cfg(feature = "pipes")]
+    ReservedEntry {
+        name: "PipeRequest",
+        id: 23,
+    },
+    #[cfg(feature = "pipes")]
+    ReservedEntry {
+        name: "PipeResponse",
+        id: 24,
+    },
+    #[cfg(feature = "pipes")]
+    ReservedEntry {
+        name: "PipeAbort",
+        id: 25,
+    },
 ];
 
 const RESERVED_DATA_TYPES: &[ReservedEntry] = &[
@@ -167,6 +182,10 @@ const RESERVED_DATA_TYPES: &[ReservedEntry] = &[
     ReservedEntry {
         name: "ErrorMessage",
         id: 12,
+    },
+    ReservedEntry {
+        name: "Accepted",
+        id: 13,
     },
 ];
 

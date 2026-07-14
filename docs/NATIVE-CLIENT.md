@@ -12,6 +12,9 @@ mtp = { path = "/path/to/mtp", features = ["client"] }
 
 # Add crypto for auth_connect / auth_register:
 mtp = { path = "/path/to/mtp", features = ["client", "crypto"] }
+
+# Add pipes for raw binary streams:
+mtp = { path = "/path/to/mtp", features = ["client", "pipes"] }
 ```
 
 ## ClientConfig
@@ -28,16 +31,18 @@ let config = ClientConfig::new("https://host.example.com:4433")
     .with_ping_timestamp(true);
 ```
 
-| Field         | Type               | Description                                         |
-|---------------|--------------------|-----------------------------------------------------|
-| `url`         | `String`           | `https://host:port` address of the MTP host         |
-| `tls`         | `ClientTlsConfig`  | `SystemRoots` or `PinnedPem(pem_bytes)`              |
-| `client_id`   | `u64`              | Client identifier (ignored during `auth_register`)  |
-| `description` | `Option<String>`   | Optional label sent during handshake (e.g. `"phone"`) |
-| `ping_interval` | `Duration`       | Interval between Ping frames; zero disables pings |
-| `max_missed_pings` | `usize`        | Unanswered Ping frames allowed before the connection closes |
-| `ping_timestamp` | `bool`          | Adds a `Timestamp` entry to each Ping frame |
-| `auth_timeout` | `Duration` (crypto) | Authentication handshake timeout (default 30s)     |
+| Field                   | Type               | Default          | Description                                 |
+|-------------------------|--------------------|------------------|---------------------------------------------|
+| `url`                   | `String`           | required         | Host URL (`https://host:port`)              |
+| `tls`                   | `ClientTlsConfig`  | `SystemRoots`    | `SystemRoots` or `PinnedPem(Vec<u8>)`       |
+| `client_id`             | `u64`              | `0`              | Client identifier (for login)               |
+| `description`           | `Option<String>`   | `None`           | Optional label sent to host                 |
+| `policy`                | `Policy`           | default          | Transport policy (timeouts, send mode)      |
+| `ping_interval`         | `Duration`         | `Duration::ZERO` | Interval between protocol Ping frames       |
+| `ping_jitter`           | `Option<Duration>` | `None`           | Random jitter added to each interval        |
+| `max_missed_pings`      | `usize`            | `3`              | Disconnect after this many unanswered Pings |
+| `ping_timestamp`        | `bool`             | `true`           | Include a `Timestamp` data entry in Ping    |
+| `auth_timeout` (crypto) | `Duration`         | `30s`            | Max time for auth handshake                 |
 
 ### TLS Certificate Handling
 
@@ -309,6 +314,111 @@ conn.receiver.close();
 Sends a close frame and signals the peer. The `Sender::close()` spawns an async
 task that sends the frame, waits for `force_close_delay` (default 300ms), then
 force-closes the QUIC connection if the peer has not already done so.
+
+## Pipes
+
+With the `pipes` feature enabled, the client can open **raw binary streams**
+to the host. A Pipe is a unidirectional QUIC stream that carries a lightweight
+`PipeRequest` handshake frame, then transitions to raw bytes with zero per-frame
+overhead.
+
+### Enabling Pipes
+
+Add the `pipes` feature to your dependency:
+
+```toml
+[dependencies]
+mtp = { path = "/path/to/mtp", features = ["client", "pipes"] }
+```
+
+### Creating a Pipe
+
+```rust
+use mtp::client::MTPClient;
+use tokio::io::AsyncWriteExt;
+
+let conn = MTPClient::connect(config).await?;
+
+// Initiate a pipe request
+let handle = conn.create_pipe("file-transfer").await?;
+
+// Wait for the host to accept or reject
+match handle.wait().await? {
+    Some(mut writer) => {
+        writer.write_all(b"raw binary data").await?;
+        writer.finish().await?; // graceful close
+    }
+    None => {
+        println!("host rejected the pipe");
+    }
+}
+```
+
+### PipeHandle
+
+```rust
+pub struct PipeHandle {
+    pipe_id: u32,
+    description: String,
+}
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `wait()` | `Result<Option<PipeWriter>, PipeError>` | Block until the host responds. `Some(writer)` if accepted, `None` if rejected. |
+
+`PipeHandle` consumes itself on `wait()`, so you cannot poll it multiple times.
+
+### PipeWriter
+
+```rust
+pub struct PipeWriter {
+    // wraps a QUIC SendStream
+}
+```
+
+`PipeWriter` implements `tokio::io::AsyncWrite`. After the handshake succeeds,
+writes go directly to the QUIC stream with no framing overhead.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `finish()` | `Result<(), CommunicationError>` | Gracefully close the stream (sends FIN) |
+| `abort()` | `Result<(), ClosedStream>` | Abruptly reset the stream |
+
+```rust
+use tokio::io::AsyncWriteExt;
+
+let mut writer = handle.wait().await?.unwrap();
+writer.write_all(b"chunk 1").await?;
+writer.write_all(b"chunk 2").await?;
+writer.finish().await?;
+```
+
+### PipeError
+
+```rust
+pub enum PipeError {
+    Rejected,          // pipe request was rejected
+    HandshakeTimeout,  // pipe handshake timed out
+    StreamClosed,      // pipe stream closed unexpectedly
+    IoError(String),   // pipe I/O error
+    ConnectionClosed,  // connection closed
+}
+```
+
+`PipeError` implements `std::error::Error` and can be converted from
+`CommunicationError` via `PipeError::from()`.
+
+### Do Not Use `receiver.receive()` for Pipes
+
+When the `pipes` feature is active, `conn.receiver.receive()` will **skip**
+`PipeResponse` frames and may return them as ordinary messages if called from
+the wrong task. Use the facade methods:
+
+- `conn.receive()` to receive normal `CommunicationValue` messages
+- `conn.create_pipe(description)` to initiate a new pipe
+
+These methods are internally synchronised and safe to call from separate tasks.
 
 ## Crypto Containers
 

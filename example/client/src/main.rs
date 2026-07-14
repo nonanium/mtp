@@ -1,5 +1,6 @@
 mod auth;
 mod messages;
+mod pipes;
 
 use std::fs;
 use std::path::Path;
@@ -38,6 +39,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (conn, keyring) = auth::connect_or_register(config, host_public_key, "client").await?;
     messages::send_and_receive(&conn, &keyring, &server_bundle).await?;
 
+    println!("\n--- Pipe demo ---");
+    pipes::run_pipe_demo(&conn, 1).await?;
+
+    conn.sender.close();
     println!("\nDone");
     Ok(())
 }

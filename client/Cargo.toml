@@ -19,5 +19,4 @@ rcgen = "0.14"
 
 [features]
 crypto = ["dep:mtp-crypto", "mtp-codec/crypto"]
-# Enables stream-specific convenience exports and configuration.
-streaming = ["mtp-transport/streaming"]
+pipes = ["mtp-common/pipes", "mtp-transport/pipes"]

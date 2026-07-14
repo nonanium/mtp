@@ -244,6 +244,45 @@ impl Eq for CommunicationError {}
 #[cfg(target_arch = "wasm32")]
 impl Eq for CommunicationError {}
 
+/* ================================ PipeError ================================ */
+
+#[cfg(feature = "pipes")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipeError {
+    Rejected,
+    HandshakeTimeout,
+    StreamClosed,
+    IoError(String),
+    ConnectionClosed,
+}
+
+#[cfg(feature = "pipes")]
+impl std::fmt::Display for PipeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PipeError::Rejected => write!(f, "pipe request was rejected"),
+            PipeError::HandshakeTimeout => write!(f, "pipe handshake timed out"),
+            PipeError::StreamClosed => write!(f, "pipe stream closed unexpectedly"),
+            PipeError::IoError(s) => write!(f, "pipe I/O error: {s}"),
+            PipeError::ConnectionClosed => write!(f, "connection closed"),
+        }
+    }
+}
+
+#[cfg(feature = "pipes")]
+impl std::error::Error for PipeError {}
+
+#[cfg(feature = "pipes")]
+impl From<CommunicationError> for PipeError {
+    fn from(e: CommunicationError) -> Self {
+        match e {
+            CommunicationError::StreamClosed => PipeError::StreamClosed,
+            CommunicationError::ConnectionError(_) => PipeError::ConnectionClosed,
+            other => PipeError::IoError(other.to_string()),
+        }
+    }
+}
+
 /* ================================ TESTS ================================ */
 #[cfg(test)]
 mod communication_error_tests {
@@ -289,5 +328,57 @@ mod communication_error_tests {
     fn test_connecting_error_display() {
         let e = CommunicationError::ConnectingError("refused".into());
         assert!(format!("{}", e).contains("refused"));
+    }
+}
+
+/* ================================ PipeError TESTS ================================ */
+#[cfg(feature = "pipes")]
+#[cfg(test)]
+mod pipe_error_tests {
+    use super::*;
+
+    #[test]
+    fn test_pipe_error_display() {
+        assert_eq!(
+            format!("{}", PipeError::Rejected),
+            "pipe request was rejected"
+        );
+        assert_eq!(
+            format!("{}", PipeError::HandshakeTimeout),
+            "pipe handshake timed out"
+        );
+        assert_eq!(
+            format!("{}", PipeError::StreamClosed),
+            "pipe stream closed unexpectedly"
+        );
+        assert_eq!(
+            format!("{}", PipeError::ConnectionClosed),
+            "connection closed"
+        );
+        assert_eq!(
+            format!("{}", PipeError::IoError("boom".into())),
+            "pipe I/O error: boom"
+        );
+    }
+
+    #[test]
+    fn test_pipe_error_from_stream_closed() {
+        let pe: PipeError = CommunicationError::StreamClosed.into();
+        assert_eq!(pe, PipeError::StreamClosed);
+    }
+
+    #[test]
+    fn test_pipe_error_from_connection_error() {
+        let pe: PipeError = CommunicationError::ConnectionError(
+            wtransport::error::ConnectionError::TimedOut,
+        )
+        .into();
+        assert_eq!(pe, PipeError::ConnectionClosed);
+    }
+
+    #[test]
+    fn test_pipe_error_from_other() {
+        let pe: PipeError = CommunicationError::StreamError.into();
+        assert_eq!(pe, PipeError::IoError("Stream Error".into()));
     }
 }

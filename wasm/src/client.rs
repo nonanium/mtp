@@ -13,6 +13,7 @@ use mtp_crypto::SignatureScheme;
 
 use crate::config::ConnectionConfig;
 use crate::error::js_error;
+use crate::pipe::PipeReader;
 use crate::transport::WasmTransport;
 
 struct PendingRequest {
@@ -23,6 +24,57 @@ struct PendingRequest {
 struct PingTimer {
     id: i32,
     closure: Closure<dyn FnMut()>,
+}
+
+#[wasm_bindgen(typescript_custom_section)]
+const PIPE_HANDLE_TS: &str = r#"
+export interface WasmPipeHandle {
+  wait(): Promise<PipeWriter | null>;
+  readonly pipeId: number;
+  readonly description: string;
+}
+"#;
+
+#[wasm_bindgen]
+pub struct WasmPipeHandle {
+    pipe_id: u32,
+    description: String,
+    transport: WasmTransport,
+    response_rx: Rc<RefCell<Option<oneshot::Receiver<Result<bool, JsValue>>>>>,
+}
+
+#[wasm_bindgen]
+impl WasmPipeHandle {
+    pub async fn wait(&self) -> Result<JsValue, JsValue> {
+        let rx = self
+            .response_rx
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| js_error("handle already consumed"))?;
+
+        let accepted = rx
+            .await
+            .map_err(|_| js_error("pipe handle channel closed"))?;
+
+        match accepted {
+            Ok(true) => {
+                let writer = self.transport.open_pipe(self.pipe_id, &self.description).await?;
+                Ok(JsValue::from(writer))
+            }
+            Ok(false) => Ok(JsValue::NULL),
+            Err(e) => Err(e),
+        }
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn pipe_id(&self) -> u32 {
+        self.pipe_id
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn description(&self) -> String {
+        self.description.clone()
+    }
 }
 
 fn frame_property(frame: &JsValue, key: &str) -> Option<JsValue> {
@@ -108,6 +160,22 @@ fn reject_pending_requests(
     for (_, pending) in pending {
         let _ = pending.sender.send(Err(js_error(message)));
     }
+}
+
+fn reject_pending_pipe_creations(
+    pending: &Rc<RefCell<HashMap<u32, oneshot::Sender<Result<bool, JsValue>>>>>,
+    message: &str,
+) {
+    let pending = std::mem::take(&mut *pending.borrow_mut());
+    for (_, tx) in pending {
+        let _ = tx.send(Err(js_error(message)));
+    }
+}
+
+fn random_pipe_id() -> Result<u32, JsValue> {
+    let mut bytes = [0u8; 4];
+    getrandom::fill(&mut bytes).map_err(|_| js_error("rng failed"))?;
+    Ok(u32::from_be_bytes(bytes))
 }
 
 fn raw_frame_preview(bytes: &[u8]) -> String {
@@ -261,6 +329,9 @@ pub struct WasmClient {
     next_subscription_id: Rc<Cell<u32>>,
     pending_requests: Rc<RefCell<HashMap<u32, PendingRequest>>>,
     ping_timer: Rc<RefCell<Option<PingTimer>>>,
+    pending_pipe_creations: Rc<RefCell<HashMap<u32, oneshot::Sender<Result<bool, JsValue>>>>>,
+    pending_pipes: Rc<RefCell<HashMap<u32, oneshot::Sender<PipeReader>>>>,
+    on_pipe_request: Rc<RefCell<Option<js_sys::Function>>>,
 }
 
 #[wasm_bindgen]
@@ -282,6 +353,9 @@ impl WasmClient {
             next_subscription_id: Rc::new(Cell::new(1)),
             pending_requests: Rc::new(RefCell::new(HashMap::new())),
             ping_timer: Rc::new(RefCell::new(None)),
+            pending_pipe_creations: Rc::new(RefCell::new(HashMap::new())),
+            pending_pipes: Rc::new(RefCell::new(HashMap::new())),
+            on_pipe_request: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -686,7 +760,94 @@ impl WasmClient {
         }
         self.subscriptions.borrow_mut().clear();
         self.reject_pending_requests("disconnected");
+        reject_pending_pipe_creations(&self.pending_pipe_creations, "disconnected");
         self.set_state(ConnectionState::Disconnected);
+    }
+
+    /// Set the callback invoked when a remote peer opens a pipe request.
+    /// The callback receives a plain JS object `{ pipeId: number, description: string }`.
+    #[wasm_bindgen]
+    pub fn set_on_pipe_request(&self, callback: Option<js_sys::Function>) {
+        *self.on_pipe_request.borrow_mut() = callback;
+    }
+
+    /// Initiate an outgoing pipe. Returns a `WasmPipeHandle` whose `wait()`
+    /// method resolves after the remote peer accepts (or denies) the request.
+    #[wasm_bindgen]
+    pub async fn create_pipe(&self, description: &str) -> Result<WasmPipeHandle, JsValue> {
+        let transport = self
+            .transport
+            .borrow()
+            .clone()
+            .ok_or_else(|| js_error("not connected"))?;
+
+        let pipe_id = random_pipe_id()?;
+        let (tx, rx) = oneshot::channel();
+        self.pending_pipe_creations
+            .borrow_mut()
+            .insert(pipe_id, tx);
+
+        let request =
+            CommunicationValue::new(CommunicationType::PipeRequest).with_id(pipe_id).add_typed_default(
+                DataType::Description,
+                DataValue::Str(description.to_string()),
+            );
+        let request_bytes = request
+            .to_bytes()
+            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        transport.send_frame(&request_bytes).await?;
+
+        Ok(WasmPipeHandle {
+            pipe_id,
+            description: description.to_string(),
+            transport,
+            response_rx: Rc::new(RefCell::new(Some(rx))),
+        })
+    }
+
+    /// Accept an incoming pipe request (identified by `pipe_id`). Sends a
+    /// `PipeResponse` with `Accepted = true` and returns a `PipeReader` once
+    /// the remote peer opens the pipe stream.
+    #[wasm_bindgen]
+    pub async fn accept_pipe(&self, pipe_id: u32) -> Result<PipeReader, JsValue> {
+        let transport = self
+            .transport
+            .borrow()
+            .clone()
+            .ok_or_else(|| js_error("not connected"))?;
+
+        let resp = CommunicationValue::new(CommunicationType::PipeResponse)
+            .with_id(pipe_id)
+            .add_typed_default(DataType::Accepted, DataValue::BoolTrue);
+        let resp_bytes = resp
+            .to_bytes()
+            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        transport.send_frame(&resp_bytes).await?;
+
+        let (tx, rx) = oneshot::channel();
+        self.pending_pipes.borrow_mut().insert(pipe_id, tx);
+
+        rx.await
+            .map_err(|_| js_error("pipe closed before stream arrived"))
+    }
+
+    /// Deny an incoming pipe request. Sends a `PipeResponse` with
+    /// `Accepted = false`.
+    #[wasm_bindgen]
+    pub async fn deny_pipe(&self, pipe_id: u32) -> Result<(), JsValue> {
+        let transport = self
+            .transport
+            .borrow()
+            .clone()
+            .ok_or_else(|| js_error("not connected"))?;
+
+        let resp = CommunicationValue::new(CommunicationType::PipeResponse)
+            .with_id(pipe_id)
+            .add_typed_default(DataType::Accepted, DataValue::BoolFalse);
+        let resp_bytes = resp
+            .to_bytes()
+            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        transport.send_frame(&resp_bytes).await
     }
 
     fn set_state(&self, new_state: ConnectionState) {
@@ -738,10 +899,68 @@ impl WasmClient {
         let pending_requests = self.pending_requests.clone();
         let loop_pending_requests = pending_requests.clone();
         let ping_timer = self.ping_timer.clone();
+        let pending_pipe_creations = self.pending_pipe_creations.clone();
+        let pending_pipes = self.pending_pipes.clone();
+        let on_pipe_request = self.on_pipe_request.clone();
+        let loop_pipe_creations = pending_pipe_creations.clone();
         wasm_bindgen_futures::spawn_local(async move {
             loop_transport
-                .receive_loop(
+                .receive_loop_with_pipes(
                     move |frame: JsValue| {
+                        let message_type = frame_type(&frame);
+                        if let Some(ref msg_type) = message_type {
+                            if msg_type == "PipeRequest" {
+                                let pipe_id = frame_id(&frame).unwrap_or(0);
+                                let description = frame_property(&frame, "data")
+                                    .and_then(|data| {
+                                        let desc = js_sys::Reflect::get(
+                                            &data,
+                                            &JsValue::from_str("Description"),
+                                        )
+                                        .ok()?;
+                                        desc.as_string()
+                                    })
+                                    .unwrap_or_default();
+
+                                let cb = on_pipe_request.borrow();
+                                if let Some(ref callback) = *cb {
+                                    let obj = js_sys::Object::new();
+                                    let _ = js_sys::Reflect::set(
+                                        &obj,
+                                        &"pipeId".into(),
+                                        &JsValue::from_f64(pipe_id as f64),
+                                    );
+                                    let _ = js_sys::Reflect::set(
+                                        &obj,
+                                        &"description".into(),
+                                        &JsValue::from_str(&description),
+                                    );
+                                    let _ = callback.call1(&JsValue::NULL, &obj.into());
+                                }
+                                return;
+                            }
+
+                            if msg_type == "PipeResponse" {
+                                let pipe_id = frame_id(&frame).unwrap_or(0);
+                                let accepted = frame_property(&frame, "data")
+                                    .and_then(|data| {
+                                        let acc = js_sys::Reflect::get(
+                                            &data,
+                                            &JsValue::from_str("Accepted"),
+                                        )
+                                        .ok()?;
+                                        acc.as_bool()
+                                    })
+                                    .unwrap_or(false);
+
+                                let mut pending = loop_pipe_creations.borrow_mut();
+                                if let Some(tx) = pending.remove(&pipe_id) {
+                                    let _ = tx.send(Ok(accepted));
+                                }
+                                return;
+                            }
+                        }
+
                         route_incoming_frame(
                             &frame,
                             &on_msg,
@@ -750,11 +969,19 @@ impl WasmClient {
                         );
                     },
                     on_err.clone(),
+                    move |pipe_reader: PipeReader| {
+                        let pipe_id = pipe_reader.pipe_id();
+                        let mut pending = pending_pipes.borrow_mut();
+                        if let Some(tx) = pending.remove(&pipe_id) {
+                            let _ = tx.send(pipe_reader);
+                        }
+                    },
                 )
                 .await;
             state.set(ConnectionState::Disconnected);
             stop_ping_timer(&ping_timer);
             reject_pending_requests(&pending_requests, "disconnected");
+            reject_pending_pipe_creations(&pending_pipe_creations, "disconnected");
         });
     }
 

@@ -4,7 +4,6 @@ mod keys;
 mod tls;
 
 use mtp::host::{AuthenticationPolicy, HostConfig, MTPHost};
-
 use mtp::type_map::TypeMap;
 use std::future::Future;
 use std::path::Path;
@@ -28,6 +27,54 @@ fn dev_cert_paths() -> (String, String) {
     (cert, key)
 }
 
+async fn handle_pipe_loopback(
+    conn: &mtp::host::MTPConnection,
+    req: mtp::host::PipeRequest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pipe_id = req.id();
+    println!(
+        "  [loopback] Pipe request: id={pipe_id} description={:?}",
+        req.description()
+    );
+
+    println!("  [loopback] Calling accept() for pipe {pipe_id} ...");
+    let mut reader = req.accept().await?;
+    println!("  [loopback] Pipe {pipe_id} accepted, reading data ...");
+
+    let mut buf = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buf).await?;
+    println!(
+        "  [loopback] Pipe {pipe_id} read {} bytes, creating return pipe ...",
+        buf.len()
+    );
+
+    let handle = conn.create_pipe("loopback").await?;
+    println!(
+        "  [loopback] Return pipe created (id={}), waiting for client ...",
+        handle.pipe_id()
+    );
+
+    match handle.wait().await? {
+        Some(mut writer) => {
+            println!(
+                "  [loopback] Client accepted return pipe, writing {} bytes ...",
+                buf.len()
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut writer, &buf).await?;
+            writer.finish().await?;
+            println!(
+                "  [loopback] Pipe {pipe_id} loopback complete ({} bytes)",
+                buf.len()
+            );
+        }
+        None => {
+            eprintln!("  [loopback] Return pipe denied by client for pipe {pipe_id}");
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (cert_path, key_path) = dev_cert_paths();
@@ -39,8 +86,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_host_id, host_keyring) = keys::load_or_generate_host_keys("host.mk")?;
     keys::export_host_public_keys(&host_keyring)?;
 
-    // The keyring is moved into the host config; keep a copy for decrypting the
-    // demo payloads clients encrypt to our KEM public key.
     let decrypt_keyring = mtp::crypto::Keyring::from_bytes(&host_keyring.to_bytes())
         .expect("re-load host keyring for decryption");
 
@@ -116,20 +161,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let tm: &TypeMap = conn.codec.registry().get(&conn.version).unwrap();
 
-        match conn.receiver.receive().await {
-            Ok(msg) => {
-                println!("Received: {msg}");
-                let response = handlers::process_and_respond(
-                    &msg,
-                    tm,
-                    conn.client_public_key.as_ref(),
-                    &decrypt_keyring,
-                );
-                println!("Sending: {response}");
-                conn.sender.send(&response).await?;
-            }
-            Err(e) => {
-                eprintln!("Receive error: {e}");
+        println!("Waiting for messages / pipe requests ...");
+        loop {
+            tokio::select! {
+                biased;
+
+                pipe_req = conn.receive_pipe() => {
+                    match pipe_req {
+                        Ok(req) => {
+                            println!("  Pipe request: id={} desc={:?}", req.id(), req.description());
+                            if let Err(e) = handle_pipe_loopback(&conn, req).await {
+                                eprintln!("  Pipe loopback error: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            println!("Pipe channel closed: {e}");
+                            break;
+                        }
+                    }
+                }
+                msg = conn.receive() => {
+                    match msg {
+                        Ok(msg) => {
+                            println!("Received: {msg}");
+                            let response = handlers::process_and_respond(
+                                &msg,
+                                tm,
+                                conn.client_public_key.as_ref(),
+                                &decrypt_keyring,
+                            );
+                            println!("Sending: {response}");
+                            if let Err(e) = conn.sender.send(&response).await {
+                                eprintln!("Send error: {e}");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            println!("Connection ended: {e}");
+                            break;
+                        }
+                    }
+                }
             }
         }
 

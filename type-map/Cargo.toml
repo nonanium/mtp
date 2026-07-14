@@ -5,10 +5,11 @@ edition = "2024"
 build = "build.rs"
 
 [features]
-default = []
 # Enables multi-version type-map constructors, builtin_type_maps(), and
 # the Registry struct for version negotiation. Used by host, not client.
 registry = []
+
+pipes = []
 
 [dependencies]
 

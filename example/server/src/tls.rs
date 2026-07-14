@@ -1,7 +1,9 @@
-use std::fs;
-use std::path::Path;
-
 use base64::Engine;
+use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
+use std::fs;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::Path;
+use time::{Duration, OffsetDateTime};
 
 pub fn load_or_generate_tls(
     cert_path: &str,
@@ -19,8 +21,26 @@ pub fn load_or_generate_tls(
     if let Some(parent) = Path::new(key_path).parent() {
         fs::create_dir_all(parent)?;
     }
-    let key_pair = rcgen::KeyPair::generate()?;
-    let params = rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])?;
+
+    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+
+    let mut params = CertificateParams::new(vec!["localhost".into()])?;
+    params.not_before = OffsetDateTime::now_utc() - Duration::minutes(5);
+    params.not_after = OffsetDateTime::now_utc() + Duration::days(13);
+
+    params
+        .subject_alt_names
+        .push(SanType::IpAddress(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+    params
+        .subject_alt_names
+        .push(SanType::IpAddress(IpAddr::V6(Ipv6Addr::new(
+            0, 0, 0, 0, 0, 0, 0, 1,
+        ))));
+
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.is_ca = IsCa::NoCa;
+
     let cert = params.self_signed(&key_pair)?;
 
     let cert_str = cert.pem();

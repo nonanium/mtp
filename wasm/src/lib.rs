@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod error;
 pub mod frame;
 pub mod logging;
+pub mod pipe;
 pub mod subscription;
 pub mod transport;
 

@@ -1,4 +1,6 @@
 use crate::ConnectionHandle;
+#[cfg(feature = "pipes")]
+use crate::pipe::PipeReader;
 use mtp_codec::CommunicationValue;
 use mtp_common::CommunicationError;
 use std::sync::Arc;
@@ -6,6 +8,13 @@ use tokio::sync::{mpsc, Mutex, Notify, RwLock, Semaphore};
 use tokio::time::{Duration, sleep, timeout};
 use wtransport::Connection;
 use tracing::{debug, info, instrument, trace};
+
+#[cfg(feature = "pipes")]
+#[derive(Debug)]
+pub enum TransportEvent {
+    Message(CommunicationValue),
+    Pipe(PipeReader),
+}
 
 const APPLICATION_CLOSE_REASON: &str = "mtp-close";
 
@@ -418,6 +427,43 @@ impl Sender {
         &self.handle
     }
 
+    #[cfg(feature = "pipes")]
+    #[instrument(skip(self, description), level = "trace")]
+    pub async fn open_pipe(
+        &self,
+        pipe_id: u32,
+        description: &str,
+    ) -> Result<crate::pipe::PipeWriter, CommunicationError> {
+        if self.handle.is_closed() {
+            return Err(self
+                .handle
+                .close_reason()
+                .unwrap_or(CommunicationError::UseAfterClosed));
+        }
+
+        if self.connection.quic_connection().close_reason().is_some() {
+            let reason = self
+                .handle
+                .close_reason()
+                .unwrap_or(CommunicationError::StreamClosed);
+            self.handle.close(Some(reason.clone()));
+            return Err(reason);
+        }
+
+        let mut stream = Self::open_uni_stream(&self.connection, &self.policy).await?;
+
+        let request = CommunicationValue::new(mtp_codec::CommunicationType::PipeRequest)
+            .with_id(pipe_id)
+            .add_typed_default(
+                mtp_codec::DataType::Description,
+                mtp_codec::DataValue::Str(description.to_string()),
+            );
+
+        Self::write_frame(&mut stream, &request, &self.policy).await?;
+
+        Ok(crate::pipe::PipeWriter { stream })
+    }
+
     #[instrument(skip(self), level = "trace")]
     pub fn close(&self) {
         info!(target = "mtp.transport", "fire-and-forget close requested");
@@ -518,17 +564,46 @@ impl Sender {
     }
 }
 
-/// Single-consumer framed message receiver.
+/// Framed message receiver.
 ///
-/// `receive()` is intended to be driven by one task at a time. Internally the
-/// underlying `mpsc::Receiver` is protected by a mutex so the type remains
-/// `Sync`, but it is not a multi-consumer queue.
+/// When the `pipes` feature is disabled, `receive()` is intended to be driven
+/// by one task at a time. When `pipes` is enabled, an internal dispatcher task
+/// consumes events from the channel; applications should use the
+/// `MTPConnection::receive()` and `MTPConnection::receive_pipe()` methods
+/// instead of calling `receiver.receive()` directly.
+///
+/// The type is cheaply cloneable: all clones share the same internal channel.
 pub struct Receiver {
+    inner: Arc<ReceiverInner>,
+}
+
+struct ReceiverInner {
+    #[cfg(feature = "pipes")]
+    msg_rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
+    #[cfg(feature = "pipes")]
+    pipe_rx: Mutex<mpsc::Receiver<PipeReader>>,
+    #[cfg(not(feature = "pipes"))]
     rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
     _accept_task: tokio::task::JoinHandle<()>,
     handle: Arc<ConnectionHandle>,
     ping_control: Arc<RwLock<PingControl>>,
     queue_notify: Arc<Notify>,
+}
+
+impl Clone for Receiver {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Drop for Receiver {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.inner) == 1 {
+            self.inner._accept_task.abort();
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -537,20 +612,17 @@ struct PingControl {
     pong_observer: Option<mpsc::UnboundedSender<CommunicationValue>>,
 }
 
-impl Drop for Receiver {
-    fn drop(&mut self) {
-        // The accept loop holds clones of the connection and the shared
-        // ConnectionHandle. Without this, dropping a Receiver without first
-        // closing the connection would leave that task running forever. Abort
-        // it directly rather than closing the shared handle, so a still-live
-        // Sender on the same connection is unaffected. abort() is a no-op if
-        // the task already finished (e.g. the connection was closed).
-        self._accept_task.abort();
-    }
-}
-
 impl Receiver {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>, policy: Arc<Policy>) -> Self {
+        #[cfg(feature = "pipes")]
+        let (msg_tx, msg_rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(
+            policy.receiver_queue_capacity,
+        );
+        #[cfg(feature = "pipes")]
+        let (pipe_tx, pipe_rx) = mpsc::channel::<PipeReader>(
+            policy.receiver_queue_capacity,
+        );
+        #[cfg(not(feature = "pipes"))]
         let (tx, rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(
             policy.receiver_queue_capacity,
         );
@@ -581,7 +653,12 @@ impl Receiver {
             let mut close_rx = conn_handle.subscribe_close();
 
             loop {
-                if tx.capacity() == 0 {
+                #[cfg(feature = "pipes")]
+                let cap_full = msg_tx.capacity() == 0 || pipe_tx.capacity() == 0;
+                #[cfg(not(feature = "pipes"))]
+                let cap_full = tx.capacity() == 0;
+
+                if cap_full {
                     trace!(target = "mtp.transport", "accept loop paused: receiver queue full");
                     tokio::select! {
                         _ = close_rx.changed() => {
@@ -611,6 +688,11 @@ impl Receiver {
                                     Ok(permit) => permit,
                                     Err(_) => break,
                                 };
+                                #[cfg(feature = "pipes")]
+                                let msg_tx_stream = msg_tx.clone();
+                                #[cfg(feature = "pipes")]
+                                let pipe_tx_stream = pipe_tx.clone();
+                                #[cfg(not(feature = "pipes"))]
                                 let tx_stream = tx.clone();
                                 let stream_handle = conn_handle.clone();
                                 let stream_policy = accept_policy.clone();
@@ -625,6 +707,9 @@ impl Receiver {
                                             && frame_count >= max_frames
                                         {
                                             let close_error = CommunicationError::StreamError;
+                                            #[cfg(feature = "pipes")]
+                                            let _ = msg_tx_stream.send(Err(close_error.clone())).await;
+                                            #[cfg(not(feature = "pipes"))]
                                             let _ = tx_stream.send(Err(close_error.clone())).await;
                                             stream_handle.close(Some(close_error));
                                             break;
@@ -633,6 +718,40 @@ impl Receiver {
                                         match Self::read_one_frame(&mut s, &stream_policy).await {
                                             Ok(ReceivedFrame::Message(msg)) => {
                                                 frame_count += 1;
+
+                                                #[cfg(feature = "pipes")]
+                                                {
+                                                    let pipe_request_type =
+                                                        mtp_codec::CommunicationType::PipeRequest
+                                                            .to_id(&mtp_codec::TypeMap::latest());
+                                                    if msg.get_type() == pipe_request_type
+                                                        && frame_count == 1
+                                                    {
+                                                        let pipe_id = msg.get_id();
+                                                        let description = msg
+                                                            .get_str(mtp_codec::DataType::Description)
+                                                            .unwrap_or("")
+                                                            .to_string();
+
+                                                        let pipe_reader = crate::pipe::PipeReader {
+                                                            stream: s,
+                                                            description,
+                                                            pipe_id,
+                                                        };
+
+                                                        if pipe_tx_stream
+                                                            .send(pipe_reader)
+                                                            .await
+                                                            .is_err()
+                                                        {
+                                                            stream_handle.close(Some(
+                                                                CommunicationError::StreamClosed,
+                                                            ));
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+
                                                 let ping_type = mtp_codec::CommunicationType::Ping
                                                     .to_id(&mtp_codec::TypeMap::latest());
                                                 let pong_type = mtp_codec::CommunicationType::Pong
@@ -674,12 +793,24 @@ impl Receiver {
                                                     continue;
                                                 }
 
+                                                #[cfg(feature = "pipes")]
+                                                if msg_tx_stream
+                                                    .send(Ok(msg))
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    break;
+                                                }
+                                                #[cfg(not(feature = "pipes"))]
                                                 if tx_stream.send(Ok(msg)).await.is_err() {
                                                     break;
                                                 }
                                             }
                                             Ok(ReceivedFrame::ClosedByPeer) => {
                                                 let close_error = CommunicationError::StreamClosed;
+                                                #[cfg(feature = "pipes")]
+                                                let _ = msg_tx_stream.send(Err(close_error.clone())).await;
+                                                #[cfg(not(feature = "pipes"))]
                                                 let _ = tx_stream.send(Err(close_error.clone())).await;
                                                 stream_handle.close(Some(close_error));
                                                 break;
@@ -697,6 +828,9 @@ impl Receiver {
                                                     other => other,
                                                 };
 
+                                                #[cfg(feature = "pipes")]
+                                                let _ = msg_tx_stream.send(Err(close_error.clone())).await;
+                                                #[cfg(not(feature = "pipes"))]
                                                 let _ = tx_stream.send(Err(close_error.clone())).await;
                                                 stream_handle.close(Some(close_error));
                                                 break;
@@ -709,6 +843,9 @@ impl Receiver {
                             Ok(Err(_e)) => {
                                 // A connection error from accept_uni means the connection is permanently closed.
                                 let close_error = CommunicationError::StreamClosed;
+                                #[cfg(feature = "pipes")]
+                                let _ = msg_tx.send(Err(close_error.clone())).await;
+                                #[cfg(not(feature = "pipes"))]
                                 let _ = tx.send(Err(close_error.clone())).await;
                                 conn_handle.close(Some(close_error));
                                 break;
@@ -717,6 +854,9 @@ impl Receiver {
                             Err(_) => {
                                 if accept_connection.quic_connection().close_reason().is_some() {
                                     let close_error = CommunicationError::StreamClosed;
+                                    #[cfg(feature = "pipes")]
+                                    let _ = msg_tx.send(Err(close_error.clone())).await;
+                                    #[cfg(not(feature = "pipes"))]
                                     let _ = tx.send(Err(close_error.clone())).await;
                                     conn_handle.close(Some(close_error));
                                     break;
@@ -733,17 +873,24 @@ impl Receiver {
         });
 
         Self {
-            rx: Mutex::new(rx),
-            _accept_task: accept_task,
-            handle,
-            ping_control,
-            queue_notify,
+            inner: Arc::new(ReceiverInner {
+                #[cfg(feature = "pipes")]
+                msg_rx: Mutex::new(msg_rx),
+                #[cfg(feature = "pipes")]
+                pipe_rx: Mutex::new(pipe_rx),
+                #[cfg(not(feature = "pipes"))]
+                rx: Mutex::new(rx),
+                _accept_task: accept_task,
+                handle,
+                ping_control,
+                queue_notify,
+            }),
         }
     }
 
     /* Respond to reserved Ping frames without exposing them to application I/O. */
     pub fn respond_to_pings(&self, sender: Sender) {
-        if let Ok(mut control) = self.ping_control.try_write() {
+        if let Ok(mut control) = self.inner.ping_control.try_write() {
             control.pong_sender = Some(sender);
         } else {
             log::warn!("[Receiver] could not register Ping responder: control lock busy");
@@ -752,7 +899,7 @@ impl Receiver {
 
     /* Route reserved Pong frames to a connection-level observer. */
     pub fn observe_pongs(&self, observer: mpsc::UnboundedSender<CommunicationValue>) {
-        if let Ok(mut control) = self.ping_control.try_write() {
+        if let Ok(mut control) = self.inner.ping_control.try_write() {
             control.pong_observer = Some(observer);
         } else {
             log::warn!("[Receiver] could not register Pong observer: control lock busy");
@@ -837,44 +984,163 @@ impl Receiver {
 
     #[instrument(skip(self), level = "trace")]
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
-        if self.handle.is_closed() {
+        if self.inner.handle.is_closed() {
             return Err(self
+                .inner
                 .handle
                 .close_reason()
                 .unwrap_or(CommunicationError::StreamClosed));
         }
 
-        let mut rx = self.rx.lock().await;
-        match rx.recv().await {
-            Some(result) => {
-                self.queue_notify.notify_one();
-                result
+        #[cfg(feature = "pipes")]
+        {
+            let mut rx = self.inner.msg_rx.lock().await;
+            match rx.recv().await {
+                Some(Ok(msg)) => {
+                    self.inner.queue_notify.notify_one();
+                    Ok(msg)
+                }
+                Some(Err(e)) => Err(e),
+                None => Err(self
+                    .inner
+                    .handle
+                    .close_reason()
+                    .unwrap_or(CommunicationError::StreamClosed)),
             }
-            _ => Err(self
+        }
+        #[cfg(not(feature = "pipes"))]
+        {
+            let mut rx = self.inner.rx.lock().await;
+            match rx.recv().await {
+                Some(result) => {
+                    self.inner.queue_notify.notify_one();
+                    result
+                }
+                None => Err(self
+                    .inner
+                    .handle
+                    .close_reason()
+                    .unwrap_or(CommunicationError::StreamClosed)),
+            }
+        }
+    }
+
+    #[cfg(feature = "pipes")]
+    #[instrument(skip(self), level = "trace")]
+    pub async fn receive_event(&self) -> Result<TransportEvent, CommunicationError> {
+        if self.inner.handle.is_closed() {
+            return Err(self
+                .inner
+                .handle
+                .close_reason()
+                .unwrap_or(CommunicationError::StreamClosed));
+        }
+
+        let mut msg_rx = self.inner.msg_rx.lock().await;
+        let mut pipe_rx = self.inner.pipe_rx.lock().await;
+        tokio::select! {
+            msg = msg_rx.recv() => {
+                match msg {
+                    Some(Ok(val)) => {
+                        self.inner.queue_notify.notify_one();
+                        Ok(TransportEvent::Message(val))
+                    }
+                    Some(Err(e)) => Err(e),
+                    None => Err(self
+                        .inner
+                        .handle
+                        .close_reason()
+                        .unwrap_or(CommunicationError::StreamClosed)),
+                }
+            }
+            pipe = pipe_rx.recv() => {
+                match pipe {
+                    Some(reader) => {
+                        self.inner.queue_notify.notify_one();
+                        Ok(TransportEvent::Pipe(reader))
+                    }
+                    None => Err(self
+                        .inner
+                        .handle
+                        .close_reason()
+                        .unwrap_or(CommunicationError::StreamClosed)),
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "pipes")]
+    #[instrument(skip(self), level = "trace")]
+    pub async fn receive_pipe(&self) -> Result<PipeReader, CommunicationError> {
+        if self.inner.handle.is_closed() {
+            return Err(self
+                .inner
+                .handle
+                .close_reason()
+                .unwrap_or(CommunicationError::StreamClosed));
+        }
+
+        let mut rx = self.inner.pipe_rx.lock().await;
+        match rx.recv().await {
+            Some(reader) => {
+                self.inner.queue_notify.notify_one();
+                Ok(reader)
+            }
+            None => Err(self
+                .inner
                 .handle
                 .close_reason()
                 .unwrap_or(CommunicationError::StreamClosed)),
         }
     }
 
+    #[cfg(feature = "pipes")]
+    pub fn try_receive_pipe(&self) -> Result<Option<PipeReader>, CommunicationError> {
+        if self.inner.handle.is_closed() {
+            return Err(self
+                .inner
+                .handle
+                .close_reason()
+                .unwrap_or(CommunicationError::StreamClosed));
+        }
+
+        match self.inner.pipe_rx.try_lock() {
+            Ok(mut rx) => match rx.try_recv() {
+                Ok(reader) => {
+                    self.inner.queue_notify.notify_one();
+                    Ok(Some(reader))
+                }
+                Err(mpsc::error::TryRecvError::Empty) => Ok(None),
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    return Err(self
+                        .inner
+                        .handle
+                        .close_reason()
+                        .unwrap_or(CommunicationError::StreamClosed));
+                }
+            },
+            Err(_) => Ok(None),
+        }
+    }
+
     pub fn handle(&self) -> &Arc<ConnectionHandle> {
-        &self.handle
+        &self.inner.handle
     }
 
     pub fn close(&self) {
-        self.handle.close(None);
+        self.inner.handle.close(None);
     }
 
     pub fn is_open(&self) -> bool {
-        self.handle.is_open()
+        self.inner.handle.is_open()
     }
 
     pub fn is_closed(&self) -> bool {
-        self.handle.is_closed()
+        self.inner.handle.is_closed()
     }
 
     pub fn close_reason(&self) -> Option<CommunicationError> {
-        self.handle.close_reason()
+        self.inner.handle.close_reason()
     }
 }
 

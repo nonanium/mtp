@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
@@ -11,7 +11,7 @@ use crate::frame::parse_frame_value;
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 
 /// Logs the `streamErrorCode` from a stream-level WebTransportError (STOP_SENDING / RESET_STREAM). Session errors are skipped.
-fn log_stream_error_code(error: &JsValue, context: &str) {
+pub(crate) fn log_stream_error_code(error: &JsValue, context: &str) {
     let source = js_sys::Reflect::get(error, &JsValue::from_str("source"))
         .ok()
         .and_then(|v| v.as_string());
@@ -70,7 +70,7 @@ fn resolve_stream_readable(recv_stream: &JsValue) -> Result<JsValue, JsValue> {
 }
 
 /// Releases a writer's lock so an abandoned writer isn't treated as an abort (which sends STOP_SENDING).
-fn release_writer_lock(writer: &JsValue) {
+pub(crate) fn release_writer_lock(writer: &JsValue) {
     if let Ok(release) = js_sys::Reflect::get(writer, &JsValue::from_str("releaseLock"))
         .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
     {
@@ -79,7 +79,7 @@ fn release_writer_lock(writer: &JsValue) {
 }
 
 /// Releases a reader's lock so an abandoned reader isn't treated as a cancel (which sends STOP_SENDING).
-fn release_reader_lock(reader: &JsValue) {
+pub(crate) fn release_reader_lock(reader: &JsValue) {
     if let Ok(release) = js_sys::Reflect::get(reader, &JsValue::from_str("releaseLock"))
         .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
     {
@@ -119,6 +119,8 @@ pub struct WasmTransport {
     stream_reader: Rc<RefCell<Option<JsValue>>>,
     /// Bytes already read from the current stream but not yet consumed as a frame.
     buffer: Rc<RefCell<Vec<u8>>>,
+    /// Set to `true` when `open_next_stream` succeeds; cleared after the first frame is parsed.
+    new_stream_frame: Rc<Cell<bool>>,
 }
 
 impl WasmTransport {
@@ -177,6 +179,7 @@ impl WasmTransport {
             streams_reader: Rc::new(RefCell::new(None)),
             stream_reader: Rc::new(RefCell::new(None)),
             buffer: Rc::new(RefCell::new(Vec::new())),
+            new_stream_frame: Rc::new(Cell::new(false)),
         })
     }
 
@@ -309,6 +312,7 @@ impl WasmTransport {
             .map_err(|_| js_error("stream getReader call failed"))?;
 
         *self.stream_reader.borrow_mut() = Some(reader);
+        self.new_stream_frame.set(true);
         Ok(true)
     }
 
@@ -449,6 +453,136 @@ impl WasmTransport {
                 }
             }
         }
+    }
+
+    /// Pipe-aware receive loop. Identical to `receive_loop` but detects
+    /// `PipeRequest` as the first frame on a new incoming stream and routes
+    /// the stream to `on_pipe` instead of `on_message`.
+    pub async fn receive_loop_with_pipes<F, G>(
+        &self,
+        mut on_message: F,
+        on_error: js_sys::Function,
+        mut on_pipe: G,
+    ) where
+        F: FnMut(JsValue),
+        G: FnMut(crate::pipe::PipeReader),
+    {
+        let pipe_request_type = mtp_codec::CommunicationType::PipeRequest
+            .to_id(&mtp_codec::TypeMap::latest());
+
+        loop {
+            match self.next_frame().await {
+                Ok(FrameOutcome::Frame(frame)) => {
+                    let is_first = self.new_stream_frame.get();
+                    if is_first {
+                        self.new_stream_frame.set(false);
+                        if let Ok(comm) = mtp_codec::CommunicationValue::from_bytes(&frame)
+                            && comm.get_type() == pipe_request_type
+                        {
+                            let pipe_id = comm.get_id();
+                            let description = comm
+                                .get_str(mtp_codec::DataType::Description)
+                                .unwrap_or("")
+                                .to_string();
+
+                            let pending = {
+                                let mut buf = self.buffer.borrow_mut();
+                                std::mem::take(&mut *buf)
+                            };
+
+                            if let Some(reader) = self.stream_reader.borrow_mut().take() {
+                                let pipe_reader = crate::pipe::PipeReader::new(
+                                    reader,
+                                    pipe_id,
+                                    description,
+                                    pending,
+                                );
+                                on_pipe(pipe_reader);
+                            }
+                            continue;
+                        }
+                    }
+
+                    match parse_frame_value(&frame) {
+                        Ok(parsed) => {
+                            on_message(parsed);
+                        }
+                        Err(e) => {
+                            let message = e.as_string().unwrap_or_else(|| format!("{:?}", e));
+                            let _ =
+                                on_error.call1(&JsValue::NULL, &JsValue::from_str(&message));
+                        }
+                    }
+                }
+                Ok(FrameOutcome::Closed) | Ok(FrameOutcome::Ended) => break,
+                Err(e) => {
+                    let _ = on_error.call1(&JsValue::NULL, &e);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Open a new outgoing unidirectional stream and write a `PipeRequest`
+    /// frame as the first frame. Returns a `PipeWriter` whose underlying
+    /// `WritableStream` remains open for subsequent raw-data writes.
+    pub async fn open_pipe(
+        &self,
+        pipe_id: u32,
+        description: &str,
+    ) -> Result<crate::pipe::PipeWriter, JsValue> {
+        let create_stream = js_sys::Reflect::get(
+            &self.inner,
+            &JsValue::from_str("createUnidirectionalStream"),
+        )?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| js_error("createUnidirectionalStream not a function"))?;
+        let stream_promise = create_stream
+            .call0(&self.inner)?
+            .dyn_into::<js_sys::Promise>()
+            .map_err(|_| js_error("createUnidirectionalStream did not return a Promise"))?;
+        let stream = JsFuture::from(stream_promise).await?;
+
+        let writable_or_stream = resolve_stream_writable(&stream)?;
+        let writer_val = js_sys::Reflect::get(&writable_or_stream, &JsValue::from_str("getWriter"))
+            .map_err(|_| js_error("missing getWriter"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("getWriter not a function"))?
+            .call0(&writable_or_stream)
+            .map_err(|_| js_error("getWriter call failed"))?;
+
+        let request = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::PipeRequest)
+            .with_id(pipe_id)
+            .add_typed_default(
+                mtp_codec::DataType::Description,
+                mtp_codec::DataValue::Str(description.to_string()),
+            );
+        let frame_bytes = request
+            .to_bytes()
+            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+
+        let len = frame_bytes.len() as u32;
+        let mut wire = Vec::with_capacity(4 + frame_bytes.len());
+        wire.extend_from_slice(&len.to_be_bytes());
+        wire.extend_from_slice(&frame_bytes);
+
+        let chunk = js_sys::Uint8Array::from(&wire[..]);
+        let write_fn = js_sys::Reflect::get(&writer_val, &JsValue::from_str("write"))
+            .map_err(|_| js_error("missing write"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("write not a function"))?;
+        let write_promise = write_fn
+            .call1(&writer_val, &chunk)
+            .map_err(|e| js_error(&format!("write failed: {:?}", e)))?;
+        if let Err(e) =
+            JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await
+        {
+            log_stream_error_code(&e, "open_pipe write");
+            release_writer_lock(&writer_val);
+            return Err(e);
+        }
+
+        Ok(crate::pipe::PipeWriter::new(writer_val, pipe_id))
     }
 
     pub fn close(&self) {

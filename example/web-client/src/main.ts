@@ -1,14 +1,28 @@
 import { MTPClient } from "mtp";
-import type { MTPCredentialStorage, MTPLogEvent, ParsedFrame } from "mtp";
+import type {
+  MTPCredentialStorage,
+  MTPLogEvent,
+  MTPPipeReader,
+  ParsedFrame,
+} from "mtp";
 
 const STATUS = document.getElementById("status")!;
 const KEY_STATUS = document.getElementById("key-status")!;
 const SERVER_URL = document.getElementById("server-url") as HTMLInputElement;
-const HOST_PUBLIC_KEY = document.getElementById("host-public-key") as HTMLTextAreaElement;
-const CLIENT_CREDENTIALS = document.getElementById("client-credentials") as HTMLTextAreaElement;
-const GENERATE_KEYPAIR = document.getElementById("generate-keypair") as HTMLButtonElement;
+const HOST_PUBLIC_KEY = document.getElementById(
+  "host-public-key",
+) as HTMLTextAreaElement;
+const CLIENT_CREDENTIALS = document.getElementById(
+  "client-credentials",
+) as HTMLTextAreaElement;
+const GENERATE_KEYPAIR = document.getElementById(
+  "generate-keypair",
+) as HTMLButtonElement;
 const CONNECT = document.getElementById("connect") as HTMLButtonElement;
 const CLEAR_KEYS = document.getElementById("clear-keys") as HTMLButtonElement;
+const STREAM_MIC = document.getElementById("stream-mic") as HTMLButtonElement;
+const STOP_MIC = document.getElementById("stop-mic") as HTMLButtonElement;
+const PIPE_STATUS = document.getElementById("pipe-status")!;
 
 const CREDENTIALS_KEY = "mtp-web-client-credentials";
 const HOST_PUBLIC_KEY_KEY = "mtp-web-client-host-public-key";
@@ -22,6 +36,13 @@ type SavedKeys = {
 
 let clientId: bigint | null = null;
 let devCertHash = "";
+let activeClient: ReturnType<typeof createClient> extends Promise<infer T>
+  ? T
+  : never;
+let micStream: MediaStream | null = null;
+let mediaRecorder: MediaRecorder | null = null;
+let pipeSendCount = 0;
+let pendingPipeReaders: MTPPipeReader[] = [];
 
 const credentialStorage: MTPCredentialStorage = {
   getItem: (key) => localStorage.getItem(key),
@@ -34,6 +55,13 @@ function log(msg: string, cls = "") {
   line.textContent = msg;
   if (cls) line.className = cls;
   STATUS.appendChild(line);
+}
+
+function pipeLog(msg: string, cls = "pipe") {
+  const line = document.createElement("div");
+  line.textContent = msg;
+  if (cls) line.className = cls;
+  PIPE_STATUS.appendChild(line);
 }
 
 function renderStructured(value: unknown): string {
@@ -70,13 +98,16 @@ function setKeyStatus(msg: string) {
 }
 
 function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 function hexToBytes(value: string): Uint8Array {
   const hex = value.replace(/[^0-9a-fA-F]/g, "");
   if (hex.length === 0) throw new Error("host public key is required");
-  if (hex.length % 2 !== 0) throw new Error("host public key hex has an odd length");
+  if (hex.length % 2 !== 0)
+    throw new Error("host public key hex has an odd length");
 
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i += 1) {
@@ -87,7 +118,10 @@ function hexToBytes(value: string): Uint8Array {
 
 function saveHostPublicKey() {
   try {
-    localStorage.setItem(HOST_PUBLIC_KEY_KEY, bytesToHex(hexToBytes(HOST_PUBLIC_KEY.value)));
+    localStorage.setItem(
+      HOST_PUBLIC_KEY_KEY,
+      bytesToHex(hexToBytes(HOST_PUBLIC_KEY.value)),
+    );
   } catch {
     localStorage.removeItem(HOST_PUBLIC_KEY_KEY);
   }
@@ -102,7 +136,9 @@ function loadKeys() {
 
   if (!raw) {
     CLIENT_CREDENTIALS.value = "";
-    setKeyStatus("No saved SDK credentials. The next connection will generate and store a reusable keyring.");
+    setKeyStatus(
+      "No saved SDK credentials. The next connection will generate and store a reusable keyring.",
+    );
     return;
   }
 
@@ -127,11 +163,13 @@ function loadKeys() {
 
 async function loadHostPublicKey() {
   try {
-    const response = await fetch("/host_public_key_bundle.hex", { cache: "no-store" });
+    const response = await fetch("/host_public_key_bundle.hex", {
+      cache: "no-store",
+    });
     if (!response.ok) return;
 
     const hostPublicKey = (await response.text()).trim();
-    if (!hostPublicKey) return;
+    if (!hostPublicKey || !/^[0-9a-f]+$/i.test(hostPublicKey)) return;
 
     HOST_PUBLIC_KEY.value = hostPublicKey;
     saveHostPublicKey();
@@ -143,11 +181,14 @@ async function loadHostPublicKey() {
 
 async function loadDevCertHash() {
   try {
-    const response = await fetch("/mtp_dev_cert_hash.txt", { cache: "no-store" });
+    const response = await fetch(`/mtp_dev_cert_hash.txt?t=${Date.now()}`, {
+      cache: "no-store",
+    });
     if (!response.ok) return;
 
-    devCertHash = (await response.text()).trim();
-    if (devCertHash) {
+    const hash = (await response.text()).trim();
+    if (/^[0-9a-f]{64}$/i.test(hash)) {
+      devCertHash = hash;
       log(`Loaded WebTransport certificate hash: ${devCertHash}`);
     }
   } catch {
@@ -157,14 +198,47 @@ async function loadDevCertHash() {
 
 async function initWasm() {
   log("Loading WASM module...");
-  await MTPClient.create({ url: SERVER_URL.value, storage: credentialStorage, credentialsStorageKey: CREDENTIALS_KEY });
+  await MTPClient.create({
+    url: SERVER_URL.value,
+    storage: credentialStorage,
+    credentialsStorageKey: CREDENTIALS_KEY,
+  });
   const supported = MTPClient.isSupported();
   log(`WASM loaded. WebTransport supported: ${supported}`);
   CONNECT.disabled = !supported;
 }
 
+async function createClient() {
+  const hostPk = hexToBytes(HOST_PUBLIC_KEY.value);
+  await loadDevCertHash();
+  const serverUrl = SERVER_URL.value.trim();
+  const serverCertificateHashes = devCertHash ? [devCertHash] : undefined;
+
+  const client = await MTPClient.create({
+    url: serverUrl,
+    hostPublicKey: hostPk,
+    storage: credentialStorage,
+    credentialsStorageKey: CREDENTIALS_KEY,
+    serverCertificateHashes,
+    pings: { intervalMs: 30_000 },
+    logger(event) {
+      log(
+        renderLoggerEvent(event),
+        event.hint === "error"
+          ? "error"
+          : event.type === "state"
+            ? "state"
+            : "",
+      );
+    },
+  });
+
+  return client;
+}
+
 async function connect() {
   STATUS.textContent = "";
+  PIPE_STATUS.textContent = "";
 
   if (!MTPClient.isSupported()) {
     log("WebTransport is not supported in this browser.", "error");
@@ -175,25 +249,19 @@ async function connect() {
   await loadDevCertHash();
 
   const serverUrl = SERVER_URL.value.trim();
-  const serverCertificateHashes = devCertHash ? [`sha-256:${devCertHash}`] : undefined;
+  const serverCertificateHashes = devCertHash ? [devCertHash] : undefined;
   if (serverCertificateHashes) {
     log(`Pinning WebTransport certificate hash: ${serverCertificateHashes[0]}`);
   } else {
-    log("No WebTransport certificate hash loaded; relying on browser trust store.", "state");
+    log(
+      "No WebTransport certificate hash loaded; relying on browser trust store.",
+      "state",
+    );
   }
 
   try {
-    const client = await MTPClient.create({
-      url: serverUrl,
-      hostPublicKey: hostPk,
-      storage: credentialStorage,
-      credentialsStorageKey: CREDENTIALS_KEY,
-      serverCertificateHashes,
-      pings: { intervalMs: 30_000 },
-      logger(event) {
-        log(renderLoggerEvent(event), event.hint === "error" ? "error" : event.type === "state" ? "state" : "");
-      },
-    });
+    const client = await createClient();
+    activeClient = client;
 
     client.subscribe("Pong", (frame: ParsedFrame) => {
       log(`Subscribed Pong: ${formatParsedFrame(frame)}`, "received");
@@ -205,23 +273,154 @@ async function connect() {
     log(`Connected as client ${activeClientId}`);
 
     log("\nSending typed Ping...");
-    await client.send("Ping", {
-      Description: "MTP web client send ping",
-      Timestamp: BigInt(Date.now()),
-    }, { sender: activeClientId });
+    await client.send(
+      "Ping",
+      {
+        Description: "MTP web client send ping",
+        Timestamp: BigInt(Date.now()),
+      },
+      { sender: activeClientId },
+    );
     log("Typed Ping sent.");
 
     log("\nRequesting Pong by Ping frame id...");
-    const response = await client.request("Ping", {
-      Description: "MTP web client request ping",
-      Timestamp: BigInt(Date.now()),
-    }, { sender: activeClientId, responseType: "Pong" });
+    const response = await client.request(
+      "Ping",
+      {
+        Description: "MTP web client request ping",
+        Timestamp: BigInt(Date.now()),
+      },
+      { sender: activeClientId, responseType: "Pong" },
+    );
     log(`Request response: ${formatParsedFrame(response)}`, "received");
 
     log("\nClient running. Waiting for incoming messages...");
+    STREAM_MIC.disabled = false;
+    log("\nPipe demo ready. Click 'Stream Microphone' to start.", "pipe");
   } catch (error) {
     log(`[error] ${error}`, "error");
   }
+}
+
+async function startMicStreaming() {
+  if (!activeClient) {
+    pipeLog("No active client connection.", "error");
+    return;
+  }
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    pipeLog(`Microphone access denied: ${e}`, "error");
+    return;
+  }
+
+  STREAM_MIC.disabled = true;
+  STOP_MIC.disabled = false;
+  pipeLog("Microphone acquired. Creating pipe ...");
+
+  const handle = await activeClient.createPipe("mic-audio");
+  pipeLog(
+    `Pipe created (id=${handle.pipeId}). Waiting for server to accept ...`,
+  );
+
+  // Handle incoming pipe requests from the server (loopback return pipes)
+  activeClient.setOnPipeRequest(async (request) => {
+    pipeLog(
+      `Incoming return pipe: id=${request.pipeId} desc=${request.description}`,
+    );
+    try {
+      const reader = await activeClient!.acceptPipe(request.pipeId);
+      pendingPipeReaders.push(reader);
+      readLoopbackPipe(reader);
+    } catch (e) {
+      pipeLog(`Failed to accept return pipe: ${e}`, "error");
+    }
+  });
+
+  const writer = await handle.wait();
+  if (!writer) {
+    pipeLog("Pipe denied by server.", "error");
+    stopMicStreaming();
+    return;
+  }
+
+  pipeLog(`Pipe accepted. Streaming microphone (pipe id=${writer.pipeId}) ...`);
+
+  // Stream microphone audio via MediaRecorder
+  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : "audio/webm";
+  mediaRecorder = new MediaRecorder(micStream, { mimeType });
+
+  mediaRecorder.ondataavailable = async (event) => {
+    if (event.data.size === 0 || !activeClient) return;
+
+    const startTime = performance.now();
+    pipeSendCount++;
+    const chunkNum = pipeSendCount;
+
+    try {
+      const buffer = await event.data.arrayBuffer();
+      const data = new Uint8Array(buffer);
+      await writer.write(data);
+      pipeLog(
+        `  [chunk ${chunkNum}] sent ${data.length} bytes (${(performance.now() - startTime).toFixed(1)}ms write)`,
+      );
+    } catch (e) {
+      pipeLog(`  [chunk ${chunkNum}] send error: ${e}`, "error");
+    }
+  };
+
+  mediaRecorder.start(200); // emit data every 200ms
+  pipeLog("Streaming started (200ms chunks).");
+}
+
+async function readLoopbackPipe(reader: MTPPipeReader) {
+  const startTime = performance.now();
+  let totalBytes = 0;
+  let chunkCount = 0;
+
+  try {
+    while (true) {
+      const data = await reader.read();
+      if (data == null) break; // EOF
+      totalBytes += data.length;
+      chunkCount++;
+    }
+  } catch (e) {
+    pipeLog(`  Return pipe read error: ${e}`, "error");
+    return;
+  }
+
+  const elapsed = performance.now() - startTime;
+  pipeLog(
+    `  Return pipe complete: ${chunkCount} chunks, ${totalBytes} bytes, ` +
+      `delay=${elapsed.toFixed(1)}ms`,
+  );
+
+  // Clean up the reader from the pending list
+  const idx = pendingPipeReaders.indexOf(reader);
+  if (idx >= 0) pendingPipeReaders.splice(idx, 1);
+}
+
+async function stopMicStreaming() {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+    mediaRecorder = null;
+  }
+
+  if (micStream) {
+    micStream.getTracks().forEach((track) => track.stop());
+    micStream = null;
+  }
+
+  // Close pending pipe readers
+  pendingPipeReaders = [];
+
+  STREAM_MIC.disabled = false;
+  STOP_MIC.disabled = true;
+  pipeLog("Microphone streaming stopped.");
 }
 
 GENERATE_KEYPAIR.addEventListener("click", () => {
@@ -229,7 +428,9 @@ GENERATE_KEYPAIR.addEventListener("click", () => {
     clientId = null;
     localStorage.removeItem(CREDENTIALS_KEY);
     CLIENT_CREDENTIALS.value = "";
-    setKeyStatus("Cleared saved credentials. The next connection will generate a new reusable keyring.");
+    setKeyStatus(
+      "Cleared saved credentials. The next connection will generate a new reusable keyring.",
+    );
     log("Cleared saved SDK credentials.");
   } catch (e) {
     log(`Credential reset failed: ${e}`, "error");
@@ -255,6 +456,17 @@ CLEAR_KEYS.addEventListener("click", () => {
   localStorage.removeItem(HOST_PUBLIC_KEY_KEY);
   setKeyStatus("No saved SDK credentials.");
   log("Cleared saved SDK credentials and host public key.");
+});
+
+STREAM_MIC.addEventListener("click", () => {
+  startMicStreaming().catch((e) => {
+    pipeLog(`Pipe streaming error: ${e}`, "error");
+    console.error(e);
+  });
+});
+
+STOP_MIC.addEventListener("click", () => {
+  stopMicStreaming();
 });
 
 HOST_PUBLIC_KEY.addEventListener("change", saveHostPublicKey);

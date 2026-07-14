@@ -8,9 +8,10 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
-mtp = { version = "0.1.0", path = "../../", features = ["crypto", "host", "files"] }
+mtp = { version = "0.1.0", path = "../../", features = ["crypto", "host", "files", "pipes"] }
 rcgen = "0.14"
 tokio = { version = "1", features = ["full"] }
 serde_json = { version = "1" }
 hex = "0.4"
 base64 = "0.22"
+time = "0.3"

@@ -1,10 +1,15 @@
 use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Version};
 use mtp_common::CommunicationError;
+#[cfg(feature = "pipes")]
+pub use mtp_common::PipeError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use rand::Rng;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, Instant};
+
+#[cfg(feature = "pipes")]
+use mtp_transport::PipeReader;
 
 pub use MTPClient as Client;
 pub use MTPConnection as Connection;
@@ -12,6 +17,9 @@ pub use mtp_transport::Policy;
 pub use mtp_transport::Receiver;
 pub use mtp_transport::SendMode;
 pub use mtp_transport::Sender;
+
+#[cfg(feature = "pipes")]
+pub use mtp_transport::PipeWriter;
 
 #[cfg(feature = "crypto")]
 fn unexpected_response_type_error(
@@ -25,6 +33,162 @@ fn unexpected_response_type_error(
         response.get_type(),
         response
     ))
+}
+
+#[cfg(feature = "pipes")]
+pub struct PipeHandle {
+    pipe_id: u32,
+    description: String,
+    sender: Sender,
+    response_rx: tokio::sync::oneshot::Receiver<Result<bool, PipeError>>,
+}
+
+#[cfg(feature = "pipes")]
+impl PipeHandle {
+    pub fn pipe_id(&self) -> u32 {
+        self.pipe_id
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub async fn wait(self) -> Result<Option<PipeWriter>, PipeError> {
+        match self.response_rx.await {
+            Ok(Ok(true)) => {
+                let writer = self
+                    .sender
+                    .open_pipe(self.pipe_id, &self.description)
+                    .await
+                    .map_err(PipeError::from)?;
+                Ok(Some(writer))
+            }
+            Ok(Ok(false)) => Ok(None),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(PipeError::StreamClosed),
+        }
+    }
+}
+
+#[cfg(feature = "pipes")]
+pub struct PipeRequest {
+    pipe_id: u32,
+    description: String,
+    sender: Sender,
+    dispatcher: Arc<PipeDispatcher>,
+}
+
+#[cfg(feature = "pipes")]
+impl PipeRequest {
+    pub fn id(&self) -> u32 {
+        self.pipe_id
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub async fn accept(self) -> Result<PipeReader, PipeError> {
+        let (pipe_tx, pipe_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut pending = self.dispatcher.pending_pipes.lock().await;
+            pending.insert(self.pipe_id, pipe_tx);
+        }
+
+        let resp = CommunicationValue::new(mtp_codec::CommunicationType::PipeResponse)
+            .with_id(self.pipe_id)
+            .add_typed_default(DataType::Accepted, DataValue::BoolTrue);
+        self.sender.send(&resp).await.map_err(PipeError::from)?;
+
+        let timeout = self.dispatcher.policy.read_timeout;
+        tokio::time::timeout(timeout, pipe_rx)
+            .await
+            .map_err(|_| PipeError::HandshakeTimeout)?
+            .map_err(|_| PipeError::StreamClosed)
+    }
+
+    pub async fn deny(self) -> Result<(), PipeError> {
+        let resp = CommunicationValue::new(mtp_codec::CommunicationType::PipeResponse)
+            .with_id(self.pipe_id)
+            .add_typed_default(DataType::Accepted, DataValue::BoolFalse);
+        self.sender.send(&resp).await.map_err(PipeError::from)?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "pipes")]
+struct PipeDispatcher {
+    pending_creations: Mutex<HashMap<u32, tokio::sync::oneshot::Sender<Result<bool, PipeError>>>>,
+    pending_pipes: Mutex<HashMap<u32, tokio::sync::oneshot::Sender<PipeReader>>>,
+    policy: Arc<Policy>,
+}
+
+#[cfg(not(feature = "pipes"))]
+struct PipeDispatcher;
+
+#[cfg(not(feature = "pipes"))]
+pub(crate) struct PipeRequest;
+
+#[cfg(feature = "pipes")]
+async fn run_dispatcher(
+    receiver: Receiver,
+    sender: Sender,
+    app_tx: mpsc::Sender<Result<CommunicationValue, CommunicationError>>,
+    pipe_req_tx: mpsc::Sender<PipeRequest>,
+    dispatcher: Arc<PipeDispatcher>,
+) {
+    let pipe_req_type =
+        mtp_codec::CommunicationType::PipeRequest.to_id(&mtp_codec::TypeMap::latest());
+    let pipe_resp_type =
+        mtp_codec::CommunicationType::PipeResponse.to_id(&mtp_codec::TypeMap::latest());
+
+    loop {
+        match receiver.receive_event().await {
+            Ok(mtp_transport::TransportEvent::Message(msg)) => {
+                if msg.get_type() == pipe_req_type {
+                    let pipe_id = msg.get_id();
+                    let description = msg
+                        .get_str(DataType::Description)
+                        .unwrap_or("")
+                        .to_string();
+                    let req = PipeRequest {
+                        pipe_id,
+                        description,
+                        sender: sender.clone(),
+                        dispatcher: dispatcher.clone(),
+                    };
+                    let _ = pipe_req_tx.send(req).await;
+                    continue;
+                }
+
+                if msg.get_type() == pipe_resp_type {
+                    let pipe_id = msg.get_id();
+                    let accepted = msg.get_bool(DataType::Accepted).unwrap_or(false);
+                    let mut pending = dispatcher.pending_creations.lock().await;
+                    if let Some(tx) = pending.remove(&pipe_id) {
+                        let _ = tx.send(Ok(accepted));
+                    }
+                    continue;
+                }
+
+                if app_tx.send(Ok(msg)).await.is_err() {
+                    break;
+                }
+            }
+            Ok(mtp_transport::TransportEvent::Pipe(reader)) => {
+                let pipe_id = reader.pipe_id();
+                let mut pending = dispatcher.pending_pipes.lock().await;
+                if let Some(tx) = pending.remove(&pipe_id) {
+                    let _ = tx.send(reader);
+                }
+            }
+            Err(e) => {
+                if app_tx.send(Err(e)).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 pub struct ClientConfig {
@@ -129,6 +293,10 @@ pub struct MTPConnection {
     pub receiver: Receiver,
     pub description: Option<String>,
     ping: Option<PingSession>,
+    app_rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
+    pipe_req_rx: Mutex<mpsc::Receiver<PipeRequest>>,
+    pipe_dispatcher: Arc<PipeDispatcher>,
+    _dispatcher_task: tokio::task::JoinHandle<()>,
     #[cfg(feature = "crypto")]
     pub auth_state: AuthState,
     #[cfg(feature = "crypto")]
@@ -180,7 +348,7 @@ impl MTPConnection {
 
         let tm = mtp_codec::TypeMap::latest();
         loop {
-            let response = self.receiver.receive().await?;
+            let response = self.receive().await?;
             if response.get_id() != request_id {
                 continue;
             }
@@ -198,6 +366,55 @@ impl MTPConnection {
             }
 
             return Ok(response);
+        }
+    }
+
+    pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
+        #[cfg(feature = "pipes")]
+        {
+            let mut rx = self.app_rx.lock().await;
+            match rx.recv().await {
+                Some(result) => result,
+                None => Err(CommunicationError::StreamClosed),
+            }
+        }
+        #[cfg(not(feature = "pipes"))]
+        {
+            self.receiver.receive().await
+        }
+    }
+}
+
+#[cfg(feature = "pipes")]
+impl MTPConnection {
+    pub async fn create_pipe(&self, description: &str) -> Result<PipeHandle, PipeError> {
+        let pipe_id = rand::random::<u32>();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        {
+            let mut pending = self.pipe_dispatcher.pending_creations.lock().await;
+            pending.insert(pipe_id, tx);
+        }
+
+        let request = CommunicationValue::new(mtp_codec::CommunicationType::PipeRequest)
+            .with_id(pipe_id)
+            .add_typed_default(DataType::Description, DataValue::Str(description.into()));
+
+        self.sender.send(&request).await.map_err(PipeError::from)?;
+
+        Ok(PipeHandle {
+            pipe_id,
+            description: description.to_string(),
+            sender: self.sender.clone(),
+            response_rx: rx,
+        })
+    }
+
+    pub async fn receive_pipe(&self) -> Result<PipeRequest, CommunicationError> {
+        let mut rx = self.pipe_req_rx.lock().await;
+        match rx.recv().await {
+            Some(req) => Ok(req),
+            None => Err(CommunicationError::StreamClosed),
         }
     }
 }
@@ -287,16 +504,71 @@ fn connection_from_parts(
     #[cfg(feature = "crypto")] client_id: u64,
 ) -> MTPConnection {
     let ping = start_ping_session(&config, sender.clone(), &receiver);
-    MTPConnection {
-        version: PROTOCOL_VERSION,
-        sender,
-        receiver,
-        description: config.description,
-        ping,
-        #[cfg(feature = "crypto")]
-        auth_state,
-        #[cfg(feature = "crypto")]
-        client_id,
+
+    #[cfg(feature = "pipes")]
+    {
+        let (app_tx, app_rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(
+            config.policy.receiver_queue_capacity,
+        );
+        let (pipe_req_tx, pipe_req_rx) = mpsc::channel::<PipeRequest>(
+            config.policy.receiver_queue_capacity,
+        );
+
+        let dispatcher = Arc::new(PipeDispatcher {
+            pending_creations: Mutex::new(HashMap::new()),
+            pending_pipes: Mutex::new(HashMap::new()),
+            policy: Arc::new(config.policy),
+        });
+
+        let dispatcher_clone = dispatcher.clone();
+        let sender_clone = sender.clone();
+        let dispatcher_task = tokio::spawn(run_dispatcher(
+            receiver.clone(),
+            sender_clone,
+            app_tx,
+            pipe_req_tx,
+            dispatcher_clone,
+        ));
+
+        MTPConnection {
+            version: PROTOCOL_VERSION,
+            sender,
+            receiver,
+            app_rx: Mutex::new(app_rx),
+            pipe_req_rx: Mutex::new(pipe_req_rx),
+            pipe_dispatcher: dispatcher,
+            description: config.description,
+            ping,
+            _dispatcher_task: dispatcher_task,
+            #[cfg(feature = "crypto")]
+            auth_state,
+            #[cfg(feature = "crypto")]
+            client_id,
+        }
+    }
+
+    #[cfg(not(feature = "pipes"))]
+    {
+        let (_, app_rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(1);
+        let (_, pipe_req_rx) = mpsc::channel::<PipeRequest>(1);
+        let dispatcher = Arc::new(PipeDispatcher);
+        let task = tokio::spawn(async {});
+
+        MTPConnection {
+            version: PROTOCOL_VERSION,
+            sender,
+            receiver,
+            app_rx: Mutex::new(app_rx),
+            pipe_req_rx: Mutex::new(pipe_req_rx),
+            pipe_dispatcher: dispatcher,
+            description: config.description,
+            ping,
+            _dispatcher_task: task,
+            #[cfg(feature = "crypto")]
+            auth_state,
+            #[cfg(feature = "crypto")]
+            client_id,
+        }
     }
 }
 

@@ -13,6 +13,9 @@ mtp = { path = "/path/to/mtp", features = ["host"] }
 
 # Add crypto for authenticated connections:
 mtp = { path = "/path/to/mtp", features = ["host", "crypto"] }
+
+# Add pipes for raw binary streams:
+mtp = { path = "/path/to/mtp", features = ["host", "pipes"] }
 ```
 
 ## HostConfig
@@ -305,6 +308,133 @@ let tm = conn.codec.registry().get(&conn.version).unwrap();
 let desc_id = DataTypeId(tm.data_id_enum(DataType::Description).unwrap());
 let value = msg.get_data(desc_id);
 ```
+
+## Pipes
+
+With the `pipes` feature enabled, the host can accept **raw binary streams**
+from clients. A Pipe is a unidirectional QUIC stream opened by the client that
+carries a lightweight `PipeRequest` handshake frame, then transitions to raw
+bytes with zero per-frame overhead.
+
+### Enabling Pipes
+
+Add the `pipes` feature to your dependency:
+
+```toml
+[dependencies]
+mtp = { path = "/path/to/mtp", features = ["host", "pipes"] }
+```
+
+### Receiving Pipe Requests
+
+When `pipes` is enabled, **do not call `conn.receiver.receive()` directly**.
+Instead, use `conn.receive()` for normal messages and `conn.receive_pipe()`
+for incoming pipe requests. A background dispatcher task routes events
+internally so the two channels do not race.
+
+```rust
+use mtp::host::{MTPHost, PipeRequest};
+use tokio::io::AsyncReadExt;
+
+while let Some(conn) = host.accept().await? {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Ok(msg) = conn.receive() => {
+                    // handle normal CommunicationValue
+                }
+                Ok(req) = conn.receive_pipe() => {
+                    handle_pipe(req).await;
+                }
+                else => break,
+            }
+        }
+    });
+}
+
+async fn handle_pipe(req: PipeRequest) {
+    println!("Pipe {} requested: {}", req.id(), req.description());
+    // Accept or deny...
+}
+```
+
+### PipeRequest
+
+```rust
+pub struct PipeRequest {
+    // pipe_id assigned by the creator
+    // description provided by the creator
+}
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `id()` | `u32` | The pipe ID chosen by the creator |
+| `description()` | `&str` | Creator-provided label (e.g. `"file-transfer"`) |
+| `accept()` | `Result<PipeReader, PipeError>` | Accept the pipe; returns an `AsyncRead` stream |
+| `deny()` | `Result<(), PipeError>` | Reject the pipe |
+
+### Accepting a Pipe
+
+```rust
+use tokio::io::AsyncReadExt;
+
+async fn handle_pipe(req: PipeRequest) {
+    match req.accept().await {
+        Ok(mut reader) => {
+            let mut buf = Vec::new();
+            if let Err(e) = reader.read_to_end(&mut buf).await {
+                eprintln!("pipe read error: {e}");
+            }
+            println!("received {} bytes", buf.len());
+        }
+        Err(e) => {
+            eprintln!("pipe accept failed: {e}");
+        }
+    }
+}
+```
+
+`PipeReader` implements `tokio::io::AsyncRead`. The stream reads until the
+creator calls `PipeWriter::finish()` or the connection closes.
+
+### Rejecting a Pipe
+
+```rust
+async fn handle_pipe(req: PipeRequest) {
+    if !should_allow(&req) {
+        req.deny().await.ok();
+        return;
+    }
+    // ... accept
+}
+```
+
+### PipeError
+
+```rust
+pub enum PipeError {
+    Rejected,          // pipe request was rejected
+    HandshakeTimeout,  // pipe handshake timed out
+    StreamClosed,      // pipe stream closed unexpectedly
+    IoError(String),   // pipe I/O error
+    ConnectionClosed,  // connection closed
+}
+```
+
+`PipeError` implements `std::error::Error` and can be converted from
+`CommunicationError` via `PipeError::from()`.
+
+### Important: Do Not Use `receiver.receive()` with Pipes
+
+When the `pipes` feature is active, `conn.receiver.receive()` will **skip**
+`PipeRequest` frames and may return them as ordinary messages if called from
+the wrong task. Always use the facade methods:
+
+- `conn.receive()` -- normal `CommunicationValue` messages
+- `conn.receive_pipe()` -- incoming `PipeRequest` objects
+
+These methods are internally synchronised and safe to call from separate tasks.
 
 ## Host Callbacks
 

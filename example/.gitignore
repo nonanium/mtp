@@ -11,5 +11,6 @@ web-client/public/host_public_key_bundle.hex
 web-client/public/mtp_dev_cert_hash.txt
 web-client/dist/
 
+client.id
 *.mk
 *.mpkb

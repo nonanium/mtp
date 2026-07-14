@@ -62,8 +62,6 @@ mtp-client = { version = "0.1.0", path = "client", optional = true }
 mtp-files = { version = "0.1.0", path = "files", optional = true }
 
 [features]
-default = []
-
 # Serialization
 serde = ["mtp-crypto/serde"]
 
@@ -82,18 +80,13 @@ host = ["dep:mtp-host", "mtp-codec/registry", "transport"]
 # MTP client - outgoing QUIC connections to a host.
 client = ["dep:mtp-client", "transport"]
 
-# Opt into stream-specific host/client facade APIs. The transport itself is
-# always framed over QUIC/WebTransport streams for compatibility.
-streaming = [
-    "transport",
-    "mtp-transport/streaming",
-    "mtp-host?/streaming",
-    "mtp-client?/streaming",
-]
-
 # Direct access to the framed QUIC transport. Host/client features enable it
 # automatically; this feature is useful for low-level integrations.
 transport = ["dep:mtp-transport"]
+
+# Direct access to the pipes. Pipes can be used to send raw binary
+# without after creation overhead.
+pipes = ["mtp-common/pipes", "mtp-codec/pipes", "mtp-transport?/pipes", "mtp-host?/pipes", "mtp-client?/pipes"]
 
 # On-disk storage for keyrings (`.mk`) and public key bundles (`.mpkb`).
 # Pulls in `crypto` so the `Keyring` / `PublicKeyBundle` types are in scope.

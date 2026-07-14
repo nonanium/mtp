@@ -1,39 +1,89 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MTP Web Client</title>
-  <style>
-    body { background: #111; color: #eee; font-family: "Public Sans", sans-serif; }
-    label, input, textarea { display: block; margin-bottom: 0.5rem; }
-    input, textarea, button { font-family: "Public Sans", sans-serif; }
-    input, textarea { background: #222; color: #eee; }
-    #status, #key-status { white-space: pre-wrap; }
-    .state { color: #ff0; }
-    .received { color: #0ff; }
-    .error { color: #f00; }
-  </style>
-</head>
-<body>
-  <h1>MTP WebTransport Client</h1>
-  <label for="server-url">Server URL</label>
-  <input id="server-url" value="https://127.0.0.1:8080" />
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>MTP Web Client</title>
+        <style>
+            body {
+                background: #111;
+                color: #eee;
+                font-family: "Public Sans", sans-serif;
+            }
+            label,
+            input,
+            textarea {
+                display: block;
+                margin-bottom: 0.5rem;
+            }
+            input,
+            textarea,
+            button {
+                font-family: "Public Sans", sans-serif;
+            }
+            input,
+            textarea {
+                background: #222;
+                color: #eee;
+            }
+            #status,
+            #key-status {
+                white-space: pre-wrap;
+            }
+            .state {
+                color: #ff0;
+            }
+            .received {
+                color: #0ff;
+            }
+            .error {
+                color: #f00;
+            }
+            .pipe {
+                color: #0f0;
+            }
+            hr {
+                border-color: #444;
+                margin: 1.5rem 0;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>MTP WebTransport Client</h1>
+        <label for="server-url">Server URL</label>
+        <input id="server-url" value="https://localhost:8080" />
 
-  <label for="host-public-key">Host public key bundle hex</label>
-  <textarea id="host-public-key" placeholder="Paste PublicKeyBundle bytes as hex"></textarea>
+        <label for="host-public-key">Host public key bundle hex</label>
+        <textarea
+            id="host-public-key"
+            placeholder="Paste PublicKeyBundle bytes as hex"
+        ></textarea>
 
-  <label for="client-credentials">Saved SDK credentials</label>
-  <textarea id="client-credentials" readonly></textarea>
+        <label for="client-credentials">Saved SDK credentials</label>
+        <textarea id="client-credentials" readonly></textarea>
 
-  <div>
-    <button id="generate-keypair" type="button">Use new credentials</button>
-    <button id="connect" type="button" disabled>Connect</button>
-    <button id="clear-keys" type="button">Clear saved keys</button>
-  </div>
+        <div>
+            <button id="generate-keypair" type="button">
+                Use new credentials
+            </button>
+            <button id="connect" type="button" disabled>Connect</button>
+            <button id="clear-keys" type="button">Clear saved keys</button>
+        </div>
 
-  <div id="key-status">Initializing...</div>
-  <div id="status"></div>
-  <script type="module" src="/src/main.ts"></script>
-</body>
+        <hr />
+        <h2>Pipe Demo</h2>
+        <div>
+            <button id="stream-mic" type="button" disabled>
+                Stream Microphone (pipe loopback)
+            </button>
+            <button id="stop-mic" type="button" disabled>
+                Stop Microphone
+            </button>
+        </div>
+        <div id="pipe-status"></div>
+
+        <div id="key-status">Initializing...</div>
+        <div id="status"></div>
+        <script type="module" src="/src/main.ts"></script>
+    </body>
 </html>

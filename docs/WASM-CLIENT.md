@@ -231,6 +231,82 @@ await MTPClient.create({
 
 Use `pings: true` for the default interval.
 
+## Pipes
+
+Pipes are raw binary streams over QUIC. A pipe starts with a lightweight `PipeRequest` handshake frame, then the stream carries raw bytes with zero per-frame overhead. Pipes are unidirectional; the peer that initiates the pipe writes, and the peer that accepts it reads.
+
+### Outgoing Pipes
+
+`createPipe` sends a `PipeRequest` frame and returns a handle. Call `wait()` to block until the remote peer accepts or denies:
+
+```typescript
+const handle = await client.createPipe("file-transfer");
+
+const writer = await handle.wait();
+if (writer == null) {
+  console.log("host denied the pipe");
+  return;
+}
+
+await writer.write(new Uint8Array([0x01, 0x02, 0x03]));
+await writer.write(chunk);
+await writer.close();
+```
+
+`writer.close()` sends a QUIC stream FIN. `writer.abort()` resets the stream abruptly. Each `write` resolves when the chunk has been handed to the transport; it does not wait for the peer to consume it.
+
+The handle and writer expose `pipeId` and `description`:
+
+```typescript
+console.log(handle.pipeId, handle.description);
+console.log(writer.pipeId);
+```
+
+### Incoming Pipes
+
+Set a handler to receive pipe requests from the remote peer:
+
+```typescript
+client.setOnPipeRequest((request) => {
+  console.log("incoming pipe", request.pipeId, request.description);
+  // accept or deny asynchronously
+});
+```
+
+Accept a request to receive a `PipeReader`:
+
+```typescript
+client.setOnPipeRequest(async (request) => {
+  if (request.description === "file-transfer") {
+    const reader = await client.acceptPipe(request.pipeId);
+
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk == null) break; // stream closed by peer
+      processChunk(chunk);
+    }
+  } else {
+    await client.denyPipe(request.pipeId);
+  }
+});
+```
+
+`reader.read()` resolves with a `Uint8Array` or `null` when the peer closes the stream. The reader exposes `pipeId` and `description`:
+
+```typescript
+console.log(reader.pipeId, reader.description);
+```
+
+### Pipe Handshake
+
+1. The initiator calls `createPipe(description)`; the SDK sends a `PipeRequest` frame with a random `pipeId` and the description.
+2. The receiver's `setOnPipeRequest` callback fires with `{ pipeId, description }`.
+3. The receiver calls `acceptPipe(pipeId)`; the SDK sends a `PipeResponse` with `Accepted = true` and opens a new unidirectional stream for raw data.
+4. The initiator's `handle.wait()` resolves with a `PipeWriter` bound to that stream.
+5. If the receiver calls `denyPipe(pipeId)`, `handle.wait()` resolves with `null`.
+
+Pipes share the same WebTransport session as message frames; they do not need a separate connection.
+
 ## Logger Events
 
 The SDK logger receives parsed events:
@@ -331,6 +407,50 @@ const confirmedId = await rawClient.auth_connect(
   keyringBytes,
   registeredId,
 );
+```
+
+### Raw Pipes
+
+The raw `WasmClient` exposes the same pipe operations as the SDK wrapper:
+
+```typescript
+// Incoming pipe requests
+rawClient.set_on_pipe_request((event) => {
+  const { pipeId, description } = event;
+  // accept or deny
+});
+
+// Outgoing pipe
+const handle = await rawClient.create_pipe("file-transfer");
+const writer = await handle.wait();
+if (writer) {
+  await writer.write(new Uint8Array([0x01, 0x02]));
+  await writer.close();
+}
+
+// Accept incoming pipe
+const reader = await rawClient.accept_pipe(pipeId);
+const chunk = await reader.read();
+
+// Deny incoming pipe
+await rawClient.deny_pipe(pipeId);
+```
+
+Raw `PipeWriter` and `PipeReader` have the same interface as the SDK types:
+
+```typescript
+interface PipeWriter {
+  write(data: Uint8Array): Promise<void>;
+  close(): Promise<void>;
+  abort(): void;
+  readonly pipeId: number;
+}
+
+interface PipeReader {
+  read(): Promise<Uint8Array | null>;
+  readonly pipeId: number;
+  readonly description: string;
+}
 ```
 
 A `WasmClient` manages one active WebTransport session. Create a new instance for independent connections, and call `free()` or `[Symbol.dispose]()` on raw WASM objects when you want to release memory eagerly.
