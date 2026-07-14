@@ -4,10 +4,10 @@ use crate::pipe::PipeReader;
 use mtp_codec::CommunicationValue;
 use mtp_common::CommunicationError;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, Notify, RwLock, Semaphore};
+use tokio::sync::{Mutex, Notify, RwLock, Semaphore, mpsc};
 use tokio::time::{Duration, sleep, timeout};
-use wtransport::Connection;
 use tracing::{debug, info, instrument, trace};
+use wtransport::Connection;
 
 #[cfg(feature = "pipes")]
 #[derive(Debug)]
@@ -119,10 +119,7 @@ impl Policy {
         self
     }
 
-    pub fn with_max_concurrent_stream_tasks(
-        mut self,
-        max_concurrent_stream_tasks: usize,
-    ) -> Self {
+    pub fn with_max_concurrent_stream_tasks(mut self, max_concurrent_stream_tasks: usize) -> Self {
         self.max_concurrent_stream_tasks = max_concurrent_stream_tasks;
         self
     }
@@ -619,9 +616,7 @@ impl Receiver {
             policy.receiver_queue_capacity,
         );
         #[cfg(feature = "pipes")]
-        let (pipe_tx, pipe_rx) = mpsc::channel::<PipeReader>(
-            policy.receiver_queue_capacity,
-        );
+        let (pipe_tx, pipe_rx) = mpsc::channel::<PipeReader>(policy.receiver_queue_capacity);
         #[cfg(not(feature = "pipes"))]
         let (tx, rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(
             policy.receiver_queue_capacity,
@@ -659,7 +654,10 @@ impl Receiver {
                 let cap_full = tx.capacity() == 0;
 
                 if cap_full {
-                    trace!(target = "mtp.transport", "accept loop paused: receiver queue full");
+                    trace!(
+                        target = "mtp.transport",
+                        "accept loop paused: receiver queue full"
+                    );
                     tokio::select! {
                         _ = close_rx.changed() => {
                             if close_rx.borrow().is_some() {

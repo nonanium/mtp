@@ -16,8 +16,13 @@ fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
 async fn start_host(send_pongs: bool) -> (MTPHost, Vec<u8>) {
     let (cert_pem, key_pem) = generate_self_signed_cert();
     let host = MTPHost::new(
-        HostConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, cert_pem.clone(), key_pem)
-            .with_pongs(send_pongs),
+        HostConfig::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            0,
+            cert_pem.clone(),
+            key_pem,
+        )
+        .with_pongs(send_pongs),
     )
     .await
     .unwrap();

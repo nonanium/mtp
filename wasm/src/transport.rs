@@ -467,8 +467,8 @@ impl WasmTransport {
         F: FnMut(JsValue),
         G: FnMut(crate::pipe::PipeReader),
     {
-        let pipe_request_type = mtp_codec::CommunicationType::PipeRequest
-            .to_id(&mtp_codec::TypeMap::latest());
+        let pipe_request_type =
+            mtp_codec::CommunicationType::PipeRequest.to_id(&mtp_codec::TypeMap::latest());
 
         loop {
             match self.next_frame().await {
@@ -509,8 +509,7 @@ impl WasmTransport {
                         }
                         Err(e) => {
                             let message = e.as_string().unwrap_or_else(|| format!("{:?}", e));
-                            let _ =
-                                on_error.call1(&JsValue::NULL, &JsValue::from_str(&message));
+                            let _ = on_error.call1(&JsValue::NULL, &JsValue::from_str(&message));
                         }
                     }
                 }
@@ -574,9 +573,7 @@ impl WasmTransport {
         let write_promise = write_fn
             .call1(&writer_val, &chunk)
             .map_err(|e| js_error(&format!("write failed: {:?}", e)))?;
-        if let Err(e) =
-            JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await
-        {
+        if let Err(e) = JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await {
             log_stream_error_code(&e, "open_pipe write");
             release_writer_lock(&writer_val);
             return Err(e);

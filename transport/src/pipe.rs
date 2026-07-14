@@ -9,13 +9,10 @@ pub struct PipeWriter {
 
 impl PipeWriter {
     pub async fn finish(mut self) -> Result<(), mtp_common::CommunicationError> {
-        self.stream
-            .finish()
-            .await
-            .map_err(|e| {
-                log::warn!("[PipeWriter] finish failed: {e}");
-                mtp_common::CommunicationError::StreamWriteError(e)
-            })
+        self.stream.finish().await.map_err(|e| {
+            log::warn!("[PipeWriter] finish failed: {e}");
+            mtp_common::CommunicationError::StreamWriteError(e)
+        })
     }
 
     pub fn abort(&mut self) -> Result<(), wtransport::error::ClosedStream> {

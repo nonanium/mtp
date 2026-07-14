@@ -1,5 +1,5 @@
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::error::js_error;
@@ -56,9 +56,7 @@ impl PipeWriter {
         let close_promise = close_fn
             .call0(&self.writer)
             .map_err(|e| js_error(&format!("close failed: {:?}", e)))?;
-        if let Err(e) =
-            JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await
-        {
+        if let Err(e) = JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await {
             crate::transport::log_stream_error_code(&e, "pipe writer close");
         }
         release_writer_lock(&self.writer);

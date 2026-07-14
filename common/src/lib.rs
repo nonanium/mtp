@@ -369,10 +369,9 @@ mod pipe_error_tests {
 
     #[test]
     fn test_pipe_error_from_connection_error() {
-        let pe: PipeError = CommunicationError::ConnectionError(
-            wtransport::error::ConnectionError::TimedOut,
-        )
-        .into();
+        let pe: PipeError =
+            CommunicationError::ConnectionError(wtransport::error::ConnectionError::TimedOut)
+                .into();
         assert_eq!(pe, PipeError::ConnectionClosed);
     }
 

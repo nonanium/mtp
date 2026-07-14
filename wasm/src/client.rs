@@ -58,7 +58,10 @@ impl WasmPipeHandle {
 
         match accepted {
             Ok(true) => {
-                let writer = self.transport.open_pipe(self.pipe_id, &self.description).await?;
+                let writer = self
+                    .transport
+                    .open_pipe(self.pipe_id, &self.description)
+                    .await?;
                 Ok(JsValue::from(writer))
             }
             Ok(false) => Ok(JsValue::NULL),
@@ -783,12 +786,11 @@ impl WasmClient {
 
         let pipe_id = random_pipe_id()?;
         let (tx, rx) = oneshot::channel();
-        self.pending_pipe_creations
-            .borrow_mut()
-            .insert(pipe_id, tx);
+        self.pending_pipe_creations.borrow_mut().insert(pipe_id, tx);
 
-        let request =
-            CommunicationValue::new(CommunicationType::PipeRequest).with_id(pipe_id).add_typed_default(
+        let request = CommunicationValue::new(CommunicationType::PipeRequest)
+            .with_id(pipe_id)
+            .add_typed_default(
                 DataType::Description,
                 DataValue::Str(description.to_string()),
             );

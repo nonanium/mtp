@@ -2,9 +2,9 @@ use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Versi
 use mtp_common::CommunicationError;
 #[cfg(feature = "pipes")]
 pub use mtp_common::PipeError;
+use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
-use rand::Rng;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, Instant};
 
@@ -147,10 +147,7 @@ async fn run_dispatcher(
             Ok(mtp_transport::TransportEvent::Message(msg)) => {
                 if msg.get_type() == pipe_req_type {
                     let pipe_id = msg.get_id();
-                    let description = msg
-                        .get_str(DataType::Description)
-                        .unwrap_or("")
-                        .to_string();
+                    let description = msg.get_str(DataType::Description).unwrap_or("").to_string();
                     let req = PipeRequest {
                         pipe_id,
                         description,
@@ -510,9 +507,8 @@ fn connection_from_parts(
         let (app_tx, app_rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(
             config.policy.receiver_queue_capacity,
         );
-        let (pipe_req_tx, pipe_req_rx) = mpsc::channel::<PipeRequest>(
-            config.policy.receiver_queue_capacity,
-        );
+        let (pipe_req_tx, pipe_req_rx) =
+            mpsc::channel::<PipeRequest>(config.policy.receiver_queue_capacity);
 
         let dispatcher = Arc::new(PipeDispatcher {
             pending_creations: Mutex::new(HashMap::new()),

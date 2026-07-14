@@ -5,13 +5,13 @@ use mtp_codec::{
 use mtp_common::CommunicationError;
 #[cfg(feature = "pipes")]
 pub use mtp_common::PipeError;
+#[cfg(feature = "pipes")]
+use std::collections::HashMap;
 use std::net::IpAddr;
 #[cfg(feature = "crypto")]
 use std::pin::Pin;
-use std::{error::Error, fmt};
-#[cfg(feature = "pipes")]
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::{error::Error, fmt};
 use tokio::sync::{Mutex, mpsc};
 #[cfg(feature = "crypto")]
 use tokio::time::Duration;
@@ -171,10 +171,7 @@ async fn run_dispatcher(
             Ok(mtp_transport::TransportEvent::Message(msg)) => {
                 if msg.get_type() == pipe_req_type {
                     let pipe_id = msg.get_id();
-                    let description = msg
-                        .get_str(DataType::Description)
-                        .unwrap_or("")
-                        .to_string();
+                    let description = msg.get_str(DataType::Description).unwrap_or("").to_string();
                     let req = PipeRequest {
                         pipe_id,
                         description,
@@ -519,8 +516,7 @@ impl MTPHost {
                 receiver.respond_to_pings(sender.clone());
             }
 
-            let (app_tx, app_rx) =
-                mpsc::channel(self.config.policy.receiver_queue_capacity);
+            let (app_tx, app_rx) = mpsc::channel(self.config.policy.receiver_queue_capacity);
             let (pipe_req_tx, pipe_req_rx) =
                 mpsc::channel(self.config.policy.receiver_queue_capacity);
 
@@ -597,8 +593,7 @@ impl MTPHost {
                 receiver.respond_to_pings(sender.clone());
             }
 
-            let (app_tx, app_rx) =
-                mpsc::channel(self.config.policy.receiver_queue_capacity);
+            let (app_tx, app_rx) = mpsc::channel(self.config.policy.receiver_queue_capacity);
             let (pipe_req_tx, pipe_req_rx) =
                 mpsc::channel(self.config.policy.receiver_queue_capacity);
 
