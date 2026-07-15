@@ -1200,27 +1200,30 @@ impl TryFrom<DataValue> for Vec<u8> {
 mod tests {
     use super::*;
 
-    fn container_roundtrip(values: Vec<(DataTypeId, DataValue)>) {
+    fn container_roundtrip(values: Vec<(DataTypeId, DataValue)>) -> Result<(), Box<dyn std::error::Error>> {
         let dv = DataValue::Container(values.clone());
-        let bytes = dv.to_bytes().expect("encode failed");
-        let decoded = DataValue::from_bytes(&bytes).expect("roundtrip failed");
+        let bytes = dv.to_bytes()?;
+        let decoded = DataValue::from_bytes(&bytes).ok_or("roundtrip failed")?;
         assert_eq!(dv, decoded, "container roundtrip mismatch");
+        Ok(())
     }
 
-    fn array_roundtrip(values: Vec<DataValue>) {
+    fn array_roundtrip(values: Vec<DataValue>) -> Result<(), Box<dyn std::error::Error>> {
         let dv = DataValue::Array(values.clone());
-        let bytes = dv.to_bytes().expect("encode failed");
-        let decoded = DataValue::from_bytes(&bytes).expect("roundtrip failed");
+        let bytes = dv.to_bytes()?;
+        let decoded = DataValue::from_bytes(&bytes).ok_or("roundtrip failed")?;
         assert_eq!(dv, decoded, "array roundtrip mismatch");
+        Ok(())
     }
 
     #[test]
-    fn test_bool_in_container() {
+    fn test_bool_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
             (DataType::Id.to_id(&tm), DataValue::BoolTrue),
             (DataType::ClientNonce.to_id(&tm), DataValue::BoolFalse),
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
@@ -1239,7 +1242,7 @@ mod tests {
     }
 
     #[test]
-    fn test_signed_number_in_container() {
+    fn test_signed_number_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::SignedNumber(0)),
@@ -1256,11 +1259,12 @@ mod tests {
                 DataType::PublicKeys.to_id(&tm),
                 DataValue::SignedNumber(i128::MIN),
             ),
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn test_unsigned_number_in_container() {
+    fn test_unsigned_number_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::UnsignedNumber(0)),
@@ -1269,11 +1273,12 @@ mod tests {
                 DataType::ClientNonce.to_id(&tm),
                 DataValue::UnsignedNumber(u128::MAX),
             ),
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn test_float_in_container() {
+    fn test_float_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::Float(0, 0)),
@@ -1282,11 +1287,12 @@ mod tests {
                 DataType::ClientNonce.to_id(&tm),
                 DataValue::Float(255, 4294967295),
             ),
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn test_str_in_container() {
+    fn test_str_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::Str(String::new())),
@@ -1295,11 +1301,12 @@ mod tests {
                 DataType::ClientNonce.to_id(&tm),
                 DataValue::Str("a".repeat(1000)),
             ),
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn test_bytes_in_container() {
+    fn test_bytes_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::Bytes(vec![])),
@@ -1311,40 +1318,45 @@ mod tests {
                 DataType::ClientNonce.to_id(&tm),
                 DataValue::Bytes(vec![0x42; 100]),
             ),
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn test_null_in_container() {
+    fn test_null_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
-        container_roundtrip(vec![(DataType::Version.to_id(&tm), DataValue::Null)]);
+        container_roundtrip(vec![(DataType::Version.to_id(&tm), DataValue::Null)])?;
+        Ok(())
     }
 
     #[test]
-    fn test_array_non_empty_roundtrip() {
+    fn test_array_non_empty_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         array_roundtrip(vec![
             DataValue::BoolTrue,
             DataValue::SignedNumber(42),
             DataValue::Str("hello".to_string()),
             DataValue::Null,
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn test_array_nested_roundtrip() {
+    fn test_array_nested_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         array_roundtrip(vec![
             DataValue::Array(vec![DataValue::BoolTrue, DataValue::BoolFalse]),
             DataValue::Array(vec![DataValue::SignedNumber(1), DataValue::SignedNumber(2)]),
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn test_container_empty_roundtrip() {
-        container_roundtrip(vec![]);
+    fn test_container_empty_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        container_roundtrip(vec![])?;
+        Ok(())
     }
 
     #[test]
-    fn test_container_mixed_roundtrip() {
+    fn test_container_mixed_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
             (DataType::Version.to_id(&tm), DataValue::BoolTrue),
@@ -1358,11 +1370,12 @@ mod tests {
                 DataValue::UnsignedNumber(u128::MAX),
             ),
             (DataType::PublicKeys.to_id(&tm), DataValue::Null),
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn test_container_nested_roundtrip() {
+    fn test_container_nested_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
             (
@@ -1373,7 +1386,8 @@ mod tests {
                 DataType::Id.to_id(&tm),
                 DataValue::Array(vec![DataValue::SignedNumber(1), DataValue::SignedNumber(2)]),
             ),
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
@@ -1592,24 +1606,16 @@ mod tests {
     }
 
     #[test]
-    fn test_try_from_ok() {
-        assert!(bool::try_from(DataValue::BoolTrue).unwrap());
-        assert!(!bool::try_from(DataValue::BoolFalse).unwrap());
-        assert_eq!(
-            String::try_from(DataValue::Str("hi".to_string())).unwrap(),
-            "hi"
-        );
-        assert_eq!(i128::try_from(DataValue::SignedNumber(-1)).unwrap(), -1i128);
-        assert_eq!(i64::try_from(DataValue::SignedNumber(10)).unwrap(), 10i64);
-        assert_eq!(
-            u128::try_from(DataValue::UnsignedNumber(99)).unwrap(),
-            99u128
-        );
-        assert_eq!(u64::try_from(DataValue::UnsignedNumber(7)).unwrap(), 7u64);
-        assert_eq!(
-            Vec::<u8>::try_from(DataValue::Bytes(vec![0xAB])).unwrap(),
-            vec![0xABu8]
-        );
+    fn test_try_from_ok() -> Result<(), Box<dyn std::error::Error>> {
+        assert!(bool::try_from(DataValue::BoolTrue)?);
+        assert!(!bool::try_from(DataValue::BoolFalse)?);
+        assert_eq!(String::try_from(DataValue::Str("hi".to_string()))?, "hi");
+        assert_eq!(i128::try_from(DataValue::SignedNumber(-1))?, -1i128);
+        assert_eq!(i64::try_from(DataValue::SignedNumber(10))?, 10i64);
+        assert_eq!(u128::try_from(DataValue::UnsignedNumber(99))?, 99u128);
+        assert_eq!(u64::try_from(DataValue::UnsignedNumber(7))?, 7u64);
+        assert_eq!(Vec::<u8>::try_from(DataValue::Bytes(vec![0xAB]))?, vec![0xABu8]);
+        Ok(())
     }
 
     #[test]
@@ -1632,7 +1638,7 @@ mod tests {
 
     #[cfg(feature = "crypto")]
     #[test]
-    fn test_encrypt_decrypt_container_roundtrip() {
+    fn test_encrypt_decrypt_container_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         use mtp_crypto::{EncryptionType, Keyring};
         let tm = TypeMap::latest();
         let keyring = Keyring::generate();
@@ -1655,8 +1661,9 @@ mod tests {
         assert!(dv.decrypt_into_container(&keyring, b"aad").is_some());
         assert!(matches!(dv, DataValue::Container(_)));
 
-        let entries = dv.as_container().unwrap();
+        let entries = dv.as_container().ok_or("expected container")?;
         assert_eq!(entries.len(), 2);
+        Ok(())
     }
 
     #[cfg(feature = "crypto")]
@@ -1725,7 +1732,7 @@ mod tests {
 
     #[cfg(feature = "crypto")]
     #[test]
-    fn test_sign_verify_container_roundtrip() {
+    fn test_sign_verify_container_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         use mtp_crypto::{Ed25519Signer, EncryptionType, Keyring, SigAlgorithm};
         let tm = TypeMap::latest();
 
@@ -1755,23 +1762,24 @@ mod tests {
         );
         assert!(matches!(dv, DataValue::SignedContainer(_)));
 
-        let verifier = Ed25519Signer::new(&sk).unwrap();
+        let verifier = Ed25519Signer::new(&sk)?;
         assert!(dv.verify_into_container(&verifier).is_some());
         assert!(matches!(dv, DataValue::Container(_)));
 
-        let entries = dv.as_container().unwrap();
+        let entries = dv.as_container().ok_or("expected container")?;
         assert_eq!(entries.len(), 1);
+        Ok(())
     }
 
     #[cfg(feature = "crypto")]
     #[test]
-    fn test_sign_container_wrong_key_fails() {
+    fn test_sign_container_wrong_key_fails() -> Result<(), Box<dyn std::error::Error>> {
         use mtp_crypto::{Ed25519Signer, SigAlgorithm};
         let tm = TypeMap::latest();
 
         let (signer, _, _) = Ed25519Signer::generate();
         let (_, sk2, _) = Ed25519Signer::generate();
-        let wrong_verifier = Ed25519Signer::new(&sk2).unwrap();
+        let wrong_verifier = Ed25519Signer::new(&sk2)?;
 
         let mut dv = DataValue::Container(vec![(
             DataType::Version.to_id(&tm),
@@ -1780,5 +1788,6 @@ mod tests {
 
         assert!(dv.sign_container(SigAlgorithm::ED25519, &signer).is_some());
         assert!(dv.verify_into_container(&wrong_verifier).is_none());
+        Ok(())
     }
 }

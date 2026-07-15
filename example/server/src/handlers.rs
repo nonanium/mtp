@@ -17,17 +17,47 @@ pub fn process_and_respond(
     tm: &TypeMap,
     client_pk: Option<&mtp::crypto::PublicKeyBundle>,
     host_keyring: &Keyring,
-) -> CommunicationValue {
-    let desc_id = DataTypeId(tm.data_id_enum(DataType::Description).unwrap());
-    let ts_id = DataTypeId(tm.data_id_enum(DataType::Timestamp).unwrap());
-    let data_id = DataTypeId(tm.data_id_enum(DataType::Data).unwrap());
-    let flags_id = DataTypeId(tm.data_id_enum(DataType::Flags).unwrap());
-    let value_id = DataTypeId(tm.data_id_enum(DataType::Value).unwrap());
-    let bin_id = DataTypeId(tm.data_id_enum(DataType::BinaryData).unwrap());
-    let items_id = DataTypeId(tm.data_id_enum(DataType::Items).unwrap());
-    let _enc_id = DataTypeId(tm.data_id_enum(DataType::EncryptedPayload).unwrap());
-    let _sig_id = DataTypeId(tm.data_id_enum(DataType::SignedPayload).unwrap());
-    let _secure_id = DataTypeId(tm.data_id_enum(DataType::SecurePayload).unwrap());
+) -> Result<CommunicationValue, String> {
+    let desc_id = DataTypeId(
+        tm.data_id_enum(DataType::Description)
+            .ok_or("missing Description type mapping")?,
+    );
+    let ts_id = DataTypeId(
+        tm.data_id_enum(DataType::Timestamp)
+            .ok_or("missing Timestamp type mapping")?,
+    );
+    let data_id = DataTypeId(
+        tm.data_id_enum(DataType::Data)
+            .ok_or("missing Data type mapping")?,
+    );
+    let flags_id = DataTypeId(
+        tm.data_id_enum(DataType::Flags)
+            .ok_or("missing Flags type mapping")?,
+    );
+    let value_id = DataTypeId(
+        tm.data_id_enum(DataType::Value)
+            .ok_or("missing Value type mapping")?,
+    );
+    let bin_id = DataTypeId(
+        tm.data_id_enum(DataType::BinaryData)
+            .ok_or("missing BinaryData type mapping")?,
+    );
+    let items_id = DataTypeId(
+        tm.data_id_enum(DataType::Items)
+            .ok_or("missing Items type mapping")?,
+    );
+    let _enc_id = DataTypeId(
+        tm.data_id_enum(DataType::EncryptedPayload)
+            .ok_or("missing EncryptedPayload type mapping")?,
+    );
+    let _sig_id = DataTypeId(
+        tm.data_id_enum(DataType::SignedPayload)
+            .ok_or("missing SignedPayload type mapping")?,
+    );
+    let _secure_id = DataTypeId(
+        tm.data_id_enum(DataType::SecurePayload)
+            .ok_or("missing SecurePayload type mapping")?,
+    );
 
     let description = msg.get_data(DataType::Description);
     let timestamp = msg.get_data(DataType::Timestamp);
@@ -118,10 +148,10 @@ pub fn process_and_respond(
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .map_err(|e| e.to_string())?
         .as_secs();
 
-    CommunicationValue::from_comm(CommunicationType::Pong, tm)
+    Ok(CommunicationValue::from_comm(CommunicationType::Pong, tm)
         .add_data(desc_id, description.clone())
         .add_data(ts_id, DataValue::UnsignedNumber(now as u128))
         .add_data(
@@ -134,5 +164,5 @@ pub fn process_and_respond(
         .add_data(flags_id, flags.clone())
         .add_data(value_id, value.clone())
         .add_data(bin_id, binary.clone())
-        .add_data(items_id, items.clone())
+        .add_data(items_id, items.clone()))
 }

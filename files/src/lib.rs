@@ -146,52 +146,57 @@ mod tests {
     }
 
     #[test]
-    fn keyring_save_load_roundtrip() {
+    fn keyring_save_load_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let path = temp_path(KEYRING_EXTENSION);
         let keyring = sample_keyring();
-        save_keyring(&keyring, &path).unwrap();
-        let loaded = load_keyring(&path).unwrap();
+        save_keyring(&keyring, &path)?;
+        let loaded = load_keyring(&path)?;
         assert_eq!(keyring.to_bytes(), loaded.to_bytes());
         let _ = fs::remove_file(&path);
+        Ok(())
     }
 
     #[test]
-    fn bundle_save_load_roundtrip() {
+    fn bundle_save_load_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let path = temp_path(BUNDLE_EXTENSION);
         let bundle = sample_keyring().public_key_bundle();
-        save_public_key_bundle(&bundle, &path).unwrap();
-        let loaded = load_public_key_bundle(&path).unwrap();
+        save_public_key_bundle(&bundle, &path)?;
+        let loaded = load_public_key_bundle(&path)?;
         assert_eq!(bundle.as_bytes(), loaded.as_bytes());
         let _ = fs::remove_file(&path);
+        Ok(())
     }
 
     #[test]
-    fn loading_bundle_as_keyring_fails_on_magic() {
+    fn loading_bundle_as_keyring_fails_on_magic() -> Result<(), Box<dyn std::error::Error>> {
         let path = temp_path(BUNDLE_EXTENSION);
-        save_public_key_bundle(&sample_keyring().public_key_bundle(), &path).unwrap();
+        save_public_key_bundle(&sample_keyring().public_key_bundle(), &path)?;
         assert!(matches!(
             load_keyring(&path),
             Err(FileError::BadMagic { .. })
         ));
         let _ = fs::remove_file(&path);
+        Ok(())
     }
 
     #[test]
-    fn truncated_file_is_rejected() {
+    fn truncated_file_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let path = temp_path(KEYRING_EXTENSION);
-        fs::write(&path, b"MT").unwrap();
+        fs::write(&path, b"MT")?;
         assert!(matches!(load_keyring(&path), Err(FileError::Truncated(2))));
         let _ = fs::remove_file(&path);
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn keyring_file_is_owner_only() {
+    fn keyring_file_is_owner_only() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         let path = temp_path(KEYRING_EXTENSION);
-        save_keyring(&sample_keyring(), &path).unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        save_keyring(&sample_keyring(), &path)?;
+        let mode = fs::metadata(&path)?.permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         let _ = fs::remove_file(&path);
+        Ok(())
     }
 }

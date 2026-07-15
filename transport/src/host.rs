@@ -6,10 +6,18 @@ use std::sync::Arc;
 use wtransport::{Connection as WTConnection, Endpoint, ServerConfig};
 
 fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
-    let key_pair = rcgen::KeyPair::generate().unwrap();
-    let params =
-        rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
-    let cert = params.self_signed(&key_pair).unwrap();
+    let key_pair = match rcgen::KeyPair::generate() {
+        Ok(key_pair) => key_pair,
+        Err(e) => panic!("failed to generate self-signed key pair: {e}"),
+    };
+    let params = match rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]) {
+        Ok(params) => params,
+        Err(e) => panic!("failed to build self-signed certificate params: {e}"),
+    };
+    let cert = match params.self_signed(&key_pair) {
+        Ok(cert) => cert,
+        Err(e) => panic!("failed to self-sign certificate: {e}"),
+    };
     let cert_pem = cert.pem();
     let key_pem = key_pair.serialize_pem();
     (cert_pem.into_bytes(), key_pem.into_bytes())

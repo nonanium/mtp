@@ -190,24 +190,24 @@ mod tests {
 
     #[cfg(all(feature = "mlkem-tls", feature = "hkdf", feature = "chacha20poly1305"))]
     #[test]
-    fn encrypt_for_roundtrip() {
+    fn encrypt_for_roundtrip() -> Result<(), CryptoError> {
         let kr = Keyring::generate();
         let blob = encrypt_for(
             EncryptionType::MlKemChaCha20Poly1305,
             &kr.public_key_bundle(),
             b"secret payload",
             b"aad",
-        )
-        .unwrap();
+        )?;
         assert_eq!(blob[0], EncryptionType::ML_KEM_CHACHA20POLY1305);
 
-        let pt = decrypt_with(&blob, &kr, b"aad").unwrap();
+        let pt = decrypt_with(&blob, &kr, b"aad")?;
         assert_eq!(pt, b"secret payload");
+        Ok(())
     }
 
     #[cfg(all(feature = "mlkem-tls", feature = "hkdf", feature = "chacha20poly1305"))]
     #[test]
-    fn decrypt_with_wrong_keyring_fails() {
+    fn decrypt_with_wrong_keyring_fails() -> Result<(), CryptoError> {
         let kr = Keyring::generate();
         let other = Keyring::generate();
         let blob = encrypt_for(
@@ -215,23 +215,23 @@ mod tests {
             &kr.public_key_bundle(),
             b"secret",
             b"aad",
-        )
-        .unwrap();
+        )?;
         assert!(decrypt_with(&blob, &other, b"aad").is_err());
+        Ok(())
     }
 
     #[cfg(all(feature = "mlkem-tls", feature = "hkdf", feature = "chacha20poly1305"))]
     #[test]
-    fn decrypt_with_wrong_aad_fails() {
+    fn decrypt_with_wrong_aad_fails() -> Result<(), CryptoError> {
         let kr = Keyring::generate();
         let blob = encrypt_for(
             EncryptionType::MlKemChaCha20Poly1305,
             &kr.public_key_bundle(),
             b"secret",
             b"right",
-        )
-        .unwrap();
+        )?;
         assert!(decrypt_with(&blob, &kr, b"wrong").is_err());
+        Ok(())
     }
 
     #[cfg(all(feature = "mlkem-tls", feature = "hkdf", feature = "chacha20poly1305"))]

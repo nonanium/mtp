@@ -62,7 +62,10 @@ async fn handle_pipe_loopback(
                 tokio::io::AsyncWriteExt::write_all(&mut writer, &buf[..n]).await?;
             }
             writer.finish().await?;
-            println!("  [loopback] Pipe {pipe_id} loopback complete ({} bytes)", total);
+            println!(
+                "  [loopback] Pipe {pipe_id} loopback complete ({} bytes)",
+                total
+            );
         }
         None => {
             eprintln!("  [loopback] Return pipe denied by client for pipe {pipe_id}");
@@ -83,10 +86,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_host_id, host_keyring) = keys::load_or_generate_host_keys("host.mk")?;
     keys::export_host_public_keys(&host_keyring)?;
 
-    let decrypt_keyring = Arc::new(
-        mtp::crypto::Keyring::from_bytes(&host_keyring.to_bytes())
-            .expect("re-load host keyring for decryption"),
-    );
+    let decrypt_keyring = Arc::new(match mtp::crypto::Keyring::from_bytes(&host_keyring.to_bytes())
+    {
+        Ok(keyring) => keyring,
+        Err(e) => {
+            return Err(format!("failed to re-load host keyring for decryption: {e}").into());
+        }
+    });
 
     let (clients, next_id) = clients::load_client_db("clients.json")?;
 
@@ -94,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let get_existing_user = move |id: u64, _description: Option<String>| {
         let clients = clients_for_get.clone();
         Box::pin(async move {
-            let result = clients.lock().unwrap().get(&id).cloned();
+            let result = clients.lock()?.get(&id).cloned();
             if result.is_some() {
                 println!("Auth lookup: client ID {id} found");
             } else {
@@ -113,8 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let nid_arc = next_id_for_register.clone();
         let path = clients_path.clone();
         Box::pin(async move {
-            let mut db = db_arc.lock().unwrap();
-            let mut nid = nid_arc.lock().unwrap();
+            let mut db = db_arc.lock()?;
+            let mut nid = nid_arc.lock()?;
             let id = *nid;
             *nid += 1;
             db.insert(id, bundle);
@@ -160,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("Client ID: {}", conn.client_id);
 
-            let tm: &TypeMap = conn.codec.registry().get(&conn.version).unwrap();
+            let tm: &TypeMap = conn.codec.registry().get(&conn.version)?;
 
             println!("Waiting for messages / pipe requests ...");
             loop {
@@ -185,12 +191,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match msg {
                             Ok(msg) => {
                                 println!("Received: {msg}");
-                                let response = handlers::process_and_respond(
+                                let response = match handlers::process_and_respond(
                                     &msg,
                                     tm,
                                     conn.client_public_key.as_ref(),
                                     &decrypt_keyring,
-                                );
+                                ) {
+                                    Ok(response) => response,
+                                    Err(e) => {
+                                        eprintln!("Failed to build response: {e}");
+                                        continue;
+                                    }
+                                };
                                 println!("Sending: {response}");
                                 if let Err(e) = conn.sender.send(&response).await {
                                     eprintln!("Send error: {e}");

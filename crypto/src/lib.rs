@@ -69,13 +69,14 @@ mod tests {
 
     #[cfg(feature = "chacha20poly1305")]
     #[test]
-    fn aead_encrypt_decrypt() {
+    fn aead_encrypt_decrypt() -> Result<(), CryptoError> {
         use crate::aead::{AeadDecrypt, AeadEncrypt, ChaCha20Poly1305};
         let key = [0xAB; 32];
         let cipher = ChaCha20Poly1305::new(key);
-        let ct = cipher.encrypt(b"hello world", b"aad").unwrap();
-        let pt = cipher.decrypt(&ct, b"aad").unwrap();
+        let ct = cipher.encrypt(b"hello world", b"aad")?;
+        let pt = cipher.decrypt(&ct, b"aad")?;
         assert_eq!(pt, b"hello world");
+        Ok(())
     }
 
     #[cfg(feature = "chacha20poly1305")]
@@ -84,7 +85,7 @@ mod tests {
         use crate::aead::{AeadDecrypt, AeadEncrypt, ChaCha20Poly1305};
         let cipher_a = ChaCha20Poly1305::new([0xAB; 32]);
         let cipher_b = ChaCha20Poly1305::new([0xCD; 32]);
-        let ct = cipher_a.encrypt(b"hello", b"").unwrap();
+        let ct = cipher_a.encrypt(b"hello", b"").expect("encryption should succeed");
         assert!(cipher_b.decrypt(&ct, b"").is_err());
     }
 
@@ -93,7 +94,9 @@ mod tests {
     fn aead_wrong_aad_fails() {
         use crate::aead::{AeadDecrypt, AeadEncrypt, ChaCha20Poly1305};
         let cipher = ChaCha20Poly1305::new([0xAB; 32]);
-        let ct = cipher.encrypt(b"hello", b"correct-aad").unwrap();
+        let ct = cipher
+            .encrypt(b"hello", b"correct-aad")
+            .expect("encryption should succeed");
         assert!(cipher.decrypt(&ct, b"wrong-aad").is_err());
     }
 
@@ -102,12 +105,12 @@ mod tests {
     fn ed25519_sign_verify() {
         let (signer, sk, pk) = Ed25519Signer::generate();
         let msg = b"test message";
-        let sig = signer.sign(msg).unwrap();
-        signer.verify(msg, &sig).unwrap();
-        verify_ed25519(&pk, msg, &sig).unwrap();
+        let sig = signer.sign(msg).expect("signing should succeed");
+        signer.verify(msg, &sig).expect("verification should succeed");
+        verify_ed25519(&pk, msg, &sig).expect("verification should succeed");
 
-        let loaded = Ed25519Signer::new(&sk).unwrap();
-        loaded.verify(msg, &sig).unwrap();
+        let loaded = Ed25519Signer::new(&sk).expect("signer loading should succeed");
+        loaded.verify(msg, &sig).expect("verification should succeed");
     }
 
     #[cfg(feature = "ed25519-dalek")]
@@ -115,7 +118,7 @@ mod tests {
     fn ed25519_wrong_sig_fails() {
         let (signer, _, pk) = Ed25519Signer::generate();
         let msg = b"test message";
-        let sig = signer.sign(msg).unwrap();
+        let sig = signer.sign(msg).expect("signing should succeed");
         assert!(verify_ed25519(&pk, b"wrong message", &sig).is_err());
     }
 
@@ -124,12 +127,12 @@ mod tests {
     fn mldsa_sign_verify() {
         let (signer, sk, pk) = MlDsaSigner::generate();
         let msg = b"test message";
-        let sig = signer.sign(msg).unwrap();
-        signer.verify(msg, &sig).unwrap();
-        verify_ml_dsa(&pk, msg, &sig).unwrap();
+        let sig = signer.sign(msg).expect("signing should succeed");
+        signer.verify(msg, &sig).expect("verification should succeed");
+        verify_ml_dsa(&pk, msg, &sig).expect("verification should succeed");
 
-        let loaded = MlDsaSigner::new(&sk, &pk).unwrap();
-        loaded.verify(msg, &sig).unwrap();
+        let loaded = MlDsaSigner::new(&sk, &pk).expect("signer loading should succeed");
+        loaded.verify(msg, &sig).expect("verification should succeed");
     }
 
     #[cfg(feature = "ml-dsa")]
@@ -137,7 +140,7 @@ mod tests {
     fn mldsa_wrong_sig_fails() {
         let (signer, _, pk) = MlDsaSigner::generate();
         let msg = b"test message";
-        let sig = signer.sign(msg).unwrap();
+        let sig = signer.sign(msg).expect("signing should succeed");
         assert!(verify_ml_dsa(&pk, b"wrong message", &sig).is_err());
     }
 
@@ -148,9 +151,10 @@ mod tests {
 
         let (ed_signer, _, _) = Ed25519Signer::generate();
         let (ml_signer, _, _) = MlDsaSigner::generate();
-        let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg").unwrap();
+        let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg")
+            .expect("dual signing should succeed");
         dual.verify(ed_signer.verifying_key(), ml_signer.verifying_key(), b"msg")
-            .unwrap();
+            .expect("dual verification should succeed");
     }
 
     #[cfg(all(feature = "ed25519-dalek", feature = "ml-dsa"))]
@@ -160,7 +164,8 @@ mod tests {
 
         let (ed_signer, _, _) = Ed25519Signer::generate();
         let (ml_signer, _, _) = MlDsaSigner::generate();
-        let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg").unwrap();
+        let dual = sign_dual(ed_signer.signing_key(), ml_signer.signing_key(), b"msg")
+            .expect("dual signing should succeed");
         assert!(
             dual.verify(
                 ed_signer.verifying_key(),
@@ -174,18 +179,22 @@ mod tests {
     #[cfg(feature = "hkdf")]
     #[test]
     fn hkdf_expand_produces_key() {
-        let key = derive_encryption_key(b"ikm", b"salt", b"context").unwrap();
+        let key = derive_encryption_key(b"ikm", b"salt", b"context")
+            .expect("key derivation should succeed");
         assert_eq!(key.len(), 32);
 
-        let expanded = hkdf_expand(b"ikm", b"salt", b"info", 64).unwrap();
+        let expanded = hkdf_expand(b"ikm", b"salt", b"info", 64)
+            .expect("HKDF expansion should succeed");
         assert_eq!(expanded.len(), 64);
     }
 
     #[cfg(feature = "hkdf")]
     #[test]
     fn hkdf_different_info_different_key() {
-        let a = derive_encryption_key(b"ikm", b"salt", b"info-a").unwrap();
-        let b = derive_encryption_key(b"ikm", b"salt", b"info-b").unwrap();
+        let a = derive_encryption_key(b"ikm", b"salt", b"info-a")
+            .expect("key derivation should succeed");
+        let b = derive_encryption_key(b"ikm", b"salt", b"info-b")
+            .expect("key derivation should succeed");
         assert_ne!(a, b);
     }
 
@@ -255,7 +264,7 @@ mod tests {
     fn keyring_serialize_roundtrip() {
         let kr = Keyring::generate();
         let bytes = kr.to_bytes();
-        let loaded = Keyring::from_bytes(&bytes).unwrap();
+        let loaded = Keyring::from_bytes(&bytes).expect("keyring roundtrip should succeed");
         assert_eq!(
             kr.kem_public_key.as_bytes(),
             loaded.kem_public_key.as_bytes()
@@ -276,7 +285,8 @@ mod tests {
         let kr = Keyring::generate();
         let bundle = kr.public_key_bundle();
         let bytes = bundle.as_bytes();
-        let loaded = PublicKeyBundle::from_bytes(&bytes).unwrap();
+        let loaded =
+            PublicKeyBundle::from_bytes(&bytes).expect("bundle roundtrip should succeed");
         assert_eq!(
             bundle.kem_public_key.as_bytes(),
             loaded.kem_public_key.as_bytes()
@@ -295,8 +305,8 @@ mod tests {
     #[test]
     fn hybrid_kem_roundtrip() {
         let (sk, pk) = HybridKem::generate_keypair();
-        let enc = HybridKem::encapsulate(&pk).unwrap();
-        let ss = HybridKem::decapsulate(&sk, &enc.ciphertext).unwrap();
+        let enc = HybridKem::encapsulate(&pk).expect("encapsulation should succeed");
+        let ss = HybridKem::decapsulate(&sk, &enc.ciphertext).expect("decapsulation should succeed");
         assert_eq!(enc.shared_secret, ss);
     }
 
@@ -309,8 +319,8 @@ mod tests {
         let kr = Keyring::generate();
         let entities = vec![kr.public_key_bundle()];
         let msg = b"secret data";
-        let ct = encrypt_multi(msg, b"aad", &entities).unwrap();
-        let pt = decrypt_multi(&ct, b"aad", &kr).unwrap();
+        let ct = encrypt_multi(msg, b"aad", &entities).expect("multi encrypt should succeed");
+        let pt = decrypt_multi(&ct, b"aad", &kr).expect("multi decrypt should succeed");
         assert_eq!(pt, msg);
     }
 }

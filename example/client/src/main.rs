@@ -26,8 +26,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Missing TLS certificate at {cert_path}: enter the Nix shell first or run the server to generate it: {e}"
         )
     });
-    let host_public_key = load_public_key_bundle("host.mpkb")
-        .expect("Missing host.mpkb: run the server first to export it");
+    let host_public_key = match load_public_key_bundle("host.mpkb") {
+        Ok(bundle) => bundle,
+        Err(e) => {
+            return Err(format!(
+                "Missing host.mpkb: run the server first to export it ({e})"
+            )
+            .into());
+        }
+    };
 
     println!("Connecting to 127.0.0.1:8080 ...");
 

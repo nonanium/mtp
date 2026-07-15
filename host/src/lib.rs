@@ -225,7 +225,10 @@ async fn run_dispatcher(
                 // The WebTransport client opens the pipe request on a fresh stream.
                 // That stream arrives here as a pipe event, not a message event, so we
                 // reconstruct the host-side PipeRequest here and hand it to receive_pipe().
-                println!("Dispatcher treating pipe stream as PipeRequest: id={}", pipe_id);
+                println!(
+                    "Dispatcher treating pipe stream as PipeRequest: id={}",
+                    pipe_id
+                );
                 let req = PipeRequest {
                     pipe_id,
                     description: reader.description().to_string(),
@@ -471,8 +474,12 @@ impl MTPHost {
                     Some(v) => v,
                     None => return Err(AcceptError::UnsupportedVersion(client_version)),
                 };
-                let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
-                    .expect("negotiated version must be registered");
+                let codec = match VersionedCodec::for_version(self.registry.clone(), negotiated.clone()) {
+                    Some(codec) => codec,
+                    None => {
+                        return Err(AcceptError::UnsupportedVersion(negotiated));
+                    }
+                };
                 let description = match first_msg.get_data(DataType::Description) {
                     DataValue::Str(s) => Some(s.clone()),
                     _ => None,
@@ -508,8 +515,12 @@ impl MTPHost {
                 Some(v) => v,
                 None => return Err(AcceptError::UnsupportedVersion(client_version)),
             };
-            let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
-                .expect("negotiated version must be registered");
+            let codec = match VersionedCodec::for_version(self.registry.clone(), negotiated.clone()) {
+                Some(codec) => codec,
+                None => {
+                    return Err(AcceptError::UnsupportedVersion(negotiated));
+                }
+            };
             let description = match first_msg.get_data(DataType::Description) {
                 DataValue::Str(s) => Some(s.clone()),
                 _ => None,
@@ -1047,8 +1058,12 @@ impl MTPHost {
             return Err(AcceptError::Send(e));
         }
 
-        let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
-            .expect("negotiated version must be registered");
+        let codec = match VersionedCodec::for_version(self.registry.clone(), negotiated.clone()) {
+            Some(codec) => codec,
+            None => {
+                return Err(AcceptError::UnsupportedVersion(negotiated));
+            }
+        };
 
         Ok(Some(self.connection_from_parts(
             sender,
@@ -1162,8 +1177,12 @@ impl MTPHost {
                 Some(v) => v,
                 None => return Err(AcceptError::UnsupportedVersion(client_version)),
             };
-            let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
-                .expect("negotiated version must be registered");
+            let codec = match VersionedCodec::for_version(self.registry.clone(), negotiated.clone()) {
+                Some(codec) => codec,
+                None => {
+                    return Err(AcceptError::UnsupportedVersion(negotiated));
+                }
+            };
             return Ok(Some(self.connection_from_parts(
                 sender,
                 receiver,
@@ -1246,9 +1265,10 @@ mod tests {
     }
 
     #[test]
-    fn host_config_pongs_default_to_enabled() {
-        let config = HostConfig::new("127.0.0.1".parse().unwrap(), 4433, Vec::new(), Vec::new());
+    fn host_config_pongs_default_to_enabled() -> Result<(), Box<dyn std::error::Error>> {
+        let config = HostConfig::new("127.0.0.1".parse()?, 4433, Vec::new(), Vec::new());
         assert!(config.send_pongs);
         assert!(!config.with_pongs(false).send_pongs);
+        Ok(())
     }
 }

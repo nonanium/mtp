@@ -775,65 +775,67 @@ mod tests {
     use super::*;
     use crate::data_value::DataValue;
 
-    fn roundtrip(cv: CommunicationValue) -> CommunicationValue {
-        let bytes = cv.to_bytes().expect("encode failed");
-        let decoded = CommunicationValue::from_bytes(&bytes).expect("failed to deserialize");
-        let bytes2 = decoded.to_bytes().expect("encode failed");
+    fn roundtrip(cv: CommunicationValue) -> Result<CommunicationValue, Box<dyn std::error::Error>> {
+        let bytes = cv.to_bytes()?;
+        let decoded = CommunicationValue::from_bytes(&bytes)?;
+        let bytes2 = decoded.to_bytes()?;
         assert_eq!(bytes, bytes2);
-        decoded
+        Ok(decoded)
     }
 
     #[test]
-    fn test_flags_and_order_without_optional() {
+    fn test_flags_and_order_without_optional() -> Result<(), Box<dyn std::error::Error>> {
         let cv = CommunicationValue::new(CommunicationType::ErrorParsing).with_id(0);
-        let bytes = cv.to_bytes().expect("encode failed");
+        let bytes = cv.to_bytes()?;
 
         // [u32 len][u16 type][flags]...
         assert!(bytes.len() >= 7);
         let mut c = Cursor::new(bytes.as_slice());
-        let total_len = c.read_u32::<BigEndian>().expect("read len");
+        let total_len = c.read_u32::<BigEndian>()?;
         assert_eq!(total_len as usize + 4, bytes.len());
 
-        let typ = c.read_u16::<BigEndian>().expect("read type");
+        let typ = c.read_u16::<BigEndian>()?;
         assert_eq!(typ, 12);
 
-        let flags = c.read_u8().expect("read flags");
+        let flags = c.read_u8()?;
         assert_eq!(flags & 0b0000_0111, 0);
+        Ok(())
     }
 
     #[test]
-    fn test_flags_and_order_with_all_optional() {
+    fn test_flags_and_order_with_all_optional() -> Result<(), Box<dyn std::error::Error>> {
         let cv = CommunicationValue::new(CommunicationType::ErrorBadVersion)
             .with_id(0xAABBCCDD)
             .with_sender(0x0000_1122_3344_5566)
             .with_receiver(0x0000_6677_8899_AABB);
 
-        let bytes = cv.to_bytes().expect("encode failed");
+        let bytes = cv.to_bytes()?;
         let mut c = Cursor::new(bytes.as_slice());
 
-        let total_len = c.read_u32::<BigEndian>().expect("len");
+        let total_len = c.read_u32::<BigEndian>()?;
         assert_eq!(total_len as usize + 4, bytes.len());
 
-        let typ = c.read_u16::<BigEndian>().expect("read type");
+        let typ = c.read_u16::<BigEndian>()?;
         assert_eq!(typ, 13);
 
-        let flags = c.read_u8().expect("read flags");
+        let flags = c.read_u8()?;
         assert_eq!(flags & 0b0000_0111, 0b0000_0111);
 
-        let id = c.read_u32::<BigEndian>().expect("id");
+        let id = c.read_u32::<BigEndian>()?;
         assert_eq!(id, 0xAABBCCDD);
 
         let mut sender6 = [0u8; 6];
-        c.read_exact(&mut sender6).expect("sender");
+        c.read_exact(&mut sender6)?;
         assert_eq!(sender6, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
 
         let mut receiver6 = [0u8; 6];
-        c.read_exact(&mut receiver6).expect("receiver");
+        c.read_exact(&mut receiver6)?;
         assert_eq!(receiver6, [0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB]);
+        Ok(())
     }
 
     #[test]
-    fn test_roundtrip_complex() {
+    fn test_roundtrip_complex() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         let cv = CommunicationValue::new(CommunicationType::Disconnect)
             .with_id(1234)
@@ -847,7 +849,7 @@ mod tests {
                 DataValue::Array(vec![DataValue::SignedNumber(1), DataValue::SignedNumber(2)]),
             );
 
-        let decoded = roundtrip(cv.clone());
+        let decoded = roundtrip(cv.clone())?;
 
         assert_eq!(decoded.get_id(), 1234);
         assert_eq!(decoded.get_sender(), 111);
@@ -861,6 +863,7 @@ mod tests {
             decoded.get_data(DataType::ClientNonce),
             &DataValue::SignedNumber(42)
         );
+        Ok(())
     }
 
     #[test]
@@ -873,7 +876,7 @@ mod tests {
 
     #[cfg(feature = "crypto")]
     #[test]
-    fn test_sign_verify_frame_roundtrip() {
+    fn test_sign_verify_frame_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         use mtp_crypto::{Ed25519Signer, SigAlgorithm};
 
         let (signer, sk, _pk) = Ed25519Signer::generate();
@@ -887,18 +890,20 @@ mod tests {
         assert!(cv.sign_frame(SigAlgorithm::ED25519, &signer).is_some());
 
         // Same in-memory value verifies (FLAG_SIGNED forced on both sides).
-        let verifier = Ed25519Signer::new(&sk).unwrap();
+        let verifier = Ed25519Signer::new(&sk)?;
         assert!(cv.verify_frame(&verifier).is_ok());
 
         // Survives a wire round-trip.
-        let bytes = cv.to_bytes().expect("encode failed");
-        let decoded = CommunicationValue::from_bytes(&bytes).expect("decode failed");
+        let bytes = cv.to_bytes()?;
+        let decoded = CommunicationValue::from_bytes(&bytes)?;
         assert!(decoded.verify_frame(&verifier).is_ok());
+
+        Ok(())
     }
 
     #[cfg(feature = "crypto")]
     #[test]
-    fn test_verify_frame_wrong_key_fails() {
+    fn test_verify_frame_wrong_key_fails() -> Result<(), Box<dyn std::error::Error>> {
         use mtp_crypto::{Ed25519Signer, SigAlgorithm};
 
         let (signer, _, _) = Ed25519Signer::generate();
@@ -908,7 +913,9 @@ mod tests {
             .add_typed_default(DataType::PqSignature, DataValue::UnsignedNumber(42));
         assert!(cv.sign_frame(SigAlgorithm::ED25519, &signer).is_some());
 
-        let wrong = Ed25519Signer::new(&other_sk).unwrap();
+        let wrong = Ed25519Signer::new(&other_sk)?;
         assert!(cv.verify_frame(&wrong).is_err());
+
+        Ok(())
     }
 }

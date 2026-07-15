@@ -7,11 +7,10 @@ pub fn build_demo_message(
     client_id: u64,
     keyring: &Keyring,
     server_bundle: &PublicKeyBundle,
-) -> CommunicationValue {
+) -> Result<CommunicationValue, Box<dyn std::error::Error>> {
     // Encrypt to the server's KEM public key; the server decrypts with its keyring.
     let enc_type = EncryptionType::MlKemChaCha20Poly1305;
-    let signer =
-        Ed25519Signer::new(&keyring.sig_cl_secret_key).expect("Ed25519 signer from keyring");
+    let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)?;
 
     let tm = TypeMap::latest();
 
@@ -52,8 +51,7 @@ pub fn build_demo_message(
     );
 
     let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
 
     let msg = CommunicationValue::new(CommunicationType::Ping)
@@ -84,7 +82,7 @@ pub fn build_demo_message(
         .add_typed_default(DataType::SignedPayload, dv_sig)
         .add_typed_default(DataType::SecurePayload, dv_sec)
         .with_sender(client_id);
-    msg
+    Ok(msg)
 }
 
 pub async fn send_and_receive(
@@ -92,7 +90,7 @@ pub async fn send_and_receive(
     keyring: &Keyring,
     server_bundle: &PublicKeyBundle,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let msg = build_demo_message(conn.client_id, keyring, server_bundle);
+    let msg = build_demo_message(conn.client_id, keyring, server_bundle)?;
     println!("Sending: {msg}");
     conn.sender.send(&msg).await?;
 

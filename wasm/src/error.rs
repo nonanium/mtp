@@ -37,26 +37,30 @@ mod tests {
     #[wasm_bindgen_test]
     fn from_codec_error_invalid_encoding() {
         let err = from_codec_error(mtp_common::CodecError::InvalidEncoding);
-        assert!(err.as_string().unwrap().contains("Invalid encoding"));
+        let msg = err.as_string().unwrap_or_default();
+        assert!(msg.contains("Invalid encoding"));
     }
 
     #[wasm_bindgen_test]
     fn from_codec_error_unknown_version() {
         let err = from_codec_error(mtp_common::CodecError::UnknownVersion);
-        assert!(err.as_string().unwrap().contains("Unknown version"));
+        let msg = err.as_string().unwrap_or_default();
+        assert!(msg.contains("Unknown version"));
     }
 
     #[wasm_bindgen_test]
     fn from_communication_error_renders() {
         use mtp_common::CommunicationError;
         let err = from_communication_error(CommunicationError::ConnectionLost);
-        assert!(err.as_string().unwrap().contains("Connection terminated"));
+        let msg = err.as_string().unwrap_or_default();
+        assert!(msg.contains("Connection terminated"));
     }
 
     #[wasm_bindgen_test]
     fn from_crypto_error_renders() {
         use mtp_crypto::CryptoError;
         let err = from_crypto_error(CryptoError::InvalidKeyLength);
-        assert!(err.as_string().unwrap().contains("invalid key length"));
+        let msg = err.as_string().unwrap_or_default();
+        assert!(msg.contains("invalid key length"));
     }
 }

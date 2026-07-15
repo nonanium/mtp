@@ -19,7 +19,12 @@ pub fn load_client_db(
         Err(_) => HashMap::new(),
     };
     let clients: Arc<Mutex<HashMap<u64, PublicKeyBundle>>> = Arc::new(Mutex::new(clients_map));
-    let next_value = clients.lock().unwrap().keys().max().unwrap_or(&999) + 1;
+    let next_value = {
+        let guard = clients
+            .lock()
+            .map_err(|_| std::io::Error::other("client database mutex poisoned"))?;
+        guard.keys().max().copied().unwrap_or(999) + 1
+    };
     let next_id = Arc::new(Mutex::new(next_value));
     Ok((clients, next_id))
 }
