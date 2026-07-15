@@ -169,9 +169,18 @@ async fn run_dispatcher(
     loop {
         match receiver.receive_event().await {
             Ok(mtp_transport::TransportEvent::Message(msg)) => {
+                println!(
+                    "Dispatcher message: type={} id={}",
+                    msg.get_type(),
+                    msg.get_id()
+                );
                 if msg.get_type() == pipe_req_type {
                     let pipe_id = msg.get_id();
                     let description = msg.get_str(DataType::Description).unwrap_or("").to_string();
+                    println!(
+                        "Dispatcher classified PipeRequest: id={} description={:?}",
+                        pipe_id, description
+                    );
                     let req = PipeRequest {
                         pipe_id,
                         description,
@@ -185,6 +194,10 @@ async fn run_dispatcher(
                 if msg.get_type() == pipe_resp_type {
                     let pipe_id = msg.get_id();
                     let accepted = msg.get_bool(DataType::Accepted).unwrap_or(false);
+                    println!(
+                        "Dispatcher classified PipeResponse: id={} accepted={}",
+                        pipe_id, accepted
+                    );
                     let mut pending = dispatcher.pending_creations.lock().await;
                     if let Some(tx) = pending.remove(&pipe_id) {
                         let _ = tx.send(Ok(accepted));
@@ -198,10 +211,28 @@ async fn run_dispatcher(
             }
             Ok(mtp_transport::TransportEvent::Pipe(reader)) => {
                 let pipe_id = reader.pipe_id();
+                println!(
+                    "Dispatcher pipe stream: id={} description={:?}",
+                    pipe_id,
+                    reader.description()
+                );
                 let mut pending = dispatcher.pending_pipes.lock().await;
                 if let Some(tx) = pending.remove(&pipe_id) {
                     let _ = tx.send(reader);
+                    continue;
                 }
+
+                // The WebTransport client opens the pipe request on a fresh stream.
+                // That stream arrives here as a pipe event, not a message event, so we
+                // reconstruct the host-side PipeRequest here and hand it to receive_pipe().
+                println!("Dispatcher treating pipe stream as PipeRequest: id={}", pipe_id);
+                let req = PipeRequest {
+                    pipe_id,
+                    description: reader.description().to_string(),
+                    sender: sender.clone(),
+                    dispatcher: dispatcher.clone(),
+                };
+                let _ = pipe_req_tx.send(req).await;
             }
             Err(e) => {
                 if app_tx.send(Err(e)).await.is_err() {

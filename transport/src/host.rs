@@ -101,8 +101,7 @@ pub async fn host(
             };
 
             let incoming_tx = incoming_tx.clone();
-            let policy = policy.clone();
-            tokio::spawn(handle_connection(connection, incoming_tx, policy));
+            tokio::spawn(handle_connection(connection, incoming_tx, policy.clone()));
         }
     });
 

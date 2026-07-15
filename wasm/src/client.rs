@@ -797,7 +797,18 @@ impl WasmClient {
         let request_bytes = request
             .to_bytes()
             .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        web_sys::console::log_1(
+            &format!(
+                "[mtp wasm] create_pipe sending PipeRequest id={} description={description} bytes={}",
+                pipe_id,
+                request_bytes.len()
+            )
+            .into(),
+        );
         transport.send_frame(&request_bytes).await?;
+        web_sys::console::log_1(
+            &format!("[mtp wasm] create_pipe sent PipeRequest id={pipe_id}").into(),
+        );
 
         Ok(WasmPipeHandle {
             pipe_id,
@@ -824,7 +835,13 @@ impl WasmClient {
         let resp_bytes = resp
             .to_bytes()
             .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+        web_sys::console::log_1(
+            &format!("[mtp wasm] accept_pipe sending PipeResponse id={pipe_id} accepted=true bytes={}", resp_bytes.len()).into(),
+        );
         transport.send_frame(&resp_bytes).await?;
+        web_sys::console::log_1(
+            &format!("[mtp wasm] accept_pipe sent PipeResponse id={pipe_id}").into(),
+        );
 
         let (tx, rx) = oneshot::channel();
         self.pending_pipes.borrow_mut().insert(pipe_id, tx);

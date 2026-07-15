@@ -3,6 +3,7 @@ import type {
   MTPCredentialStorage,
   MTPLogEvent,
   MTPPipeReader,
+  MTPPipeWriter,
   ParsedFrame,
 } from "mtp";
 
@@ -23,6 +24,7 @@ const CLEAR_KEYS = document.getElementById("clear-keys") as HTMLButtonElement;
 const STREAM_MIC = document.getElementById("stream-mic") as HTMLButtonElement;
 const STOP_MIC = document.getElementById("stop-mic") as HTMLButtonElement;
 const PIPE_STATUS = document.getElementById("pipe-status")!;
+const METRICS = document.getElementById("metrics")!;
 
 const CREDENTIALS_KEY = "mtp-web-client-credentials";
 const HOST_PUBLIC_KEY_KEY = "mtp-web-client-host-public-key";
@@ -41,8 +43,18 @@ let activeClient: ReturnType<typeof createClient> extends Promise<infer T>
   : never;
 let micStream: MediaStream | null = null;
 let mediaRecorder: MediaRecorder | null = null;
+let activePipeWriter: MTPPipeWriter | null = null;
 let pipeSendCount = 0;
 let pendingPipeReaders: MTPPipeReader[] = [];
+let audioContext: AudioContext | null = null;
+let micMonitorAudio: HTMLAudioElement | null = null;
+let currentPipePingMs: number | null = null;
+let lastPipeSendStartedAt = 0;
+let currentPipeId: number | null = null;
+let currentPipeDescription = "";
+let currentPipeState = "idle";
+let loopbackPlaybackCount = 0;
+let hasPipeRequestHandler = false;
 
 const credentialStorage: MTPCredentialStorage = {
   getItem: (key) => localStorage.getItem(key),
@@ -61,7 +73,126 @@ function pipeLog(msg: string, cls = "pipe") {
   const line = document.createElement("div");
   line.textContent = msg;
   if (cls) line.className = cls;
-  PIPE_STATUS.appendChild(line);
+  PIPE_STATUS.prepend(line);
+}
+
+function setMetric(name: string, value: string) {
+  const row = document.querySelector(`[data-metric="${name}"]`);
+  if (row) {
+    row.querySelector<HTMLElement>(".metric-value")!.textContent = value;
+    return;
+  }
+
+  const wrapper = document.createElement("div");
+  wrapper.dataset.metric = name;
+  wrapper.innerHTML = `<span class="metric-name"></span>: <span class="metric-value"></span>`;
+  wrapper.querySelector<HTMLElement>(".metric-name")!.textContent = name;
+  wrapper.querySelector<HTMLElement>(".metric-value")!.textContent = value;
+  METRICS.appendChild(wrapper);
+}
+
+function updateMetrics() {
+  setMetric(
+    "Current Pipe",
+    currentPipeId == null ? "none" : String(currentPipeId),
+  );
+  setMetric("Pipe State", currentPipeState);
+  setMetric("Pipe Description", currentPipeDescription || "n/a");
+  setMetric(
+    "Current Pipe Ping",
+    currentPipePingMs == null ? "n/a" : `${currentPipePingMs.toFixed(1)} ms`,
+  );
+  setMetric("Loopback Playback", String(loopbackPlaybackCount));
+  setMetric("Sent Chunks", String(pipeSendCount));
+}
+
+function setPipeState(
+  state: string,
+  details: Partial<{
+    pipeId: number | null;
+    description: string;
+    pingMs: number | null;
+  }>,
+) {
+  if ("pipeId" in details) currentPipeId = details.pipeId ?? null;
+  if ("description" in details)
+    currentPipeDescription = details.description ?? "";
+  if ("pingMs" in details)
+    currentPipePingMs = details.pingMs ?? currentPipePingMs;
+  currentPipeState = state;
+  updateMetrics();
+}
+
+function getPipeId(handle: unknown): number | null {
+  if (handle && typeof handle === "object") {
+    const candidate = handle as Record<string, unknown>;
+    const value =
+      candidate.pipeId ??
+      candidate.pipe_id ??
+      candidate["pipe-id"] ??
+      candidate.id;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function ensureAudioContext() {
+  if (!audioContext) {
+    audioContext = new AudioContext();
+  }
+  return audioContext;
+}
+
+async function playLoopbackAudio(chunks: BlobPart[], mimeType: string) {
+  if (chunks.length === 0) return;
+  const blob = new Blob(chunks, { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  audio.autoplay = true;
+  audio.onended = () => URL.revokeObjectURL(url);
+  audio.onerror = () => URL.revokeObjectURL(url);
+  try {
+    await ensureAudioContext().resume();
+    await audio.play();
+    loopbackPlaybackCount += 1;
+    updateMetrics();
+    pipeLog(`Loopback playback started (${chunks.length} chunks).`);
+  } catch (e) {
+    URL.revokeObjectURL(url);
+    pipeLog(`Loopback playback failed: ${e}`, "error");
+  }
+}
+
+async function startMicPlayback(stream: MediaStream) {
+  if (micMonitorAudio) {
+    micMonitorAudio.pause();
+    micMonitorAudio.srcObject = null;
+    micMonitorAudio = null;
+  }
+
+  const audio = new Audio();
+  audio.autoplay = true;
+  audio.controls = false;
+  audio.muted = false;
+  audio.srcObject = stream;
+  micMonitorAudio = audio;
+
+  try {
+    await ensureAudioContext().resume();
+    await audio.play();
+    pipeLog("Microphone monitoring playback started.");
+  } catch (e) {
+    pipeLog(`Microphone monitoring playback failed: ${e}`, "error");
+  }
+}
+
+function stopMicPlayback() {
+  if (!micMonitorAudio) return;
+  micMonitorAudio.pause();
+  micMonitorAudio.srcObject = null;
+  micMonitorAudio = null;
 }
 
 function renderStructured(value: unknown): string {
@@ -297,6 +428,7 @@ async function connect() {
     log("\nClient running. Waiting for incoming messages...");
     STREAM_MIC.disabled = false;
     log("\nPipe demo ready. Click 'Stream Microphone' to start.", "pipe");
+    updateMetrics();
   } catch (error) {
     log(`[error] ${error}`, "error");
   }
@@ -317,35 +449,52 @@ async function startMicStreaming() {
 
   STREAM_MIC.disabled = true;
   STOP_MIC.disabled = false;
+  setPipeState("creating", { pipeId: null, description: "mic-audio" });
   pipeLog("Microphone acquired. Creating pipe ...");
+  await startMicPlayback(micStream);
+
+  if (!hasPipeRequestHandler) {
+    activeClient.setOnPipeRequest(async (request) => {
+      pipeLog(
+        `Incoming return pipe: id=${request.pipeId} desc=${request.description}`,
+      );
+      try {
+        const reader = await activeClient!.acceptPipe(request.pipeId);
+        pendingPipeReaders.push(reader);
+        pipeLog(
+          `Pipe accepted. Streaming return pipe (pipe id=${getPipeId(reader) ?? "unknown"}) ...`,
+        );
+        readLoopbackPipe(reader);
+      } catch (e) {
+        pipeLog(`Failed to accept return pipe: ${e}`, "error");
+      }
+    });
+    hasPipeRequestHandler = true;
+  }
 
   const handle = await activeClient.createPipe("mic-audio");
+  const pipeId = getPipeId(handle);
+  setPipeState("waiting-for-accept", { pipeId, description: "mic-audio" });
   pipeLog(
-    `Pipe created (id=${handle.pipeId}). Waiting for server to accept ...`,
+    `Pipe created (id=${pipeId ?? "unknown"}). Waiting for server to accept ...`,
   );
-
-  // Handle incoming pipe requests from the server (loopback return pipes)
-  activeClient.setOnPipeRequest(async (request) => {
-    pipeLog(
-      `Incoming return pipe: id=${request.pipeId} desc=${request.description}`,
-    );
-    try {
-      const reader = await activeClient!.acceptPipe(request.pipeId);
-      pendingPipeReaders.push(reader);
-      readLoopbackPipe(reader);
-    } catch (e) {
-      pipeLog(`Failed to accept return pipe: ${e}`, "error");
-    }
-  });
 
   const writer = await handle.wait();
   if (!writer) {
+    setPipeState("denied", { pipeId, description: "mic-audio" });
     pipeLog("Pipe denied by server.", "error");
     stopMicStreaming();
     return;
   }
+  activePipeWriter = writer;
 
-  pipeLog(`Pipe accepted. Streaming microphone (pipe id=${writer.pipeId}) ...`);
+  setPipeState("streaming", {
+    pipeId: getPipeId(writer) ?? pipeId,
+    description: "mic-audio",
+  });
+  pipeLog(
+    `Pipe accepted. Streaming microphone (pipe id=${getPipeId(writer) ?? pipeId ?? "unknown"}) ...`,
+  );
 
   // Stream microphone audio via MediaRecorder
   const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
@@ -361,18 +510,19 @@ async function startMicStreaming() {
     const chunkNum = pipeSendCount;
 
     try {
+      lastPipeSendStartedAt = performance.now();
       const buffer = await event.data.arrayBuffer();
       const data = new Uint8Array(buffer);
       await writer.write(data);
-      pipeLog(
-        `  [chunk ${chunkNum}] sent ${data.length} bytes (${(performance.now() - startTime).toFixed(1)}ms write)`,
-      );
+      currentPipePingMs = performance.now() - lastPipeSendStartedAt;
+      updateMetrics();
     } catch (e) {
       pipeLog(`  [chunk ${chunkNum}] send error: ${e}`, "error");
     }
   };
 
   mediaRecorder.start(200); // emit data every 200ms
+  updateMetrics();
   pipeLog("Streaming started (200ms chunks).");
 }
 
@@ -380,6 +530,10 @@ async function readLoopbackPipe(reader: MTPPipeReader) {
   const startTime = performance.now();
   let totalBytes = 0;
   let chunkCount = 0;
+  const chunks: BlobPart[] = [];
+  const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : "audio/webm";
 
   try {
     while (true) {
@@ -387,6 +541,7 @@ async function readLoopbackPipe(reader: MTPPipeReader) {
       if (data == null) break; // EOF
       totalBytes += data.length;
       chunkCount++;
+      chunks.push(data.slice().buffer);
     }
   } catch (e) {
     pipeLog(`  Return pipe read error: ${e}`, "error");
@@ -398,6 +553,8 @@ async function readLoopbackPipe(reader: MTPPipeReader) {
     `  Return pipe complete: ${chunkCount} chunks, ${totalBytes} bytes, ` +
       `delay=${elapsed.toFixed(1)}ms`,
   );
+  setPipeState("loopback-ready", { pingMs: elapsed });
+  await playLoopbackAudio(chunks, mimeType);
 
   // Clean up the reader from the pending list
   const idx = pendingPipeReaders.indexOf(reader);
@@ -410,13 +567,28 @@ async function stopMicStreaming() {
     mediaRecorder = null;
   }
 
+  if (activePipeWriter) {
+    try {
+      await activePipeWriter.close();
+    } catch (e) {
+      pipeLog(`Pipe close error: ${e}`, "error");
+    } finally {
+      activePipeWriter = null;
+    }
+  }
+
   if (micStream) {
     micStream.getTracks().forEach((track) => track.stop());
     micStream = null;
   }
+  stopMicPlayback();
 
   // Close pending pipe readers
   pendingPipeReaders = [];
+  setPipeState("stopped", {
+    pipeId: currentPipeId,
+    description: currentPipeDescription,
+  });
 
   STREAM_MIC.disabled = false;
   STOP_MIC.disabled = true;
@@ -480,3 +652,5 @@ initWasm()
     log(`Fatal error: ${e}`, "error");
     console.error(e);
   });
+
+updateMetrics();

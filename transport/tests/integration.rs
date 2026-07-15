@@ -228,7 +228,7 @@ async fn test_receiver_backpressure_with_small_queue() {
     let mut h = start_test_host(cert_pem.clone(), key_pem).await;
     let url = format!("https://127.0.0.1:{}", h.local_addr().port());
     let policy = Policy::default().with_receiver_queue_capacity(1);
-    let (client_tx, client_rx) = connect(&url, Some(cert_pem), policy.clone()).await.unwrap();
+    let (client_tx, client_rx) = connect(&url, Some(cert_pem), policy).await.unwrap();
     let (_host_tx, host_rx) = h.next().await.unwrap();
 
     let tm = TypeMap::latest();

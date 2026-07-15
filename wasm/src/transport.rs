@@ -23,6 +23,12 @@ pub(crate) fn log_stream_error_code(error: &JsValue, context: &str) {
     let stream_error_code = js_sys::Reflect::get(error, &JsValue::from_str("streamErrorCode"))
         .ok()
         .and_then(|v| v.as_f64());
+    if matches!(stream_error_code, Some(0.0)) {
+        // WebTransport reports peer-driven stream shutdown as code 0 in this
+        // environment. For one-frame handshake streams, that is expected and
+        // should not be surfaced as a warning.
+        return;
+    }
     let message = error
         .as_string()
         .or_else(|| {
@@ -138,21 +144,24 @@ impl WasmTransport {
         if let Some(hashes) = cert_hashes {
             let wt_hashes = js_sys::Array::new();
             for h in hashes {
-                if let Some((algo, hex_val)) = h.split_once(':') {
-                    if let Ok(bytes) = hex::decode(hex_val) {
-                        let hash = js_sys::Object::new();
-                        js_sys::Reflect::set(
-                            &hash,
-                            &JsValue::from_str("algorithm"),
-                            &JsValue::from_str(algo),
-                        )?;
-                        js_sys::Reflect::set(
-                            &hash,
-                            &JsValue::from_str("value"),
-                            &js_sys::Uint8Array::from(&bytes[..]),
-                        )?;
-                        wt_hashes.push(&hash);
-                    }
+                let (algo, hex_val) = match h.split_once(':') {
+                    Some((algo, hex_val)) => (algo, hex_val),
+                    None => ("sha-256", h.as_str()),
+                };
+
+                if let Ok(bytes) = hex::decode(hex_val) {
+                    let hash = js_sys::Object::new();
+                    js_sys::Reflect::set(
+                        &hash,
+                        &JsValue::from_str("algorithm"),
+                        &JsValue::from_str(algo),
+                    )?;
+                    js_sys::Reflect::set(
+                        &hash,
+                        &JsValue::from_str("value"),
+                        &js_sys::Uint8Array::from(&bytes[..]),
+                    )?;
+                    wt_hashes.push(&hash);
                 }
             }
             if wt_hashes.length() > 0 {

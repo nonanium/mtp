@@ -51,7 +51,7 @@
     <body>
         <h1>MTP WebTransport Client</h1>
         <label for="server-url">Server URL</label>
-        <input id="server-url" value="https://localhost:8080" />
+        <input id="server-url" value="https://127.0.0.1:8080" />
 
         <label for="host-public-key">Host public key bundle hex</label>
         <textarea
@@ -82,6 +82,11 @@
         </div>
         <div id="pipe-status"></div>
 
+        <hr />
+        <h2>Metrics</h2>
+        <div id="metrics"></div>
+
+        <hr />
         <div id="key-status">Initializing...</div>
         <div id="status"></div>
         <script type="module" src="/src/main.ts"></script>
