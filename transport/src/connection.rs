@@ -471,7 +471,7 @@ impl Sender {
     }
 
     #[instrument(skip(self), level = "trace")]
-    pub fn close(&self) {
+    pub fn close_immediate(&self) {
         info!(target = "mtp.transport", "fire-and-forget close requested");
         let connection = self.connection.clone();
         let handle = self.handle.clone();
@@ -514,7 +514,7 @@ impl Sender {
 
     #[instrument(skip(self), level = "trace")]
     /// Initiate a best-effort graceful close and wait for the configured force-close delay.
-    pub async fn close_and_wait(&self) {
+    pub async fn close(&self) {
         info!(target = "mtp.transport", "graceful close initiated");
         let connection = self.connection.clone();
         let handle = self.handle.clone();
@@ -535,11 +535,11 @@ impl Sender {
 
             match timeout(policy.write_timeout, close_write).await {
                 Ok(Ok(())) => {}
-                Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => warn!(
-                    "[Sender] close_and_wait failed: peer sent STOP_SENDING (error code {code})"
-                ),
-                Ok(Err(e)) => warn!("[Sender] close_and_wait failed: {e}"),
-                Err(_) => warn!("[Sender] close_and_wait timed out"),
+                Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
+                    warn!("[Sender] close failed: peer sent STOP_SENDING (error code {code})")
+                }
+                Ok(Err(e)) => warn!("[Sender] close failed: {e}"),
+                Err(_) => warn!("[Sender] close timed out"),
             }
         } else {
             let _ = Self::send_close_frame(&connection, &policy).await;

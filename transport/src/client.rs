@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use mtp_common::CommunicationError;
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore, pki_types::pem::PemObject};
@@ -139,8 +140,10 @@ pub async fn connect_with_config(
     url: &str,
     config: ClientConfig,
 ) -> Result<(Sender, Receiver), CommunicationError> {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let connect_started = Instant::now();
+    mtp_crypto::ensure_crypto_provider();
 
+    let config_started = Instant::now();
     let client_config = if config.insecure_certificate_verification {
         #[cfg(feature = "insecure-tls")]
         {
@@ -168,14 +171,19 @@ pub async fn connect_with_config(
     } else {
         configure_client_system_roots(&config.policy)?
     };
+    tracing::debug!(elapsed = ?config_started.elapsed(), "client connect: configure TLS");
 
+    let endpoint_started = Instant::now();
     let endpoint = Endpoint::client(client_config)
         .map_err(|e| CommunicationError::Other(format!("Endpoint creation failed: {}", e)))?;
+    tracing::debug!(elapsed = ?endpoint_started.elapsed(), "client connect: create endpoint");
 
+    let transport_connect_started = Instant::now();
     let connection = endpoint
         .connect(url)
         .await
         .map_err(|e| CommunicationError::ConnectingError(e.to_string()))?;
+    tracing::debug!(elapsed = ?transport_connect_started.elapsed(), "client connect: establish WebTransport session");
 
     let handle = Arc::new(ConnectionHandle::new());
     let policy = Arc::new(config.policy);
@@ -183,6 +191,7 @@ pub async fn connect_with_config(
     let sender = Sender::new(connection.clone(), handle.clone(), policy.clone());
     let receiver = Receiver::new(connection, handle, policy);
 
+    tracing::debug!(elapsed = ?connect_started.elapsed(), "client connect: complete");
     Ok((sender, receiver))
 }
 

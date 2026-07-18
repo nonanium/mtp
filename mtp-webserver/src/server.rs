@@ -53,7 +53,7 @@ impl WebServerConfig {
             max_request_body: 4 * 1024 * 1024,
             max_connections: 256,
             request_timeout: Duration::from_secs(30),
-            drain_timeout: Duration::from_secs(10),
+            drain_timeout: Duration::from_secs(5),
             metrics: None,
         }
     }
@@ -138,18 +138,12 @@ impl MTPWebServer {
         host_config: HostConfig,
         web_config: WebServerConfig,
     ) -> Result<Self, CommunicationError> {
-        #[cfg(feature = "crypto")]
-        if !matches!(
-            host_config.authentication_policy,
-            mtp_host::AuthenticationPolicy::Unauthenticated
-        ) {
-            return Err(CommunicationError::Other(
-                "web authentication is not supported yet; use Unauthenticated".into(),
-            ));
-        }
+        let host_config = Arc::new(host_config);
         let endpoint = build_endpoint(&host_config)?;
         let driver_endpoint = endpoint.clone();
-        let (mtp_tx, mtp_incoming) = tokio::sync::mpsc::channel(16);
+        // A completed MTP handshake must never block the endpoint driver just
+        // because the application is briefly slow to call `accept()`.
+        let (mtp_tx, mtp_incoming) = tokio::sync::mpsc::channel(web_config.max_connections.max(1));
         let (shutdown_tx, shutdown_rx) = watch::channel(());
         let connection_semaphore = Arc::new(Semaphore::new(web_config.max_connections));
         let driver_config = DriverConfig {
@@ -160,6 +154,7 @@ impl MTPWebServer {
             drain_timeout: web_config.drain_timeout,
             send_pongs: host_config.send_pongs,
             policy: host_config.policy,
+            host_config,
             metrics: web_config.metrics,
         };
         let driver = tokio::spawn(run_driver(
@@ -230,11 +225,12 @@ struct DriverConfig {
     drain_timeout: Duration,
     send_pongs: bool,
     policy: mtp_transport::Policy,
+    host_config: Arc<HostConfig>,
     metrics: Option<Arc<dyn WebServerMetrics>>,
 }
 
 fn build_endpoint(config: &HostConfig) -> Result<quinn::Endpoint, CommunicationError> {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    mtp_crypto::ensure_crypto_provider();
     let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(&config.tls_fullchain)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| CommunicationError::CertificateLoadFailed)?;
@@ -270,6 +266,7 @@ async fn run_driver(
         drain_timeout,
         send_pongs,
         policy,
+        host_config,
         metrics,
     } = config;
     let mut connection_tasks = tokio::task::JoinSet::new();
@@ -283,14 +280,20 @@ async fn run_driver(
                 let Some(incoming) = incoming else {
                     break;
                 };
-                let permit = match connection_semaphore.clone().acquire_owned().await {
+                // Do not await capacity here: doing so would prevent this loop
+                // from observing shutdown while all connection slots are in use.
+                let permit = match connection_semaphore.clone().try_acquire_owned() {
                     Ok(permit) => permit,
-                    Err(_) => break,
+                    Err(_) => {
+                        tracing::debug!("rejecting QUIC connection at configured connection limit");
+                        continue;
+                    }
                 };
                 let router = router.clone();
                 let mtp_path = mtp_path.clone();
                 let mtp_tx = mtp_tx.clone();
                 let metrics = metrics.clone();
+                let host_config = host_config.clone();
                 connection_tasks.spawn(async move {
                     let _permit = permit;
                     let connect_start = std::time::Instant::now();
@@ -364,7 +367,11 @@ async fn run_driver(
                                     return;
                                 }
                             };
-                            tasks.spawn(run_session_requests(
+                            // The WebTransport session request driver must outlive this
+                            // endpoint request task. Keep it detached so handing the MTP
+                            // connection to the application does not wait for the session
+                            // (which is intentionally an open-ended accept loop).
+                            tokio::spawn(run_session_requests(
                                 session.clone(),
                                 router.clone(),
                                 max_request_body,
@@ -372,9 +379,25 @@ async fn run_driver(
                                 metrics.clone(),
                             ));
                             let result =
-                                accept_web_connection(session, mtp_path, connection, send_pongs, policy)
+                                accept_web_connection(session, mtp_path, connection, send_pongs, policy, host_config.clone())
                                     .await;
-                            let _ = mtp_tx.send(result).await;
+                            match mtp_tx.try_send(result) {
+                                Ok(()) => {
+                                    // The detached session driver remains active while the
+                                    // delivered MTP connection keeps the session alive.
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(result)) => {
+                                    tracing::warn!("MTP connection backlog is full; dropping connection");
+                                    if let Ok(connection) = result {
+                                        connection.sender.close();
+                                    }
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(result)) => {
+                                    if let Ok(connection) = result {
+                                        connection.sender.close();
+                                    }
+                                }
+                            }
                             return;
                         }
                         let router = router.clone();

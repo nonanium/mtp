@@ -11,3 +11,4 @@ path = "src/main.rs"
 mtp = { version = "0.2.0", path = "../../", features = ["client", "crypto", "files", "pipes"] }
 tokio = { version = "1", features = ["full"] }
 rand = "0.10.1"
+tracing-subscriber = "0.3.23"

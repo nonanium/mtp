@@ -200,6 +200,35 @@ impl Keyring {
         }
     }
 
+    /// Generates the independent KEM, classical-signature, and PQ-signature keys concurrently.
+    #[cfg(all(
+        feature = "mlkem-tls",
+        feature = "ml-dsa",
+        feature = "ed25519-dalek",
+        feature = "parallel"
+    ))]
+    pub async fn generate_parallel() -> Self {
+        let kem_handle = tokio::task::spawn_blocking(crate::kem::HybridKem::generate_keypair);
+        let ed_handle = tokio::task::spawn_blocking(crate::sign::Ed25519Signer::generate);
+        let pq_handle = tokio::task::spawn_blocking(crate::sign::MlDsaSigner::generate);
+
+        let (kem_result, ed_result, pq_result) = tokio::join!(kem_handle, ed_handle, pq_handle);
+        let (kem_sk, kem_pk) = kem_result.expect("key generation task must not panic");
+        let (_ed_signer, sig_cl_sk, sig_cl_pk) =
+            ed_result.expect("key generation task must not panic");
+        let (_pq_signer, sig_pq_sk, sig_pq_pk) =
+            pq_result.expect("key generation task must not panic");
+
+        Self {
+            kem_public_key: kem_pk,
+            kem_secret_key: kem_sk,
+            sig_pq_public_key: sig_pq_pk,
+            sig_pq_secret_key: sig_pq_sk,
+            sig_cl_public_key: sig_cl_pk,
+            sig_cl_secret_key: sig_cl_sk,
+        }
+    }
+
     pub fn public_key_bundle(&self) -> PublicKeyBundle {
         PublicKeyBundle {
             kem_public_key: self.kem_public_key.clone(),

@@ -20,6 +20,8 @@ pub use mtp_transport::Sender;
 pub use mtp_common::PipeError;
 #[cfg(feature = "pipes")]
 pub use mtp_transport::PipeWriter;
+#[cfg(feature = "pipes")]
+pub use pipe::PipeRequest;
 
 pub use mtp_codec::registry::Registry;
 
@@ -31,11 +33,15 @@ pub use error::AuthState;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mtp_codec::{CommunicationType, DataType, DataValue, registry::VersionedCodec};
+    #[cfg(not(feature = "pipes"))]
+    use mtp_codec::registry::VersionedCodec;
+    use mtp_codec::{CommunicationType, DataType, DataValue};
 
+    #[cfg(not(feature = "pipes"))]
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct AlternateSender;
 
+    #[cfg(not(feature = "pipes"))]
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct AlternateReceiver;
 
@@ -80,19 +86,21 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(feature = "pipes"))]
     #[tokio::test]
     async fn alternative_transports_use_the_shared_connection_type() {
         let registry = Registry::builtin();
         let version = mtp_codec::Version(1, 0);
         let codec = VersionedCodec::for_version(registry, version.clone()).unwrap();
-        let connection = MTPConnection::from_transport_parts(
-            version.clone(),
-            codec,
-            AlternateSender,
-            AlternateReceiver,
-            "/mtp".into(),
-            Some("browser".into()),
-        );
+        let connection: MTPConnection<AlternateSender, AlternateReceiver> =
+            MTPConnection::from_transport_parts(
+                version.clone(),
+                codec,
+                AlternateSender,
+                AlternateReceiver,
+                "/mtp".into(),
+                Some("browser".into()),
+            );
         assert_eq!(connection.version, version);
         assert_eq!(connection.path, "/mtp");
         assert_eq!(connection.description.as_deref(), Some("browser"));

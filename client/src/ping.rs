@@ -57,7 +57,7 @@ pub(crate) fn start_ping_session(
                 }
                 _ = ticker.tick() => {
                     if max_missed_pings > 0 && !pending.is_empty() && pending.len() >= max_missed_pings {
-                        sender.close();
+                        sender.close().await;
                         break;
                     }
 
@@ -80,7 +80,7 @@ pub(crate) fn start_ping_session(
                     }
                     let id = ping.get_id();
                     if sender.send(&ping).await.is_err() {
-                        sender.close();
+                        sender.close().await;
                         break;
                     }
                     pending.insert(id, Instant::now());

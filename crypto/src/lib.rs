@@ -3,6 +3,10 @@ pub mod auth;
 pub mod error;
 pub mod keypair;
 
+use std::sync::Once;
+
+static CRYPTO_INIT: Once = Once::new();
+
 #[cfg(feature = "sha2")]
 pub mod hash;
 
@@ -11,6 +15,9 @@ pub mod kdf;
 
 #[cfg(any(feature = "ed25519-dalek", feature = "ml-dsa"))]
 pub mod sign;
+
+#[cfg(all(feature = "ed25519-dalek", feature = "ml-dsa", feature = "parallel"))]
+pub mod sign_parallel;
 
 #[cfg(any(feature = "ed25519-dalek", feature = "ml-dsa"))]
 pub use sign::SigAlgorithm;
@@ -58,6 +65,16 @@ pub use kdf::{derive_encryption_key, hkdf_expand, hkdf_extract};
 pub use kem::{Encapsulated, HybridKem};
 
 pub use enc::EncryptionType;
+
+/// Install Rustls' AWS-LC provider once for the entire process.
+///
+/// Rustls only accepts one process-wide default provider. Calling this helper
+/// from every TLS entry point makes that initialization idempotent.
+pub fn ensure_crypto_provider() {
+    CRYPTO_INIT.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
 
 #[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
 pub use enc::{decrypt_with, encrypt_for};

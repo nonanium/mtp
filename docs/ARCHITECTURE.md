@@ -40,9 +40,10 @@ Both clients exchange the same MTP frames with a host.
 
 The middle row is shared protocol machinery. The type map determines numeric IDs, the codec serializes values, and transport framing places each serialized frame on a QUIC stream. This is why a type-map change must be compiled into both peers before the new message can be exchanged.
 
-The bottom row shows the two server entry points. `MTPHost` owns a native QUIC endpoint. `MTPWebServer` owns an HTTP/3 endpoint that also accepts WebTransport MTP sessions. They cannot bind the same IP and port. `mtp-crypto` is an optional cross-cutting layer used by authenticated native connections and browser E2EE;
-TLS remains the transport security layer in both paths.
+The bottom row shows the two server entry points. `MTPHost` is a native QUIC endpoint for native MTP clients. `MTPWebServer` is an HTTP/3 server that reuses `HostConfig` and provides the same `accept()`-based MTP session API, adding web routing and WebTransport support for browser clients. Because they rely on different QUIC ALPN protocols (native MTP vs. `h3`), they must bind to different IP/port pairs and should not be enabled as Cargo features in the same binary. Choose `MTPHost` when you only serve native clients; choose `MTPWebServer` when you need HTTP/3 routes or browser-based MTP clients.
 
-`mtp-host` performs version negotiation and native authentication before returning an `MTPConnection`. `mtp-webserver` routes HTTP/3 requests and WebTransport sessions through its endpoint. It currently accepts only unauthenticated WebTransport MTP sessions.
+`mtp-crypto` is an optional cross-cutting layer used by authenticated native connections, WebTransport connections, and browser E2EE; TLS remains the transport security layer in both paths.
 
-The [native client](NATIVE-CLIENT.md), [WASM client](WASM-CLIENT.md), [native host](NATIVE-HOST.md), and [web server](NATIVE-HOST-WEB-SERVER.md) guides cover the public APIs for each boundary.
+`mtp-host` performs version negotiation and native authentication before returning an `MTPConnection`. `mtp-webserver` routes HTTP/3 requests and WebTransport sessions through its endpoint. WebTransport MTP sessions support the same optional cryptographic authentication as native hosts when the `crypto` feature is enabled.
+
+The [native client](NATIVE-CLIENT.md), [WASM client](WASM-CLIENT.md), [native host](NATIVE-HOST.md), and [web server](NATIVE-HOST-WEB-SERVER.md) guides cover the public APIs for each boundary. The web server guide should be read as the host API for browser-facing deployments; it accepts the same `HostConfig` and authentication callbacks as the native host.

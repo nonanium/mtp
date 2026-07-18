@@ -1,3 +1,5 @@
+#[cfg(feature = "pipes")]
+use mtp_codec::{CommunicationType, DataType, DataValue};
 use mtp_codec::{CommunicationValue, Version, registry::VersionedCodec};
 use mtp_common::CommunicationError;
 #[cfg(feature = "pipes")]
@@ -8,7 +10,9 @@ use tokio::sync::{Mutex, mpsc};
 #[cfg(feature = "crypto")]
 use crate::error::random_client_id;
 #[cfg(feature = "pipes")]
-use crate::pipe::{PipeDispatcher, PipeRequest};
+use crate::pipe::{PipeDispatcher, PipeReceiver, PipeRequest, PipeSender, run_dispatcher};
+#[cfg(feature = "pipes")]
+use mtp_transport::Policy;
 
 mod connection_capability {
     pub trait Sealed {}
@@ -44,7 +48,11 @@ impl<C: mtp_transport::TransportConnection> MtpReceiverLike for mtp_transport::G
     }
 }
 
-pub struct MTPConnection<S = mtp_transport::Sender, R = mtp_transport::Receiver> {
+pub struct MTPConnection<
+    S = mtp_transport::Sender,
+    R = mtp_transport::Receiver,
+    P = wtransport::RecvStream,
+> {
     pub version: Version,
     pub codec: VersionedCodec,
     pub sender: S,
@@ -58,9 +66,11 @@ pub struct MTPConnection<S = mtp_transport::Sender, R = mtp_transport::Receiver>
     #[cfg(feature = "pipes")]
     pub(crate) app_rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
     #[cfg(feature = "pipes")]
-    pub(crate) pipe_req_rx: Mutex<mpsc::Receiver<PipeRequest>>,
+    pub(crate) pipe_req_rx: Mutex<mpsc::Receiver<PipeRequest<S, P>>>,
     #[cfg(feature = "pipes")]
-    pub(crate) pipe_dispatcher: Arc<PipeDispatcher>,
+    pub(crate) pipe_dispatcher: Arc<PipeDispatcher<P>>,
+    #[cfg(not(feature = "pipes"))]
+    pub(crate) _pipe_stream: std::marker::PhantomData<P>,
     pub description: Option<String>,
     pub(crate) _dispatcher_task: tokio::task::JoinHandle<()>,
     #[cfg(feature = "crypto")]
@@ -71,7 +81,13 @@ pub struct MTPConnection<S = mtp_transport::Sender, R = mtp_transport::Receiver>
     pub client_public_key: Option<mtp_crypto::PublicKeyBundle>,
 }
 
-impl<S, R> MTPConnection<S, R> {
+#[cfg(feature = "pipes")]
+impl<S, R, P> MTPConnection<S, R, P>
+where
+    S: PipeSender,
+    R: PipeReceiver<P>,
+    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+{
     /// Construct an MTP connection from an alternative transport backend.
     ///
     /// Native `MTPHost` users continue to receive the default
@@ -86,25 +102,60 @@ impl<S, R> MTPConnection<S, R> {
         path: String,
         description: Option<String>,
     ) -> Self {
-        #[cfg(feature = "pipes")]
-        let (_, app_rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(1);
-        #[cfg(feature = "pipes")]
-        let (_, pipe_req_rx) = mpsc::channel::<PipeRequest>(1);
-        #[cfg(feature = "pipes")]
-        let dispatcher = Arc::new(PipeDispatcher::default_for_external());
+        let policy = Arc::new(Policy::default());
+        let (app_tx, app_rx) = mpsc::channel(policy.receiver_queue_capacity);
+        let (pipe_req_tx, pipe_req_rx) = mpsc::channel(policy.receiver_queue_capacity);
+        let dispatcher = Arc::new(PipeDispatcher {
+            pending_creations: Mutex::new(std::collections::HashMap::new()),
+            pending_pipes: Mutex::new(std::collections::HashMap::new()),
+            policy,
+        });
+        let task = tokio::spawn(run_dispatcher(
+            receiver.clone(),
+            sender.clone(),
+            app_tx,
+            pipe_req_tx,
+            dispatcher.clone(),
+        ));
         Self {
             version,
             codec,
             sender,
             receiver,
             path,
-            #[cfg(feature = "pipes")]
             app_rx: Mutex::new(app_rx),
-            #[cfg(feature = "pipes")]
             pipe_req_rx: Mutex::new(pipe_req_rx),
-            #[cfg(feature = "pipes")]
             pipe_dispatcher: dispatcher,
             description,
+            _dispatcher_task: task,
+            #[cfg(feature = "crypto")]
+            auth_state: crate::error::AuthState::Unauthenticated,
+            #[cfg(feature = "crypto")]
+            client_id: random_client_id(),
+            #[cfg(feature = "crypto")]
+            client_public_key: None,
+        }
+    }
+}
+
+#[cfg(not(feature = "pipes"))]
+impl<S, R, P> MTPConnection<S, R, P> {
+    pub fn from_transport_parts(
+        version: Version,
+        codec: VersionedCodec,
+        sender: S,
+        receiver: R,
+        path: String,
+        description: Option<String>,
+    ) -> Self {
+        Self {
+            version,
+            codec,
+            sender,
+            receiver,
+            path,
+            description,
+            _pipe_stream: std::marker::PhantomData,
             _dispatcher_task: tokio::spawn(async {}),
             #[cfg(feature = "crypto")]
             auth_state: crate::error::AuthState::Unauthenticated,
@@ -122,5 +173,61 @@ impl<S: MtpSenderLike, R: MtpReceiverLike> MTPConnection<S, R> {
         let mut message = self.receiver.receive_message().await?;
         message.set_type_map(self.codec.type_map());
         Ok(message)
+    }
+}
+
+#[cfg(feature = "pipes")]
+impl<S, R, P> MTPConnection<S, R, P>
+where
+    S: PipeSender,
+    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+{
+    pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
+        let mut rx = self.app_rx.lock().await;
+        match rx.recv().await {
+            Some(Ok(mut message)) => {
+                message.set_type_map(self.codec.type_map());
+                Ok(message)
+            }
+            Some(Err(error)) => Err(error),
+            None => Err(CommunicationError::StreamClosed),
+        }
+    }
+
+    pub async fn create_pipe(
+        &self,
+        description: &str,
+    ) -> Result<crate::pipe::PipeHandle<S>, mtp_common::PipeError> {
+        let pipe_id = rand::random::<u32>();
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        self.pipe_dispatcher
+            .pending_creations
+            .lock()
+            .await
+            .insert(pipe_id, response_tx);
+
+        let request = CommunicationValue::new(CommunicationType::PipeRequest)
+            .with_id(pipe_id)
+            .add_typed_default(DataType::Description, DataValue::Str(description.into()));
+        self.sender
+            .send_pipe_message(&request)
+            .await
+            .map_err(mtp_common::PipeError::from)?;
+
+        Ok(crate::pipe::PipeHandle {
+            pipe_id,
+            description: description.to_owned(),
+            sender: self.sender.clone(),
+            response_rx,
+        })
+    }
+
+    pub async fn receive_pipe(&self) -> Result<PipeRequest<S, P>, CommunicationError> {
+        self.pipe_req_rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or(CommunicationError::StreamClosed)
     }
 }

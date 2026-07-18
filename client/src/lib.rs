@@ -127,7 +127,7 @@ impl MTPClient {
                     CommunicationError::Other("host returned an invalid negotiated version".into())
                 })?,
             mtp_common::HandshakeOutcome::Rejected { reason } => {
-                sender.close();
+                sender.close().await;
                 return Err(CommunicationError::Other(reason.to_string()));
             }
         };
@@ -192,7 +192,7 @@ impl MTPClient {
             ident = ident.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
         }
         if let Err(e) = sender.send(&ident).await {
-            sender.close();
+            sender.close().await;
             return Err(e);
         }
 
@@ -209,7 +209,7 @@ impl MTPClient {
         {
             Ok(c) => c,
             Err(e) => {
-                sender.close();
+                sender.close().await;
                 return Err(e);
             }
         };
@@ -222,22 +222,23 @@ impl MTPClient {
             client_nonce,
         );
 
-        let proof = match crypto::signed_challenge_response(keys, &proof_payload, client_nonce) {
+        let proof = match crypto::signed_challenge_response(keys, proof_payload, client_nonce).await
+        {
             Ok(p) => p,
             Err(e) => {
-                sender.close();
+                sender.close().await;
                 return Err(e);
             }
         };
         if let Err(e) = sender.send(&proof).await {
-            sender.close();
+            sender.close().await;
             return Err(e);
         }
 
         let response = match receiver.receive().await {
             Ok(r) => r,
             Err(e) => {
-                sender.close();
+                sender.close().await;
                 return Err(e);
             }
         };
@@ -249,7 +250,7 @@ impl MTPClient {
                 )
             })?;
         if response.get_type() != expected_type {
-            sender.close();
+            sender.close().await;
             return Err(crypto::unexpected_response_type_error(
                 "auth_connect",
                 expected_type,
@@ -257,7 +258,7 @@ impl MTPClient {
             ));
         }
         if let Err(e) = crypto::check_connected(&response, "Server rejected authentication") {
-            sender.close();
+            sender.close().await;
             return Err(e);
         }
         if let Err(e) = crypto::verify_host_final(
@@ -267,8 +268,10 @@ impl MTPClient {
             client_nonce,
             server_challenge,
             config.require_pq,
-        ) {
-            sender.close();
+        )
+        .await
+        {
+            sender.close().await;
             return Err(e);
         }
 
@@ -340,7 +343,7 @@ impl MTPClient {
                 register.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
         }
         if let Err(e) = sender.send(&register).await {
-            sender.close();
+            sender.close().await;
             return Err(e);
         }
 
@@ -357,7 +360,7 @@ impl MTPClient {
         {
             Ok(c) => c,
             Err(e) => {
-                sender.close();
+                sender.close().await;
                 return Err(e);
             }
         };
@@ -370,22 +373,23 @@ impl MTPClient {
             client_nonce,
         );
 
-        let proof = match crypto::signed_challenge_response(keys, &proof_payload, client_nonce) {
+        let proof = match crypto::signed_challenge_response(keys, proof_payload, client_nonce).await
+        {
             Ok(p) => p,
             Err(e) => {
-                sender.close();
+                sender.close().await;
                 return Err(e);
             }
         };
         if let Err(e) = sender.send(&proof).await {
-            sender.close();
+            sender.close().await;
             return Err(e);
         }
 
         let response = match receiver.receive().await {
             Ok(r) => r,
             Err(e) => {
-                sender.close();
+                sender.close().await;
                 return Err(e);
             }
         };
@@ -395,7 +399,7 @@ impl MTPClient {
                 CommunicationError::Other("RegisterResponse is absent from the type map".into())
             })?;
         if response.get_type() != expected_type {
-            sender.close();
+            sender.close().await;
             return Err(crypto::unexpected_response_type_error(
                 "auth_register",
                 expected_type,
@@ -403,13 +407,13 @@ impl MTPClient {
             ));
         }
         if let Err(e) = crypto::check_connected(&response, "Server rejected registration") {
-            sender.close();
+            sender.close().await;
             return Err(e);
         }
         let assigned_id = match response.get_data(DataType::Id) {
             DataValue::UnsignedNumber(n) => *n as u64,
             _ => {
-                sender.close();
+                sender.close().await;
                 return Err(CommunicationError::AuthenticationFailed(
                     "Missing assigned ID".into(),
                 ));
@@ -422,8 +426,10 @@ impl MTPClient {
             client_nonce,
             server_challenge,
             config.require_pq,
-        ) {
-            sender.close();
+        )
+        .await
+        {
+            sender.close().await;
             return Err(e);
         }
 

@@ -1,14 +1,14 @@
 use std::collections::HashMap;
-use std::fs;
 use std::sync::{Arc, Mutex};
+use tokio::fs;
 
 use mtp::crypto::PublicKeyBundle;
 
-pub fn load_client_db(
+pub async fn load_client_db(
     path: &str,
 ) -> Result<(Arc<Mutex<HashMap<u64, PublicKeyBundle>>>, Arc<Mutex<u64>>), Box<dyn std::error::Error>>
 {
-    let clients_map = match fs::read_to_string(path) {
+    let clients_map = match fs::read_to_string(path).await {
         Ok(data) => match serde_json::from_str(&data) {
             Ok(clients) => clients,
             Err(e) => {

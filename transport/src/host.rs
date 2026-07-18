@@ -3,6 +3,7 @@ use mtp_common::CommunicationError;
 use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::debug;
 use wtransport::{Connection as WTConnection, Endpoint, ServerConfig};
 
@@ -100,7 +101,7 @@ pub async fn host_with_config(
     port: u16,
     config: HostConfig,
 ) -> Result<Host, CommunicationError> {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    mtp_crypto::ensure_crypto_provider();
 
     let (cert_pem, key_pem) = match config.credentials {
         HostCredentials::Pem { cert_pem, key_pem } => (cert_pem, key_pem),
@@ -121,8 +122,11 @@ pub async fn host_with_config(
 
     let task = tokio::spawn(async move {
         loop {
+            let accept_started = Instant::now();
             let incoming_session = endpoint.accept().await;
+            tracing::debug!(elapsed = ?accept_started.elapsed(), "host accept loop: received QUIC connection");
 
+            let session_started = Instant::now();
             let request = match incoming_session.await {
                 Ok(req) => req,
                 Err(e) => {
@@ -130,7 +134,9 @@ pub async fn host_with_config(
                     continue;
                 }
             };
+            tracing::debug!(elapsed = ?session_started.elapsed(), "host accept loop: complete WebTransport handshake");
 
+            let request_accept_started = Instant::now();
             let connection = match request
                 .accept_with_headers([("sec-webtransport-http3-draft02", "1")])
                 .await
@@ -141,6 +147,7 @@ pub async fn host_with_config(
                     continue;
                 }
             };
+            tracing::debug!(elapsed = ?request_accept_started.elapsed(), "host accept loop: accept WebTransport request");
 
             let incoming_tx = incoming_tx.clone();
             tokio::spawn(handle_connection(connection, incoming_tx, policy.clone()));
@@ -159,11 +166,14 @@ async fn handle_connection(
     tx: tokio::sync::mpsc::Sender<(Sender, Receiver)>,
     policy: Arc<Policy>,
 ) {
+    let setup_started = Instant::now();
     let handle = Arc::new(ConnectionHandle::new());
 
     let sender = Sender::new(connection.clone(), handle.clone(), policy.clone());
     let receiver = Receiver::new_for_handshake(connection, handle, policy);
-    let _ = tx.send((sender, receiver)).await;
+    if tx.send((sender, receiver)).await.is_ok() {
+        tracing::debug!(elapsed = ?setup_started.elapsed(), "host accept loop: hand connection to authentication");
+    }
 }
 
 async fn configure_server(

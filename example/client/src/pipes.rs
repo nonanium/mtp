@@ -50,7 +50,6 @@ pub async fn run_pipe_demo(
                             .finish()
                             .await
                             .map_err(|e| mtp::common::PipeError::IoError(e.to_string()))?;
-                        println!("  [pipe {i}.{run}] writer: data sent and finished");
                         Ok::<(), mtp::common::PipeError>(())
                     }
                     Ok(None) => {

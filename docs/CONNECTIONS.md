@@ -2,15 +2,17 @@
 
 Native clients and hosts share the same connection shape after the opening handshake. The client creates the connection; the host receives it from `accept()`.
 
-| Member | Native client | Native host |
-| --- | --- | --- |
-| `version` | Compiled client version accepted by the host | Version selected by the registry |
-| `sender` | Sends `CommunicationValue` frames | Sends `CommunicationValue` frames |
-| `receiver` | Receives application frames | Receives application frames |
-| `description` | Optional label sent during setup | Optional label received from the client |
-| `client_id` | Confirmed or assigned ID with `crypto` | Authenticated or guest client ID with `crypto` |
-| `auth_state` | Authentication result with `crypto` | Authentication result with `crypto` |
+| Member | Native client | Native host | Web host (`WebMTPConnection`) |
+| --- | --- | --- | --- |
+| `version` | Compiled client version accepted by the host | Version selected by the registry | Version selected by the registry |
+| `sender` | Sends `CommunicationValue` frames | Sends `CommunicationValue` frames | Sends `CommunicationValue` frames |
+| `receiver` | Receives application frames | Receives application frames | Receives application frames |
+| `description` | Optional label sent during setup | Optional label received from the client | Optional label received from the client |
+| `client_id` | Confirmed or assigned ID with `crypto` | Authenticated or guest client ID with `crypto` | Authenticated or guest client ID with `crypto` |
+| `auth_state` | Authentication result with `crypto` | Authentication result with `crypto` | Authentication result with `crypto` |
+| `request_path` | — | — | WebTransport CONNECT path (e.g. `/mtp`) |
 
+`WebMTPConnection`, returned by `MTPWebServer::accept()`, exposes the same members as the native host connection plus `request_path`, which contains the HTTP/3 path used for the WebTransport extended CONNECT request.
 The host connection also exposes a version-scoped `codec` and, for an authenticated client, its `client_public_key`. The native client connection also exposes these methods:
 
 | Method | Behavior |

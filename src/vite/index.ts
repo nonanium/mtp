@@ -371,6 +371,13 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
       await buildIfNeeded(state);
 
       return {
+        // The generated wasm-bindgen JavaScript imports its sibling `.wasm`
+        // by a relative URL. Prebundling it independently lets Vite retain an
+        // older wrapper while the plugin has rebuilt the wasm binary, which
+        // produces missing closure-export errors at runtime.
+        optimizeDeps: {
+          exclude: ["mtp", "mtp/raw", "mtp/type-map"],
+        },
         resolve: {
           preserveSymlinks: true,
           alias: {

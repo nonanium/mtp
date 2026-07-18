@@ -11,6 +11,8 @@ mod stream;
 mod transport;
 
 pub use error::WebServerError;
+#[cfg(feature = "pipes")]
+pub use mtp_transport::TransportEvent;
 pub use router::{HttpHandler, Router, RouterError};
 pub use server::{MTPWebServer, WebServerConfig, WebServerMetrics};
 pub use stream::{Http3Request, Http3Response};

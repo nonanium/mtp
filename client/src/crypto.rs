@@ -14,14 +14,14 @@ pub(crate) fn unexpected_response_type_error(
     ))
 }
 
-pub(crate) fn verify_host_challenge(
+pub(crate) async fn verify_host_challenge(
     challenge: &CommunicationValue,
     host_pk: &mtp_crypto::PublicKeyBundle,
     id: u64,
     server_challenge: u128,
     require_pq: bool,
 ) -> Result<(), CommunicationError> {
-    use mtp_crypto::{auth, verify_ed25519, verify_ml_dsa};
+    use mtp_crypto::{auth, verify_ed25519};
 
     let sig = match challenge.get_data(DataType::Signature) {
         DataValue::Bytes(b) => b.clone(),
@@ -49,18 +49,27 @@ pub(crate) fn verify_host_challenge(
     }
 
     let payload = auth::challenge_payload(id, server_challenge);
-    verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig).map_err(|_| {
-        CommunicationError::AuthenticationFailed("Host challenge signature invalid".into())
-    })?;
-    if !pq_sig.is_empty() && verify_ml_dsa(&host_pk.sig_pq_public_key, &payload, &pq_sig).is_err() {
-        return Err(CommunicationError::AuthenticationFailed(
-            "Host challenge PQ signature invalid".into(),
-        ));
+    if pq_sig.is_empty() {
+        verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig).map_err(|_| {
+            CommunicationError::AuthenticationFailed("Host challenge signature invalid".into())
+        })?;
+    } else {
+        mtp_crypto::sign_parallel::verify_dual_parallel(
+            host_pk.sig_cl_public_key.clone(),
+            host_pk.sig_pq_public_key.clone(),
+            payload,
+            sig,
+            pq_sig,
+        )
+        .await
+        .map_err(|_| {
+            CommunicationError::AuthenticationFailed("Host challenge signature invalid".into())
+        })?;
     }
     Ok(())
 }
 
-pub(crate) fn verify_host_final(
+pub(crate) async fn verify_host_final(
     response: &CommunicationValue,
     host_pk: &mtp_crypto::PublicKeyBundle,
     id: u64,
@@ -68,7 +77,7 @@ pub(crate) fn verify_host_final(
     server_challenge: u128,
     require_pq: bool,
 ) -> Result<(), CommunicationError> {
-    use mtp_crypto::{auth, verify_ed25519, verify_ml_dsa};
+    use mtp_crypto::{auth, verify_ed25519};
 
     match response.get_data(DataType::ClientNonce) {
         DataValue::UnsignedNumber(n) if *n == client_nonce => {}
@@ -98,12 +107,20 @@ pub(crate) fn verify_host_final(
     }
 
     let payload = auth::host_final_payload(id, client_nonce, server_challenge);
-    verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig)
+    if pq_sig.is_empty() {
+        verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig).map_err(|_| {
+            CommunicationError::AuthenticationFailed("Host signature invalid".into())
+        })?;
+    } else {
+        mtp_crypto::sign_parallel::verify_dual_parallel(
+            host_pk.sig_cl_public_key.clone(),
+            host_pk.sig_pq_public_key.clone(),
+            payload,
+            sig,
+            pq_sig,
+        )
+        .await
         .map_err(|_| CommunicationError::AuthenticationFailed("Host signature invalid".into()))?;
-    if !pq_sig.is_empty() && verify_ml_dsa(&host_pk.sig_pq_public_key, &payload, &pq_sig).is_err() {
-        return Err(CommunicationError::AuthenticationFailed(
-            "Host PQ signature invalid".into(),
-        ));
     }
     Ok(())
 }
@@ -141,33 +158,36 @@ pub(crate) fn negotiated_version(
     }
 }
 
-pub(crate) fn signed_challenge_response(
+pub(crate) async fn signed_challenge_response(
     keys: &mtp_crypto::Keyring,
-    proof_payload: &[u8],
+    proof_payload: Vec<u8>,
     client_nonce: u128,
 ) -> Result<CommunicationValue, CommunicationError> {
     use mtp_crypto::{Ed25519Signer, MlDsaSigner, SignatureScheme};
 
     let signer = Ed25519Signer::new(&keys.sig_cl_secret_key)
         .map_err(|e| CommunicationError::Other(e.to_string()))?;
-    let signature = signer
-        .sign(proof_payload)
-        .map_err(|e| CommunicationError::Other(e.to_string()))?;
-
     let mut proof = CommunicationValue::new(CommunicationType::ChallengeResponse)
         .add_typed_default(
             DataType::ClientNonce,
             DataValue::UnsignedNumber(client_nonce),
-        )
-        .add_typed_default(DataType::Signature, DataValue::Bytes(signature));
+        );
 
-    if !keys.sig_pq_secret_key.as_bytes().is_empty() {
+    if keys.sig_pq_secret_key.as_bytes().is_empty() {
+        let signature = signer
+            .sign(&proof_payload)
+            .map_err(|e| CommunicationError::Other(e.to_string()))?;
+        proof = proof.add_typed_default(DataType::Signature, DataValue::Bytes(signature));
+    } else {
         let pq_signer = MlDsaSigner::new(&keys.sig_pq_secret_key, &keys.sig_pq_public_key)
             .map_err(|e| CommunicationError::Other(e.to_string()))?;
-        let pq_signature = pq_signer
-            .sign(proof_payload)
-            .map_err(|e| CommunicationError::Other(e.to_string()))?;
-        proof = proof.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
+        let (signature, pq_signature) =
+            mtp_crypto::sign_parallel::sign_dual_parallel(signer, pq_signer, proof_payload)
+                .await
+                .map_err(|e| CommunicationError::Other(e.to_string()))?;
+        proof = proof
+            .add_typed_default(DataType::Signature, DataValue::Bytes(signature))
+            .add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
     }
 
     Ok(proof)
@@ -212,7 +232,8 @@ pub(crate) async fn receive_verified_challenge(
         bound_id,
         server_challenge,
         require_pq,
-    )?;
+    )
+    .await?;
 
     Ok(server_challenge)
 }

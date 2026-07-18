@@ -1,4 +1,6 @@
-use std::fs;
+use std::time::Instant;
+
+use tokio::fs;
 
 use mtp::client::{ClientConfig, MTPClient, MTPConnection};
 use mtp::crypto::{
@@ -14,16 +16,25 @@ pub async fn connect_or_register(
     let keyring_path = format!("{key_prefix}.mk");
     let id_path = format!("{key_prefix}.id");
 
+    let file_load_started = Instant::now();
     if let (Ok(keyring), Ok(id)) = (
         load_keyring_raw(&keyring_path),
-        fs::read_to_string(&id_path),
+        fs::read_to_string(&id_path).await,
     ) {
         let client_id: u64 = id.trim().parse()?;
-        println!("Loaded client keys (ID: {client_id})");
+        println!(
+            "Loaded client keys (ID: {client_id}) in {:?}",
+            file_load_started.elapsed()
+        );
 
         config.client_id = client_id;
+        let auth_started = Instant::now();
         let conn = MTPClient::auth_connect(config, &keyring, &host_public_key).await?;
-        println!("Authenticated (version {})", conn.version);
+        println!(
+            "Authenticated (version {}) in {:?}",
+            conn.version,
+            auth_started.elapsed()
+        );
         return Ok((conn, keyring));
     }
 
@@ -45,7 +56,7 @@ pub async fn connect_or_register(
     println!("Registered with ID: {}", conn.client_id);
 
     save_keyring_raw(&keyring, &keyring_path)?;
-    fs::write(&id_path, conn.client_id.to_string())?;
+    fs::write(&id_path, conn.client_id.to_string()).await?;
     println!("Saved client keys -> {keyring_path}");
 
     Ok((conn, keyring))

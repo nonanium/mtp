@@ -44,10 +44,10 @@ let activeClient: ReturnType<typeof createClient> extends Promise<infer T>
 let micStream: MediaStream | null = null;
 let mediaRecorder: MediaRecorder | null = null;
 let activePipeWriter: MTPPipeWriter | null = null;
+let loopbackAudioContext: AudioContext | null = null;
+let micStreamGeneration = 0;
 let pipeSendCount = 0;
 let pendingPipeReaders: MTPPipeReader[] = [];
-let audioContext: AudioContext | null = null;
-let micMonitorAudio: HTMLAudioElement | null = null;
 let currentPipePingMs: number | null = null;
 let lastPipeSendStartedAt = 0;
 let currentPipeId: number | null = null;
@@ -55,6 +55,13 @@ let currentPipeDescription = "";
 let currentPipeState = "idle";
 let loopbackPlaybackCount = 0;
 let hasPipeRequestHandler = false;
+
+// ===== AUDIO LOOPBACK STATE =====
+// We accumulate all chunks into a single Blob, then decode and play it
+// when the pipe closes. decodeAudioData needs a complete file, not fragments.
+let loopbackBlobParts: BlobPart[] = [];
+let loopbackMimeType = "";
+let loopbackAudioElement: HTMLAudioElement | null = null;
 
 const credentialStorage: MTPCredentialStorage = {
   getItem: (key) => localStorage.getItem(key),
@@ -126,11 +133,18 @@ function setPipeState(
 function getPipeId(handle: unknown): number | null {
   if (handle && typeof handle === "object") {
     const candidate = handle as Record<string, unknown>;
-    const value =
+    let value =
       candidate.pipeId ??
       candidate.pipe_id ??
       candidate["pipe-id"] ??
       candidate.id;
+    if (typeof value === "function") {
+      try {
+        value = value.call(handle);
+      } catch {
+        return null;
+      }
+    }
     if (typeof value === "number" && Number.isFinite(value)) {
       return value;
     }
@@ -138,61 +152,62 @@ function getPipeId(handle: unknown): number | null {
   return null;
 }
 
-function ensureAudioContext() {
-  if (!audioContext) {
-    audioContext = new AudioContext();
-  }
-  return audioContext;
+// ===== FIXED AUDIO LOOPBACK: accumulate chunks, play as single file =====
+
+function startLoopbackAccumulation(mimeType: string) {
+  loopbackBlobParts = [];
+  loopbackMimeType = mimeType;
+  pipeLog("Loopback: accumulating audio chunks...");
 }
 
-async function playLoopbackAudio(chunks: BlobPart[], mimeType: string) {
-  if (chunks.length === 0) return;
-  const blob = new Blob(chunks, { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const audio = new Audio(url);
-  audio.autoplay = true;
-  audio.onended = () => URL.revokeObjectURL(url);
-  audio.onerror = () => URL.revokeObjectURL(url);
+function queueLoopbackChunk(data: Uint8Array) {
+  loopbackBlobParts.push(data.slice());
+}
+
+async function finishLoopbackPlayback() {
+  if (loopbackBlobParts.length === 0) {
+    pipeLog("Loopback: no chunks received.", "error");
+    return;
+  }
+
+  // Stop any previous playback
+  if (loopbackAudioElement) {
+    loopbackAudioElement.pause();
+    const src = loopbackAudioElement.src;
+    loopbackAudioElement.src = "";
+    if (src.startsWith("blob:")) {
+      URL.revokeObjectURL(src);
+    }
+    loopbackAudioElement = null;
+  }
+
+  // Concatenate all chunks into one Blob
+  const blob = new Blob(loopbackBlobParts, { type: loopbackMimeType });
+  loopbackBlobParts = [];
+
+  pipeLog(`Loopback: assembled ${blob.size} bytes, decoding...`);
+
   try {
-    await ensureAudioContext().resume();
-    await audio.play();
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioContext = new AudioContext();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioContext.destination);
+    source.start();
+
     loopbackPlaybackCount += 1;
     updateMetrics();
-    pipeLog(`Loopback playback started (${chunks.length} chunks).`);
+    pipeLog(`Loopback playback started (${audioBuffer.duration.toFixed(2)}s).`);
+
+    // Clean up audio context when done
+    source.onended = () => {
+      audioContext.close().catch(() => {});
+    };
   } catch (e) {
-    URL.revokeObjectURL(url);
-    pipeLog(`Loopback playback failed: ${e}`, "error");
+    pipeLog(`Loopback decode/playback failed: ${e}`, "error");
   }
-}
-
-async function startMicPlayback(stream: MediaStream) {
-  if (micMonitorAudio) {
-    micMonitorAudio.pause();
-    micMonitorAudio.srcObject = null;
-    micMonitorAudio = null;
-  }
-
-  const audio = new Audio();
-  audio.autoplay = true;
-  audio.controls = false;
-  audio.muted = false;
-  audio.srcObject = stream;
-  micMonitorAudio = audio;
-
-  try {
-    await ensureAudioContext().resume();
-    await audio.play();
-    pipeLog("Microphone monitoring playback started.");
-  } catch (e) {
-    pipeLog(`Microphone monitoring playback failed: ${e}`, "error");
-  }
-}
-
-function stopMicPlayback() {
-  if (!micMonitorAudio) return;
-  micMonitorAudio.pause();
-  micMonitorAudio.srcObject = null;
-  micMonitorAudio = null;
 }
 
 function renderStructured(value: unknown): string {
@@ -375,7 +390,6 @@ async function connect() {
     log("WebTransport is not supported in this browser.", "error");
     return;
   }
-  const hostPk = hexToBytes(HOST_PUBLIC_KEY.value);
   saveHostPublicKey();
   await loadDevCertHash();
 
@@ -401,7 +415,7 @@ async function connect() {
     const activeClientId = await client.auth();
     clientId = activeClientId;
     loadKeys();
-    log(`Connected as client ${activeClientId}`);
+    log(`Connected as authenticated client ${activeClientId}`);
 
     log("\nSending typed Ping...");
     await client.send(
@@ -451,7 +465,9 @@ async function startMicStreaming() {
   STOP_MIC.disabled = false;
   setPipeState("creating", { pipeId: null, description: "mic-audio" });
   pipeLog("Microphone acquired. Creating pipe ...");
-  await startMicPlayback(micStream);
+  pipeLog(
+    "Microphone monitoring is off; playback will use the server loopback.",
+  );
 
   if (!hasPipeRequestHandler) {
     activeClient.setOnPipeRequest(async (request) => {
@@ -487,6 +503,7 @@ async function startMicStreaming() {
     return;
   }
   activePipeWriter = writer;
+  const streamGeneration = ++micStreamGeneration;
 
   setPipeState("streaming", {
     pipeId: getPipeId(writer) ?? pipeId,
@@ -500,12 +517,22 @@ async function startMicStreaming() {
   const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
     ? "audio/webm;codecs=opus"
     : "audio/webm";
-  mediaRecorder = new MediaRecorder(micStream, { mimeType });
+  const recorder = new MediaRecorder(micStream, { mimeType });
+  mediaRecorder = recorder;
 
-  mediaRecorder.ondataavailable = async (event) => {
-    if (event.data.size === 0 || !activeClient) return;
+  recorder.ondataavailable = async (event) => {
+    // A final chunk can be queued before recorder.stop(). Do not use the
+    // captured writer unless this is still the current active stream.
+    if (
+      event.data.size === 0 ||
+      !activeClient ||
+      micStreamGeneration !== streamGeneration ||
+      mediaRecorder !== recorder ||
+      activePipeWriter !== writer
+    ) {
+      return;
+    }
 
-    const startTime = performance.now();
     pipeSendCount++;
     const chunkNum = pipeSendCount;
 
@@ -513,6 +540,14 @@ async function startMicStreaming() {
       lastPipeSendStartedAt = performance.now();
       const buffer = await event.data.arrayBuffer();
       const data = new Uint8Array(buffer);
+      // arrayBuffer() yields, so shutdown may have happened meanwhile.
+      if (
+        micStreamGeneration !== streamGeneration ||
+        mediaRecorder !== recorder ||
+        activePipeWriter !== writer
+      ) {
+        return;
+      }
       await writer.write(data);
       currentPipePingMs = performance.now() - lastPipeSendStartedAt;
       updateMetrics();
@@ -521,27 +556,29 @@ async function startMicStreaming() {
     }
   };
 
-  mediaRecorder.start(200); // emit data every 200ms
+  recorder.start(200); // emit data every 200ms
   updateMetrics();
   pipeLog("Streaming started (200ms chunks).");
 }
-
 async function readLoopbackPipe(reader: MTPPipeReader) {
   const startTime = performance.now();
   let totalBytes = 0;
   let chunkCount = 0;
-  const chunks: BlobPart[] = [];
   const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
     ? "audio/webm;codecs=opus"
     : "audio/webm";
 
   try {
+    loopbackBlobParts = [];
+    loopbackMimeType = mimeType;
+    pipeLog("Loopback: accumulating chunks...");
+
     while (true) {
       const data = await reader.read();
       if (data == null) break; // EOF
       totalBytes += data.length;
       chunkCount++;
-      chunks.push(data.slice().buffer);
+      loopbackBlobParts.push(data.slice());
     }
   } catch (e) {
     pipeLog(`  Return pipe read error: ${e}`, "error");
@@ -554,26 +591,90 @@ async function readLoopbackPipe(reader: MTPPipeReader) {
       `delay=${elapsed.toFixed(1)}ms`,
   );
   setPipeState("loopback-ready", { pingMs: elapsed });
-  await playLoopbackAudio(chunks, mimeType);
+
+  // Decode and play the complete recording
+  if (loopbackBlobParts.length > 0) {
+    try {
+      const blob = new Blob(loopbackBlobParts, { type: loopbackMimeType });
+      const arrayBuffer = await blob.arrayBuffer();
+
+      if (!loopbackAudioContext) {
+        loopbackAudioContext = new AudioContext();
+      }
+      const audioBuffer =
+        await loopbackAudioContext.decodeAudioData(arrayBuffer);
+
+      const source = loopbackAudioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(loopbackAudioContext.destination);
+      source.start();
+
+      loopbackPlaybackCount += 1;
+      updateMetrics();
+      pipeLog(
+        `Loopback playback started (${audioBuffer.duration.toFixed(2)}s).`,
+      );
+    } catch (e) {
+      pipeLog(`Loopback decode failed: ${e}`, "error");
+    }
+  }
 
   // Clean up the reader from the pending list
   const idx = pendingPipeReaders.indexOf(reader);
   if (idx >= 0) pendingPipeReaders.splice(idx, 1);
 }
 
+// ===== CRITICAL FIX: stopMicStreaming must capture the final chunk =====
 async function stopMicStreaming() {
-  if (mediaRecorder && mediaRecorder.state !== "inactive") {
-    mediaRecorder.stop();
-    mediaRecorder = null;
+  micStreamGeneration++;
+  const recorder = mediaRecorder;
+  mediaRecorder = null;
+  const writer = activePipeWriter;
+  activePipeWriter = null;
+
+  // STOPPING STRATEGY:
+  // 1. Request a final dataavailable event by calling requestData() if needed,
+  //    then stop(). The final event contains the WebM trailer.
+  // 2. Wait for that final event to be processed (it writes through the pipe).
+  // 3. Only THEN close the pipe writer.
+
+  if (recorder) {
+    // Create a promise that resolves when the final dataavailable fires
+    const finalChunkPromise = new Promise<void>((resolve) => {
+      const originalHandler = recorder.ondataavailable;
+      recorder.ondataavailable = async (event) => {
+        // Call the original handler first so the chunk gets written to the pipe
+        if (originalHandler) {
+          await originalHandler.call(recorder, event);
+        }
+        // The final chunk from stop() has a 'type' but no special marker.
+        // MediaRecorder state will be 'inactive' after the final event.
+        if (recorder.state === "inactive") {
+          resolve();
+        }
+      };
+    });
+
+    if (recorder.state !== "inactive") {
+      recorder.stop();
+    }
+
+    // Wait up to 1 second for the final chunk to be captured and written
+    await Promise.race([
+      finalChunkPromise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("final chunk timeout")), 1000),
+      ),
+    ]).catch(() => {
+      pipeLog("Warning: final chunk may not have been captured", "error");
+    });
   }
 
-  if (activePipeWriter) {
+  if (writer) {
     try {
-      await activePipeWriter.close();
+      await writer.close();
     } catch (e) {
       pipeLog(`Pipe close error: ${e}`, "error");
-    } finally {
-      activePipeWriter = null;
     }
   }
 
@@ -581,9 +682,6 @@ async function stopMicStreaming() {
     micStream.getTracks().forEach((track) => track.stop());
     micStream = null;
   }
-  stopMicPlayback();
-
-  // Close pending pipe readers
   pendingPipeReaders = [];
   setPipeState("stopped", {
     pipeId: currentPipeId,

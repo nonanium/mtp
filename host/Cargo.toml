@@ -11,6 +11,7 @@ mtp-crypto = { version = "0.2.0", path = "../crypto", optional = true }
 rand = "0.8"
 tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
 tracing = "0.1"
+wtransport = "0.7"
 
 [features]
 

@@ -1,4 +1,4 @@
-use std::fs;
+use tokio::fs;
 
 use mtp::crypto::Keyring;
 use mtp::files::{load_keyring_raw, save_keyring_raw, save_public_key_bundle};
@@ -20,14 +20,16 @@ pub fn load_or_generate_host_keys(
     Ok((HOST_ID, keyring))
 }
 
-pub fn export_host_public_keys(host_keyring: &Keyring) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn export_host_public_keys(
+    host_keyring: &Keyring,
+) -> Result<(), Box<dyn std::error::Error>> {
     let bundle = host_keyring.public_key_bundle();
     save_public_key_bundle(&bundle, "host.mpkb")?;
 
     /* The web client fetches the bundle as hex over HTTP. */
     let bundle_hex = hex::encode(bundle.as_bytes());
-    fs::write("host_public_key_bundle.hex", &bundle_hex)?;
-    fs::create_dir_all("web-client/public")?;
-    fs::write("web-client/public/host_public_key_bundle.hex", &bundle_hex)?;
+    fs::write("host_public_key_bundle.hex", &bundle_hex).await?;
+    fs::create_dir_all("web-client/public").await?;
+    fs::write("web-client/public/host_public_key_bundle.hex", &bundle_hex).await?;
     Ok(())
 }

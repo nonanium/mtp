@@ -4,6 +4,10 @@
 WebTransport sessions are returned by `accept()` for application messages.
 `MTPWebServer` and `MTPHost` cannot bind the same IP and port.
 
+The repository's combined server example registers `/` on `MTPWebServer` and
+returns `OK` while the process is running. The route is served over HTTP/3 at
+`https://localhost:8080/` on the same QUIC endpoint as WebTransport MTP sessions.
+
 ## WebServerConfig
 
 | Builder | Default | Purpose |
@@ -63,25 +67,46 @@ let web = WebServerConfig::new()
 ```rust
 use mtp::{host::HostConfig, webserver::MTPWebServer};
 
-let host = HostConfig::new(
+let host_config = HostConfig::new(
     "0.0.0.0".parse()?,
     4433,
     std::fs::read("cert.pem")?,
     std::fs::read("key.pem")?,
 );
-let mut server = MTPWebServer::new(host, web).await?;
+let mut server = MTPWebServer::new(host_config, web).await?;
 
 while let Some(connection) = server.accept().await? {
     // connection: WebMTPConnection
-    while let Ok(message) = connection.receiver.receive().await {
+    while let Ok(message) = connection.receive().await {
         println!("received MTP message {}", message.get_id());
     }
 }
 ```
+> `MTPWebServer::new` consumes a `HostConfig` (not an `MTPHost` instance). It creates its own QUIC endpoint and does not share a port with a running `MTPHost`.
 
 `server.accept()` returns `Option<WebMTPConnection>` for each WebTransport session. HTTP/3 routes do not surface through `accept()` because the server dispatches them internally. `WebMTPConnection` retains the negotiated version, codec, request path, description, sender, and receiver used by native MTP connections.
 
-WebTransport sessions are unauthenticated. With the `crypto` feature enabled, construction rejects any `AuthenticationPolicy` other than `Unauthenticated`. The connection has `AuthState::Unauthenticated` and a random 48-bit client ID when crypto fields are compiled in; `guest_id_generator` is not used by this adapter.
+### Authentication
+
+`MTPWebServer` does not impose its own authentication policy. It respects the `AuthenticationPolicy` set on the supplied `HostConfig`:
+
+| Policy | Behavior |
+|--------|----------|
+| `Unauthenticated` (default) | No authentication handshake is performed. The connection has `AuthState::Unauthenticated` and a random 48-bit client ID. `guest_id_generator` is not used by this adapter. |
+| `AllowAuthentication` | The server accepts the first message. If it is an `Identification` or `Register` message, a full challenge-response handshake is performed. If it is an ordinary opening message, the connection remains unauthenticated. |
+| `ForceAuthentication` | The server requires a valid `Identification` or `Register` message as the first frame and performs the challenge-response handshake. Any other opening message is rejected. |
+
+When authentication is required or allowed and the client presents credentials, the server performs the same Ed25519/ML-DSA challenge-response handshake used by native MTP host connections:
+
+1. The client sends `Identification` (with a client ID) or `Register` (with a public-key bundle).
+2. The server looks up or accepts the client's public keys, generates a random 128-bit server nonce, and signs a challenge payload with its host keyring.
+3. The client responds with a proof signed by its own keys.
+4. The server verifies the proof, assigns the client ID, and sends a final signed response.
+
+On success, the connection has `AuthState::Authenticated`, the assigned `client_id`, and `client_public_key` populated. On failure, `accept()` returns `AcceptError::AuthenticationFailed` (or `AcceptError::AuthenticationTimedOut` if the handshake exceeds `host_config.auth_timeout`).
+
+`MTPWebServer::new` returns `CommunicationError` for certificate parsing, certificate loading, and bind failures. It does **not** reject `HostConfig` based on `AuthenticationPolicy`; any policy is accepted at construction time.
+
 
 ## Errors
 

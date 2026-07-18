@@ -26,9 +26,11 @@ ml-dsa = { version = "0.1.1", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 rcgen = { version = "0.14", optional = true }
 time = { version = "0.3", optional = true }
+tokio = { version = "1", features = ["macros", "rt"], optional = true }
+rustls = "0.23.41"
 
 [features]
-default = ["chacha20poly1305", "ed25519-dalek", "hkdf", "sha2", "ml-dsa"]
+default = ["chacha20poly1305", "ed25519-dalek", "hkdf", "sha2", "ml-dsa", "parallel"]
 # Enabling ml-dsa by default ensures dual-signature support in the handshake
 # without requiring a separate PQC feature flag in host/client crates.
 full = ["default", "aes-gcm"]
@@ -38,3 +40,4 @@ wasm = ["getrandom/wasm_js"]
 hkdf = ["dep:hkdf", "dep:sha2"]
 sha2 = ["dep:sha2"]
 tls = ["dep:rcgen", "dep:time"]
+parallel = ["dep:tokio"]

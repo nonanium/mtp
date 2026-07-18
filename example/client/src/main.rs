@@ -20,6 +20,7 @@ fn dev_cert_path() -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
     let cert_path = dev_cert_path();
     let cert_pem = fs::read(&cert_path).unwrap_or_else(|e| {
         panic!(
@@ -29,10 +30,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host_public_key = match load_public_key_bundle("host.mpkb") {
         Ok(bundle) => bundle,
         Err(e) => {
-            return Err(format!(
-                "Missing host.mpkb: run the server first to export it ({e})"
-            )
-            .into());
+            return Err(
+                format!("Missing host.mpkb: run the server first to export it ({e})").into(),
+            );
         }
     };
 
@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Pipe demo ---");
     pipes::run_pipe_demo(&conn, 1).await?;
 
-    conn.sender.close();
+    conn.sender.close().await;
     println!("\nDone");
     Ok(())
 }

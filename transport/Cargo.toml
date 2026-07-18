@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 mtp-codec = { version = "0.2.0", path = "../codec" }
 mtp-common = { version = "0.2.0", path = "../common" }
+mtp-crypto = { version = "0.2.0", path = "../crypto" }
 wtransport = { version = "0.7.1", default-features = false, features = [
     "aws-lc-rs",
     "quinn",

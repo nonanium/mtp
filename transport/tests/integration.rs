@@ -105,7 +105,7 @@ async fn test_explicit_development_tls() -> Result<(), Box<dyn std::error::Error
     let (client_tx, _client_rx) = connect_with_config(&url, client_config).await?;
     let (_host_tx, _host_rx) = h.next().await.ok_or("host did not accept connection")?;
 
-    client_tx.close();
+    client_tx.close().await;
     h.shutdown();
     Ok(())
 }
@@ -133,8 +133,8 @@ async fn test_send_receive_roundtrip() -> Result<(), Box<dyn std::error::Error>>
     assert_numbered_message(&client_received, CommunicationType::Pong, 99, &tm);
 
     // Close both sides
-    client_tx.close();
-    host_tx.close();
+    client_tx.close().await;
+    host_tx.close().await;
     Ok(())
 }
 
@@ -167,7 +167,7 @@ async fn test_concurrent_messages() -> Result<(), Box<dyn std::error::Error>> {
         assert_numbered_message(&received, CommunicationType::Pong, i * 10, &tm);
     }
 
-    client_tx.close();
+    client_tx.close().await;
     Ok(())
 }
 
@@ -178,7 +178,6 @@ async fn test_close_detection() -> Result<(), Box<dyn std::error::Error>> {
     // Send a message then close
     let msg = CommunicationValue::new(CommunicationType::Ping);
     client_tx.send(&msg).await?;
-    client_tx.close();
 
     // Host should still receive the message
     let tm = TypeMap::latest();
@@ -189,6 +188,8 @@ async fn test_close_detection() -> Result<(), Box<dyn std::error::Error>> {
             .try_to_id(&tm)
             .expect("test type must be mapped")
     );
+
+    client_tx.close().await;
 
     // Host should get an error or closed signal on next receive
     let result = host_rx.receive().await;
@@ -244,8 +245,8 @@ async fn test_drop_receiver_keeps_sender_alive() -> Result<(), Box<dyn std::erro
     let got = client_rx.receive().await?;
     assert_numbered_message(&got, CommunicationType::Pong, 7, &tm);
 
-    client_tx.close();
-    host_tx.close();
+    client_tx.close().await;
+    host_tx.close().await;
     Ok(())
 }
 
@@ -267,8 +268,8 @@ async fn test_persistent_stream_reopens_after_local_finish()
     let received2 = host_rx.receive().await?;
     assert_numbered_message(&received2, CommunicationType::Pong, 22, &tm);
 
-    client_tx.close();
-    host_tx.close();
+    client_tx.close().await;
+    host_tx.close().await;
     drop(client_rx);
     Ok(())
 }
@@ -295,7 +296,7 @@ async fn test_receiver_backpressure_with_small_queue() -> Result<(), Box<dyn std
         assert_numbered_message(&received, CommunicationType::Ping, i, &tm);
     }
 
-    client_tx.close();
+    client_tx.close().await;
     drop(client_rx);
     h.shutdown();
     Ok(())
@@ -330,7 +331,7 @@ async fn test_max_frames_per_stream_enforced() -> Result<(), Box<dyn std::error:
     let second = host_rx.receive().await;
     assert!(second.is_err(), "stream should be closed after frame limit");
 
-    client_tx.close();
+    client_tx.close().await;
     h.shutdown();
     Ok(())
 }
@@ -375,7 +376,7 @@ async fn test_semaphore_saturation_with_concurrent_streams()
         assert_numbered_message(&received, CommunicationType::Ping, i, &tm);
     }
 
-    client_tx.close();
+    client_tx.close().await;
     h.shutdown();
     Ok(())
 }

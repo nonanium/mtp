@@ -10,6 +10,7 @@ use crate::{
 use mtp_codec::CommunicationValue;
 use mtp_common::CommunicationError;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 use tokio::time::timeout;
 
@@ -132,6 +133,21 @@ impl<C: TransportConnection> GenericSender<C> {
         self.connection
             .close(self.policy.application_close_code, b"mtp-close");
     }
+
+    /// Finish the current persistent stream.
+    ///
+    /// This is used by hosts that put the opening/authentication exchange on
+    /// a persistent stream and then transition to application streams.
+    pub async fn finish_stream(&self) -> Result<(), CommunicationError> {
+        let _lock = self.send_lock.lock().await;
+        let mut stream = self.persistent.lock().await;
+        let Some(mut stream) = stream.take() else {
+            return Ok(());
+        };
+        timeout(self.policy.write_timeout, stream.finish())
+            .await
+            .map_err(|_| CommunicationError::StreamError)?
+    }
     pub fn is_closed(&self) -> bool {
         self.connection.close_reason().is_some()
     }
@@ -149,6 +165,7 @@ pub struct GenericReceiver<C: TransportConnection> {
     pipes: Arc<Mutex<mpsc::Receiver<PipeReader<C::RecvStream>>>>,
     connection: C,
     ping_sender: Arc<RwLock<Option<GenericSender<C>>>>,
+    max_message_size: Arc<AtomicU64>,
 }
 
 impl<C: TransportConnection> Clone for GenericReceiver<C> {
@@ -159,6 +176,7 @@ impl<C: TransportConnection> Clone for GenericReceiver<C> {
             pipes: self.pipes.clone(),
             connection: self.connection.clone(),
             ping_sender: self.ping_sender.clone(),
+            max_message_size: self.max_message_size.clone(),
         }
     }
 }
@@ -169,9 +187,11 @@ impl<C: TransportConnection> GenericReceiver<C> {
         #[cfg(feature = "pipes")]
         let (pipe_tx, pipe_rx) = mpsc::channel(policy.receiver_queue_capacity);
         let ping_sender: Arc<RwLock<Option<GenericSender<C>>>> = Arc::new(RwLock::new(None));
+        let max_message_size = Arc::new(AtomicU64::new(policy.handshake_max_message_size));
         let task_ping_sender = ping_sender.clone();
         let task_connection = connection.clone();
         let task_policy = policy.clone();
+        let task_max_message_size = max_message_size.clone();
         tokio::spawn(async move {
             let limit = Arc::new(Semaphore::new(
                 task_policy.max_concurrent_stream_tasks.max(1),
@@ -201,6 +221,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                 #[cfg(feature = "pipes")]
                 let pipe_tx = pipe_tx.clone();
                 let policy = task_policy.clone();
+                let max_message_size = task_max_message_size.clone();
                 let permit = limit.clone();
                 let ping_sender = task_ping_sender.clone();
                 tokio::spawn(async move {
@@ -214,42 +235,65 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             .max_frames_per_stream
                             .is_some_and(|max| frames >= max)
                         {
-                            let _ = tx.send(Err(CommunicationError::StreamError)).await;
                             break;
                         }
                         let mut len = [0; 4];
                         match timeout(policy.read_timeout, stream.read_exact(&mut len)).await {
                             Ok(Ok(())) => {}
-                            Ok(Err(_)) | Err(_) => break,
+                            Ok(Err(CommunicationError::StreamClosed)) => break,
+                            Ok(Err(error)) => {
+                                tracing::error!(
+                                    "[mtp-transport] frame header read failed: {error}"
+                                );
+                                tracing::warn!(%error, "MTP receive stream failed while reading frame header");
+                                break;
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    "[mtp-transport] frame header read timed out: {error}"
+                                );
+                                tracing::warn!(%error, "MTP receive stream timed out while reading frame header");
+                                break;
+                            }
                         }
                         let len = u32::from_be_bytes(len);
                         if len == policy.close_frame_len {
-                            let _ = tx.send(Err(CommunicationError::StreamClosed)).await;
                             break;
                         }
-                        if len as u64 > policy.max_message_size {
-                            let _ = tx.send(Err(CommunicationError::MessageTooLarge)).await;
+                        if len as u64 > max_message_size.load(Ordering::Relaxed) {
+                            tracing::warn!(len, "MTP receive stream frame is too large");
                             break;
                         }
                         let target_len = len as usize;
                         let mut body = Vec::new();
                         if body.try_reserve(target_len.min(16 * 1024)).is_err() {
-                            let _ = tx.send(Err(CommunicationError::MessageTooLarge)).await;
+                            tracing::warn!(
+                                target_len,
+                                "MTP receive stream could not reserve frame body"
+                            );
                             break;
                         }
                         while body.len() < target_len {
                             let chunk_len = (target_len - body.len()).min(16 * 1024);
                             let mut chunk = [0u8; 16 * 1024];
-                            if !matches!(
-                                timeout(
-                                    policy.read_timeout,
-                                    stream.read_exact(&mut chunk[..chunk_len]),
-                                )
-                                .await,
-                                Ok(Ok(()))
-                            ) || body.try_reserve(chunk_len).is_err()
+                            let body_read = timeout(
+                                policy.read_timeout,
+                                stream.read_exact(&mut chunk[..chunk_len]),
+                            )
+                            .await;
+                            if !matches!(&body_read, Ok(Ok(())))
+                                || body.try_reserve(chunk_len).is_err()
                             {
-                                let _ = tx.send(Err(CommunicationError::StreamError)).await;
+                                tracing::error!(
+                                    "[mtp-transport] frame body read failed ({} bytes): {:?}",
+                                    chunk_len,
+                                    body_read
+                                );
+                                tracing::warn!(
+                                    pipe_chunk_len = chunk_len,
+                                    ?body_read,
+                                    "MTP receive stream failed while reading frame body"
+                                );
                                 break;
                             }
                             body.extend_from_slice(&chunk[..chunk_len]);
@@ -261,9 +305,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                         let message = match CommunicationValue::from_bytes(&body) {
                             Ok(message) => message,
                             Err(_) => {
-                                let _ = tx
-                                    .send(Err(CommunicationError::ParseCommunicationValue))
-                                    .await;
+                                tracing::warn!("MTP receive stream contained an invalid frame");
                                 break;
                             }
                         };
@@ -284,6 +326,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                     description,
                                     pipe_id,
                                 };
+
+                                tracing::debug!(pipe_id, description = %pipe_reader.description, "classified incoming pipe stream");
 
                                 if pipe_tx.send(pipe_reader).await.is_err() {
                                     break;
@@ -322,10 +366,17 @@ impl<C: TransportConnection> GenericReceiver<C> {
             pipes: Arc::new(Mutex::new(pipe_rx)),
             connection,
             ping_sender,
+            max_message_size,
         }
     }
     pub async fn respond_to_pings(&self, sender: GenericSender<C>) {
         *self.ping_sender.write().await = Some(sender);
+    }
+
+    /// Switch from the handshake frame limit to the application frame limit.
+    pub fn set_max_message_size(&self, max_message_size: u64) {
+        self.max_message_size
+            .store(max_message_size, Ordering::Relaxed);
     }
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
         self.incoming
