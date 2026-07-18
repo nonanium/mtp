@@ -1,84 +1,27 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use futures_channel::oneshot;
-use wasm_bindgen::JsCast;
+use futures_util::{FutureExt, pin_mut, select};
 use wasm_bindgen::prelude::*;
 
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, PROTOCOL_VERSION};
-use mtp_type_map::CommunicationTypeId;
 
-use mtp_crypto::SignatureScheme;
-
+use crate::auth;
+use crate::client_pipe::{self, PendingRequest};
 use crate::config::ConnectionConfig;
 use crate::error::js_error;
 use crate::pipe::PipeReader;
 use crate::transport::WasmTransport;
-
-struct PendingRequest {
-    response_type: Option<String>,
-    sender: oneshot::Sender<Result<JsValue, JsValue>>,
-}
 
 struct PingTimer {
     id: i32,
     closure: Closure<dyn FnMut()>,
 }
 
-#[wasm_bindgen(typescript_custom_section)]
-const PIPE_HANDLE_TS: &str = r#"
-export interface WasmPipeHandle {
-  wait(): Promise<PipeWriter | null>;
-  readonly pipeId: number;
-  readonly description: string;
-}
-"#;
-
-#[wasm_bindgen]
-pub struct WasmPipeHandle {
-    pipe_id: u32,
-    description: String,
-    transport: WasmTransport,
-    response_rx: Rc<RefCell<Option<oneshot::Receiver<Result<bool, JsValue>>>>>,
-}
-
-#[wasm_bindgen]
-impl WasmPipeHandle {
-    pub async fn wait(&self) -> Result<JsValue, JsValue> {
-        let rx = self
-            .response_rx
-            .borrow_mut()
-            .take()
-            .ok_or_else(|| js_error("handle already consumed"))?;
-
-        let accepted = rx
-            .await
-            .map_err(|_| js_error("pipe handle channel closed"))?;
-
-        match accepted {
-            Ok(true) => {
-                let writer = self
-                    .transport
-                    .open_pipe(self.pipe_id, &self.description)
-                    .await?;
-                Ok(JsValue::from(writer))
-            }
-            Ok(false) => Ok(JsValue::NULL),
-            Err(e) => Err(e),
-        }
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn pipe_id(&self) -> u32 {
-        self.pipe_id
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn description(&self) -> String {
-        self.description.clone()
-    }
-}
+const DEFAULT_REQUEST_TIMEOUT_MS: u32 = 30_000;
 
 fn frame_property(frame: &JsValue, key: &str) -> Option<JsValue> {
     js_sys::Reflect::get(frame, &JsValue::from_str(key))
@@ -117,12 +60,13 @@ fn route_incoming_frame(
                 let _ = pending.sender.send(Ok(frame.clone()));
             } else {
                 let actual = message_type.clone().unwrap_or_else(|| "unknown".into());
-                let _ = pending.sender.send(Err(js_error(&format!(
+                let _ = pending.sender.send(Err(js_error(format!(
                     "unexpected response type: expected {}, got {}",
                     pending.response_type.unwrap_or_else(|| "unknown".into()),
                     actual
                 ))));
             }
+            return;
         }
     }
 
@@ -148,7 +92,7 @@ fn stop_ping_timer(ping_timer: &Rc<RefCell<Option<PingTimer>>>) {
     };
     if let Ok(clear_interval) =
         js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("clearInterval"))
-            .and_then(|value| value.dyn_into::<js_sys::Function>().map_err(Into::into))
+            .and_then(|value| value.dyn_into::<js_sys::Function>())
     {
         let _ = clear_interval.call1(&JsValue::NULL, &JsValue::from_f64(timer.id as f64));
     }
@@ -165,151 +109,23 @@ fn reject_pending_requests(
     }
 }
 
-fn reject_pending_pipe_creations(
-    pending: &Rc<RefCell<HashMap<u32, oneshot::Sender<Result<bool, JsValue>>>>>,
-    message: &str,
-) {
-    let pending = std::mem::take(&mut *pending.borrow_mut());
-    for (_, tx) in pending {
-        let _ = tx.send(Err(js_error(message)));
-    }
-}
-
-fn random_pipe_id() -> Result<u32, JsValue> {
-    let mut bytes = [0u8; 4];
-    getrandom::fill(&mut bytes).map_err(|_| js_error("rng failed"))?;
-    Ok(u32::from_be_bytes(bytes))
-}
-
-fn raw_frame_preview(bytes: &[u8]) -> String {
-    let shown = bytes.len().min(256);
-    let mut preview = hex::encode(&bytes[..shown]);
-    if bytes.len() > shown {
-        preview.push_str("...");
-    }
-    format!("{} bytes, hex={preview}", bytes.len())
-}
-
-fn unexpected_response_type_error(
-    context: &str,
-    expected_type: CommunicationTypeId,
-    response_type: CommunicationTypeId,
-    response: &[u8],
-    parsed: &CommunicationValue,
-) -> JsValue {
-    js_error(&format!(
-        "unexpected response type during {context}: expected {:?}, got {:?}; raw {}; parsed {}",
-        expected_type,
-        response_type,
-        raw_frame_preview(response),
-        parsed
-    ))
-}
-
-/*
- * Verify the host's signature over the challenge it issued (step 2), mirroring
- * the native client (`client/src/lib.rs`). `id` is the client id for a login or
- * `0` for a registration. The Ed25519 signature is mandatory; the ML-DSA
- * signature is verified only when the host included one.
- */
-fn verify_host_challenge(
-    challenge: &CommunicationValue,
-    _tm: &mtp_codec::TypeMap,
-    host_pk: &mtp_crypto::PublicKeyBundle,
-    id: u64,
-    server_challenge: u128,
-) -> Result<(), JsValue> {
-    let sig = match challenge.get_data(DataType::Signature) {
-        DataValue::Bytes(b) => b.clone(),
-        _ => return Err(js_error("missing host challenge signature")),
-    };
-    let pq_sig = match challenge.get_data(DataType::PqSignature) {
-        DataValue::Bytes(b) => b.clone(),
-        _ => vec![],
-    };
-
-    let payload = mtp_crypto::auth::challenge_payload(id, server_challenge);
-    mtp_crypto::verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig)
-        .map_err(|_| js_error("host challenge signature invalid"))?;
-    if !pq_sig.is_empty() {
-        mtp_crypto::verify_ml_dsa(&host_pk.sig_pq_public_key, &payload, &pq_sig)
-            .map_err(|_| js_error("host challenge PQ signature invalid"))?;
-    }
+async fn wait_for_timeout(timeout_ms: u32) -> Result<(), JsValue> {
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        let result = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setTimeout"))
+            .and_then(|value| value.dyn_into::<js_sys::Function>())
+            .and_then(|set_timeout| {
+                set_timeout.call2(
+                    &JsValue::NULL,
+                    &resolve,
+                    &JsValue::from_f64(timeout_ms as f64),
+                )
+            });
+        if let Err(error) = result {
+            let _ = reject.call1(&JsValue::NULL, &error);
+        }
+    });
+    wasm_bindgen_futures::JsFuture::from(promise).await?;
     Ok(())
-}
-
-/*
- * Verify the host's final confirmation (step 4): the echoed `client_nonce` and
- * the host signature over the handshake transcript. `id` is the client id for a
- * login and the host-assigned id for a register.
- */
-fn verify_host_final(
-    resp: &CommunicationValue,
-    _tm: &mtp_codec::TypeMap,
-    host_pk: &mtp_crypto::PublicKeyBundle,
-    id: u64,
-    client_nonce: u128,
-    server_challenge: u128,
-) -> Result<(), JsValue> {
-    if *resp.get_data(DataType::ClientNonce) != DataValue::UnsignedNumber(client_nonce) {
-        return Err(js_error("nonce mismatch"));
-    }
-    let host_sig = match resp.get_data(DataType::Signature) {
-        DataValue::Bytes(b) => b.clone(),
-        _ => return Err(js_error("missing host signature")),
-    };
-    let host_pq_sig = match resp.get_data(DataType::PqSignature) {
-        DataValue::Bytes(b) => b.clone(),
-        _ => vec![],
-    };
-
-    let payload = mtp_crypto::auth::host_final_payload(id, client_nonce, server_challenge);
-    mtp_crypto::verify_ed25519(&host_pk.sig_cl_public_key, &payload, &host_sig)
-        .map_err(|_| js_error("host signature invalid"))?;
-    if !host_pq_sig.is_empty() {
-        mtp_crypto::verify_ml_dsa(&host_pk.sig_pq_public_key, &payload, &host_pq_sig)
-            .map_err(|_| js_error("host PQ signature invalid"))?;
-    }
-    Ok(())
-}
-
-fn random_nonce() -> Result<u128, JsValue> {
-    let mut nonce_bytes = [0u8; 16];
-    getrandom::fill(&mut nonce_bytes).map_err(|_| js_error("rng failed"))?;
-    Ok(u128::from_be_bytes(nonce_bytes))
-}
-
-fn signed_challenge_response_bytes(
-    keyring: &mtp_crypto::Keyring,
-    proof_payload: &[u8],
-    client_nonce: u128,
-) -> Result<Vec<u8>, JsValue> {
-    let signer = mtp_crypto::Ed25519Signer::new(&keyring.sig_cl_secret_key)
-        .map_err(|e| js_error(&format!("signer creation failed: {}", e)))?;
-    let signature = signer
-        .sign(proof_payload)
-        .map_err(|e| js_error(&format!("signature failed: {}", e)))?;
-
-    let mut proof = CommunicationValue::new(CommunicationType::ChallengeResponse)
-        .add_typed_default(
-            DataType::ClientNonce,
-            DataValue::UnsignedNumber(client_nonce),
-        )
-        .add_typed_default(DataType::Signature, DataValue::Bytes(signature));
-
-    if !keyring.sig_pq_secret_key.as_bytes().is_empty() {
-        let pq_signer =
-            mtp_crypto::MlDsaSigner::new(&keyring.sig_pq_secret_key, &keyring.sig_pq_public_key)
-                .map_err(|e| js_error(&format!("PQ signer creation failed: {}", e)))?;
-        let pq_signature = pq_signer
-            .sign(proof_payload)
-            .map_err(|e| js_error(&format!("PQ signature failed: {}", e)))?;
-        proof = proof.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
-    }
-
-    proof
-        .to_bytes()
-        .map_err(|e| js_error(&format!("encode failed: {}", e)))
 }
 
 #[wasm_bindgen]
@@ -325,7 +141,8 @@ pub enum ConnectionState {
 pub struct WasmClient {
     transport: Rc<RefCell<Option<WasmTransport>>>,
     state: Rc<Cell<ConnectionState>>,
-    on_state_change: js_sys::Function,
+    pending_state_callbacks: Rc<RefCell<VecDeque<ConnectionState>>>,
+    state_callback: Closure<dyn FnMut()>,
     pub(crate) on_message: js_sys::Function,
     pub(crate) on_error: js_sys::Function,
     subscriptions: Rc<RefCell<HashMap<u32, (String, js_sys::Function)>>>,
@@ -346,10 +163,21 @@ impl WasmClient {
         on_error: Option<js_sys::Function>,
     ) -> Self {
         let noop = || js_sys::Function::new_no_args("");
+        let on_state_change = on_state_change.unwrap_or_else(noop);
+        let pending_state_callbacks = Rc::new(RefCell::new(VecDeque::new()));
+        let callback_queue = pending_state_callbacks.clone();
+        let callback = on_state_change.clone();
+        let state_callback = Closure::wrap(Box::new(move || {
+            let state = callback_queue.borrow_mut().pop_front();
+            if let Some(state) = state {
+                let _ = callback.call1(&JsValue::NULL, &JsValue::from(state as u8));
+            }
+        }) as Box<dyn FnMut()>);
         Self {
             transport: Rc::new(RefCell::new(None)),
             state: Rc::new(Cell::new(ConnectionState::Disconnected)),
-            on_state_change: on_state_change.unwrap_or_else(noop),
+            pending_state_callbacks,
+            state_callback,
             on_message: on_message.unwrap_or_else(noop),
             on_error: on_error.unwrap_or_else(noop),
             subscriptions: Rc::new(RefCell::new(HashMap::new())),
@@ -372,7 +200,6 @@ impl WasmClient {
         self.state.get() as u8
     }
 
-    /// Unauthenticated connect (sends basic Identification, enables receive loop).
     #[wasm_bindgen]
     pub async fn connect(&self, config: &ConnectionConfig) -> Result<(), JsValue> {
         self.set_state(ConnectionState::Connecting);
@@ -395,21 +222,46 @@ impl WasmClient {
         }
         let ident_bytes = ident
             .to_bytes()
-            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+            .map_err(|e| js_error(format!("encode failed: {}", e)))?;
         transport.send_frame(&ident_bytes).await?;
+
+        let outcome_bytes = transport.read_one_frame().await?;
+        let outcome = CommunicationValue::from_bytes(&outcome_bytes)
+            .map_err(|e| js_error(format!("parse handshake outcome: {e}")))?;
+        let tm = mtp_codec::TypeMap::latest();
+        if Some(outcome.get_type()) == CommunicationType::ErrorBadVersion.try_to_id(&tm) {
+            self.set_state(ConnectionState::Disconnected);
+            return Err(js_error(
+                outcome
+                    .get_str(DataType::ErrorMessage)
+                    .unwrap_or("host does not support this protocol version"),
+            ));
+        }
+        let expected = CommunicationType::IdentificationResponse
+            .try_to_id(&tm)
+            .ok_or_else(|| js_error("IdentificationResponse is absent from the type map"))?;
+        if outcome.get_type() != expected
+            || outcome.get_data(DataType::Connected) != &DataValue::BoolTrue
+        {
+            self.set_state(ConnectionState::Disconnected);
+            return Err(js_error(
+                outcome
+                    .get_str(DataType::ErrorMessage)
+                    .unwrap_or("host rejected the connection"),
+            ));
+        }
+        match outcome.get_data(DataType::Version) {
+            DataValue::Str(version) if mtp_codec::Version::parse(version).is_some() => {}
+            _ => {
+                self.set_state(ConnectionState::Disconnected);
+                return Err(js_error("host omitted a valid negotiated protocol version"));
+            }
+        }
 
         self.start_receive_loop(transport);
         Ok(())
     }
 
-    /// Authenticated login with an existing client ID.
-    /// Exchanges Identification + signatures and verifies the host response.
-    ///
-    /// - `host_public_key_bytes`: serialized PublicKeyBundle from the server
-    /// - `keyring_bytes`: serialized Keyring of this client (must match `client_id`)
-    /// - `client_id`: previously assigned client ID
-    ///
-    /// Returns the confirmed (same) client ID on success.
     #[wasm_bindgen]
     pub async fn auth_connect(
         &self,
@@ -421,9 +273,9 @@ impl WasmClient {
         self.set_state(ConnectionState::Connecting);
 
         let host_pk = mtp_crypto::PublicKeyBundle::from_bytes(host_public_key_bytes)
-            .map_err(|e| js_error(&format!("invalid host public key: {}", e)))?;
+            .map_err(|e| js_error(format!("invalid host public key: {}", e)))?;
         let keyring = mtp_crypto::Keyring::from_bytes(keyring_bytes)
-            .map_err(|e| js_error(&format!("invalid keyring: {}", e)))?;
+            .map_err(|e| js_error(format!("invalid keyring: {}", e)))?;
 
         let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
@@ -435,7 +287,6 @@ impl WasmClient {
         )
         .await?;
 
-        // 1. Send the unsigned Identification hello.
         let mut hello = CommunicationValue::new(CommunicationType::Identification)
             .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
             .add_typed_default(DataType::Id, DataValue::UnsignedNumber(client_id as u128));
@@ -444,10 +295,9 @@ impl WasmClient {
         }
         let hello_bytes = hello
             .to_bytes()
-            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+            .map_err(|e| js_error(format!("encode failed: {}", e)))?;
         transport.send_frame(&hello_bytes).await?;
 
-        // 2. Receive and verify the host's challenge.
         let server_challenge = self
             .read_verified_challenge(
                 &transport,
@@ -455,11 +305,12 @@ impl WasmClient {
                 &host_pk,
                 client_id,
                 "auth_connect challenge",
+                config.require_pq,
+                !keyring.sig_pq_secret_key.as_bytes().is_empty(),
             )
             .await?;
 
-        // 3. Sign the host's challenge and send the proof.
-        let client_nonce = random_nonce()?;
+        let client_nonce = auth::random_nonce()?;
 
         let proof_payload = mtp_crypto::auth::login_proof_payload(
             &version_str,
@@ -467,18 +318,19 @@ impl WasmClient {
             server_challenge,
             client_nonce,
         );
-        let proof = signed_challenge_response_bytes(&keyring, &proof_payload, client_nonce)?;
+        let proof = auth::signed_challenge_response_bytes(&keyring, &proof_payload, client_nonce)?;
         transport.send_frame(&proof).await?;
 
-        // 4. Receive and verify the host's final confirmation.
         let response = transport.read_one_frame().await?;
         let resp_comm = CommunicationValue::from_bytes(&response)
-            .map_err(|e| js_error(&format!("parse response: {}", e)))?;
+            .map_err(|e| js_error(format!("parse response: {}", e)))?;
         let resp_type = resp_comm.get_type();
-        let expected_type = CommunicationType::IdentificationResponse.to_id(&tm);
+        let expected_type = CommunicationType::IdentificationResponse
+            .try_to_id(&tm)
+            .ok_or_else(|| js_error("IdentificationResponse is absent from the type map"))?;
         if resp_type != expected_type {
             self.set_state(ConnectionState::Disconnected);
-            return Err(unexpected_response_type_error(
+            return Err(auth::unexpected_response_type_error(
                 "auth_connect",
                 expected_type,
                 resp_type,
@@ -489,23 +341,26 @@ impl WasmClient {
 
         if resp_comm.get_data(DataType::Connected) != &DataValue::BoolTrue {
             self.set_state(ConnectionState::Disconnected);
-            return Err(js_error("host rejected authentication"));
+            return Err(js_error(
+                resp_comm
+                    .get_str(DataType::ErrorMessage)
+                    .unwrap_or("host rejected authentication"),
+            ));
         }
 
-        // Verify echoed nonce + host signature (login: id is client_id).
-        if let Err(e) = verify_host_final(
+        if let Err(e) = auth::verify_host_final(
             &resp_comm,
             &tm,
             &host_pk,
             client_id,
             client_nonce,
             server_challenge,
+            config.require_pq,
         ) {
             self.set_state(ConnectionState::Disconnected);
             return Err(e);
         }
 
-        // Extract assigned ID
         let assigned_id = match resp_comm.get_data(DataType::Id) {
             DataValue::UnsignedNumber(n) => *n as u64,
             _ => {
@@ -519,13 +374,6 @@ impl WasmClient {
         Ok(assigned_id)
     }
 
-    /// Authenticated registration with a fresh keyring.
-    /// The server assigns a new client ID.
-    ///
-    /// - `host_public_key_bytes`: serialized PublicKeyBundle from the server
-    /// - `keyring_bytes`: serialized Keyring (must include ed25519 secret key)
-    ///
-    /// Returns the newly assigned client ID.
     #[wasm_bindgen]
     pub async fn auth_register(
         &self,
@@ -536,9 +384,9 @@ impl WasmClient {
         self.set_state(ConnectionState::Connecting);
 
         let host_pk = mtp_crypto::PublicKeyBundle::from_bytes(host_public_key_bytes)
-            .map_err(|e| js_error(&format!("invalid host public key: {}", e)))?;
+            .map_err(|e| js_error(format!("invalid host public key: {}", e)))?;
         let keyring = mtp_crypto::Keyring::from_bytes(keyring_bytes)
-            .map_err(|e| js_error(&format!("invalid keyring: {}", e)))?;
+            .map_err(|e| js_error(format!("invalid keyring: {}", e)))?;
 
         let tm = mtp_codec::TypeMap::latest();
         let version_str = format!("{}", PROTOCOL_VERSION);
@@ -551,7 +399,6 @@ impl WasmClient {
         )
         .await?;
 
-        // 1. Send the unsigned Register hello (version + public-key bundle).
         let mut hello = CommunicationValue::new(CommunicationType::Register)
             .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
             .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
@@ -560,16 +407,22 @@ impl WasmClient {
         }
         let hello_bytes = hello
             .to_bytes()
-            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+            .map_err(|e| js_error(format!("encode failed: {}", e)))?;
         transport.send_frame(&hello_bytes).await?;
 
-        // 2. Receive and verify the host's challenge (register binds id = 0).
         let server_challenge = self
-            .read_verified_challenge(&transport, &tm, &host_pk, 0, "auth_register challenge")
+            .read_verified_challenge(
+                &transport,
+                &tm,
+                &host_pk,
+                0,
+                "auth_register challenge",
+                config.require_pq,
+                !keyring.sig_pq_secret_key.as_bytes().is_empty(),
+            )
             .await?;
 
-        // 3. Sign the host's challenge over the bundle and send the proof.
-        let client_nonce = random_nonce()?;
+        let client_nonce = auth::random_nonce()?;
 
         let proof_payload = mtp_crypto::auth::register_proof_payload(
             &version_str,
@@ -577,18 +430,19 @@ impl WasmClient {
             server_challenge,
             client_nonce,
         );
-        let proof = signed_challenge_response_bytes(&keyring, &proof_payload, client_nonce)?;
+        let proof = auth::signed_challenge_response_bytes(&keyring, &proof_payload, client_nonce)?;
         transport.send_frame(&proof).await?;
 
-        // 4. Receive the host's final confirmation; extract + verify assigned id.
         let response = transport.read_one_frame().await?;
         let resp_comm = CommunicationValue::from_bytes(&response)
-            .map_err(|e| js_error(&format!("parse response: {}", e)))?;
+            .map_err(|e| js_error(format!("parse response: {}", e)))?;
         let resp_type = resp_comm.get_type();
-        let expected_type = CommunicationType::RegisterResponse.to_id(&tm);
+        let expected_type = CommunicationType::RegisterResponse
+            .try_to_id(&tm)
+            .ok_or_else(|| js_error("RegisterResponse is absent from the type map"))?;
         if resp_type != expected_type {
             self.set_state(ConnectionState::Disconnected);
-            return Err(unexpected_response_type_error(
+            return Err(auth::unexpected_response_type_error(
                 "auth_register",
                 expected_type,
                 resp_type,
@@ -599,7 +453,11 @@ impl WasmClient {
 
         if resp_comm.get_data(DataType::Connected) != &DataValue::BoolTrue {
             self.set_state(ConnectionState::Disconnected);
-            return Err(js_error("host rejected registration"));
+            return Err(js_error(
+                resp_comm
+                    .get_str(DataType::ErrorMessage)
+                    .unwrap_or("host rejected registration"),
+            ));
         }
 
         let assigned_id = match resp_comm.get_data(DataType::Id) {
@@ -610,14 +468,14 @@ impl WasmClient {
             }
         };
 
-        // Verify echoed nonce + host signature (register: id is host-assigned).
-        if let Err(e) = verify_host_final(
+        if let Err(e) = auth::verify_host_final(
             &resp_comm,
             &tm,
             &host_pk,
             assigned_id,
             client_nonce,
             server_challenge,
+            config.require_pq,
         ) {
             self.set_state(ConnectionState::Disconnected);
             return Err(e);
@@ -641,9 +499,10 @@ impl WasmClient {
         &self,
         frame: Vec<u8>,
         response_type: Option<String>,
+        timeout_ms: Option<u32>,
     ) -> Result<JsValue, JsValue> {
         let request = CommunicationValue::from_bytes(&frame)
-            .map_err(|e| js_error(&format!("parse request: {}", e)))?;
+            .map_err(|e| js_error(format!("parse request: {}", e)))?;
         let request_id = request.get_id();
         if request_id == 0 {
             return Err(js_error("request frame must have a non-zero id"));
@@ -654,22 +513,49 @@ impl WasmClient {
         };
 
         let (sender, receiver) = oneshot::channel();
-        self.pending_requests.borrow_mut().insert(
-            request_id,
-            PendingRequest {
-                response_type,
-                sender,
-            },
-        );
-
-        if let Err(error) = transport.send_frame(&frame).await {
-            self.pending_requests.borrow_mut().remove(&request_id);
-            return Err(error);
+        let token = Rc::new(());
+        {
+            let mut pending = self.pending_requests.borrow_mut();
+            if pending.contains_key(&request_id) {
+                return Err(js_error(format!(
+                    "request id {request_id} is already pending"
+                )));
+            }
+            pending.insert(
+                request_id,
+                PendingRequest {
+                    token: token.clone(),
+                    response_type,
+                    sender,
+                },
+            );
         }
 
-        match receiver.await {
-            Ok(result) => result,
-            Err(_) => Err(js_error("request cancelled")),
+        let timeout_ms = timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
+        let response = async {
+            transport.send_frame(&frame).await?;
+            match receiver.await {
+                Ok(result) => result,
+                Err(_) => Err(js_error("request cancelled")),
+            }
+        }
+        .fuse();
+        let timeout = wait_for_timeout(timeout_ms).fuse();
+        pin_mut!(response, timeout);
+        select! {
+            result = response => {
+                if result.is_err() {
+                    client_pipe::remove_pending_request(&self.pending_requests, request_id, &token);
+                }
+                result
+            },
+            result = timeout => {
+                client_pipe::remove_pending_request(&self.pending_requests, request_id, &token);
+                result?;
+                Err(js_error(format!(
+                    "request {request_id} timed out after {timeout_ms}ms"
+                )))
+            },
         }
     }
 
@@ -712,7 +598,7 @@ impl WasmClient {
                     )
                     .with_sender(client_id)
                     .to_bytes()
-                    .map_err(|e| js_error(&format!("encode ping failed: {}", e)));
+                    .map_err(|e| js_error(format!("encode ping failed: {}", e)));
                 match frame {
                     Ok(frame) => {
                         if let Err(error) = transport.send_frame(&frame).await {
@@ -748,7 +634,7 @@ impl WasmClient {
         };
         if let Ok(clear_interval) =
             js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("clearInterval"))
-                .and_then(|value| value.dyn_into::<js_sys::Function>().map_err(Into::into))
+                .and_then(|value| value.dyn_into::<js_sys::Function>())
         {
             let _ = clear_interval.call1(&JsValue::NULL, &JsValue::from_f64(timer.id as f64));
         }
@@ -763,64 +649,36 @@ impl WasmClient {
         }
         self.subscriptions.borrow_mut().clear();
         self.reject_pending_requests("disconnected");
-        reject_pending_pipe_creations(&self.pending_pipe_creations, "disconnected");
+        client_pipe::reject_pending_pipe_creations(&self.pending_pipe_creations, "disconnected");
         self.set_state(ConnectionState::Disconnected);
     }
 
-    /// Set the callback invoked when a remote peer opens a pipe request.
-    /// The callback receives a plain JS object `{ pipeId: number, description: string }`.
     #[wasm_bindgen]
     pub fn set_on_pipe_request(&self, callback: Option<js_sys::Function>) {
         *self.on_pipe_request.borrow_mut() = callback;
     }
 
-    /// Initiate an outgoing pipe. Returns a `WasmPipeHandle` whose `wait()`
-    /// method resolves after the remote peer accepts (or denies) the request.
     #[wasm_bindgen]
-    pub async fn create_pipe(&self, description: &str) -> Result<WasmPipeHandle, JsValue> {
+    pub async fn create_pipe(
+        &self,
+        description: &str,
+    ) -> Result<client_pipe::WasmPipeHandle, JsValue> {
         let transport = self
             .transport
             .borrow()
             .clone()
             .ok_or_else(|| js_error("not connected"))?;
 
-        let pipe_id = random_pipe_id()?;
-        let (tx, rx) = oneshot::channel();
-        self.pending_pipe_creations.borrow_mut().insert(pipe_id, tx);
-
-        let request = CommunicationValue::new(CommunicationType::PipeRequest)
-            .with_id(pipe_id)
-            .add_typed_default(
-                DataType::Description,
-                DataValue::Str(description.to_string()),
-            );
-        let request_bytes = request
-            .to_bytes()
-            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
-        web_sys::console::log_1(
-            &format!(
-                "[mtp wasm] create_pipe sending PipeRequest id={} description={description} bytes={}",
-                pipe_id,
-                request_bytes.len()
-            )
-            .into(),
-        );
-        transport.send_frame(&request_bytes).await?;
-        web_sys::console::log_1(
-            &format!("[mtp wasm] create_pipe sent PipeRequest id={pipe_id}").into(),
-        );
-
-        Ok(WasmPipeHandle {
+        let pipe_id = client_pipe::random_pipe_id()?;
+        client_pipe::wasm_create_pipe(
+            &transport,
+            description,
             pipe_id,
-            description: description.to_string(),
-            transport,
-            response_rx: Rc::new(RefCell::new(Some(rx))),
-        })
+            &self.pending_pipe_creations,
+        )
+        .await
     }
 
-    /// Accept an incoming pipe request (identified by `pipe_id`). Sends a
-    /// `PipeResponse` with `Accepted = true` and returns a `PipeReader` once
-    /// the remote peer opens the pipe stream.
     #[wasm_bindgen]
     pub async fn accept_pipe(&self, pipe_id: u32) -> Result<PipeReader, JsValue> {
         let transport = self
@@ -829,29 +687,9 @@ impl WasmClient {
             .clone()
             .ok_or_else(|| js_error("not connected"))?;
 
-        let resp = CommunicationValue::new(CommunicationType::PipeResponse)
-            .with_id(pipe_id)
-            .add_typed_default(DataType::Accepted, DataValue::BoolTrue);
-        let resp_bytes = resp
-            .to_bytes()
-            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
-        web_sys::console::log_1(
-            &format!("[mtp wasm] accept_pipe sending PipeResponse id={pipe_id} accepted=true bytes={}", resp_bytes.len()).into(),
-        );
-        transport.send_frame(&resp_bytes).await?;
-        web_sys::console::log_1(
-            &format!("[mtp wasm] accept_pipe sent PipeResponse id={pipe_id}").into(),
-        );
-
-        let (tx, rx) = oneshot::channel();
-        self.pending_pipes.borrow_mut().insert(pipe_id, tx);
-
-        rx.await
-            .map_err(|_| js_error("pipe closed before stream arrived"))
+        client_pipe::wasm_accept_pipe(&transport, pipe_id, &self.pending_pipes).await
     }
 
-    /// Deny an incoming pipe request. Sends a `PipeResponse` with
-    /// `Accepted = false`.
     #[wasm_bindgen]
     pub async fn deny_pipe(&self, pipe_id: u32) -> Result<(), JsValue> {
         let transport = self
@@ -860,49 +698,34 @@ impl WasmClient {
             .clone()
             .ok_or_else(|| js_error("not connected"))?;
 
-        let resp = CommunicationValue::new(CommunicationType::PipeResponse)
-            .with_id(pipe_id)
-            .add_typed_default(DataType::Accepted, DataValue::BoolFalse);
-        let resp_bytes = resp
-            .to_bytes()
-            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
-        transport.send_frame(&resp_bytes).await
+        client_pipe::wasm_deny_pipe(&transport, pipe_id).await
     }
 
     fn set_state(&self, new_state: ConnectionState) {
         self.state.set(new_state);
-
-        // Defer the callback to a microtask so re-entrant &mut self calls don't alias.
-        let cb = self.on_state_change.clone();
-        let val = JsValue::from(new_state as u8);
-        let closure = Closure::wrap(Box::new(move || {
-            let _ = cb.call1(&JsValue::NULL, &val);
-        }) as Box<dyn FnMut()>);
+        self.pending_state_callbacks
+            .borrow_mut()
+            .push_back(new_state);
 
         let global = js_sys::global();
-        let mut closure_opt = Some(closure);
-
         let qmt = js_sys::Reflect::get(&global, &JsValue::from_str("queueMicrotask"))
-            .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into));
-        let scheduled = match qmt {
-            Ok(qmt) => {
-                if let Some(c) = closure_opt.take() {
-                    let _ = qmt.call1(&global, c.as_ref());
-                    c.forget();
-                }
-                true
-            }
-            Err(_) => false,
-        };
-        if !scheduled {
-            if let Ok(set_timeout) = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
-                .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
-            {
-                if let Some(c) = closure_opt.take() {
-                    let _ = set_timeout.call2(&global, c.as_ref(), &JsValue::from_f64(0.0));
-                    c.forget();
-                }
-            }
+            .and_then(|f| f.dyn_into::<js_sys::Function>());
+        let scheduled = qmt
+            .and_then(|qmt| qmt.call1(&global, self.state_callback.as_ref()))
+            .is_ok();
+        if !scheduled
+            && js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+                .and_then(|f| f.dyn_into::<js_sys::Function>())
+                .and_then(|set_timeout| {
+                    set_timeout.call2(
+                        &global,
+                        self.state_callback.as_ref(),
+                        &JsValue::from_f64(0.0),
+                    )
+                })
+                .is_err()
+        {
+            self.pending_state_callbacks.borrow_mut().pop_back();
         }
     }
 
@@ -1000,7 +823,7 @@ impl WasmClient {
             state.set(ConnectionState::Disconnected);
             stop_ping_timer(&ping_timer);
             reject_pending_requests(&pending_requests, "disconnected");
-            reject_pending_pipe_creations(&pending_pipe_creations, "disconnected");
+            client_pipe::reject_pending_pipe_creations(&pending_pipe_creations, "disconnected");
         });
     }
 
@@ -1015,14 +838,18 @@ impl WasmClient {
         host_pk: &mtp_crypto::PublicKeyBundle,
         bound_id: u64,
         context: &str,
+        require_pq: bool,
+        client_has_pq_key: bool,
     ) -> Result<u128, JsValue> {
         let challenge_bytes = transport.read_one_frame().await?;
         let challenge = CommunicationValue::from_bytes(&challenge_bytes)
-            .map_err(|e| js_error(&format!("parse challenge: {}", e)))?;
-        let expected = CommunicationType::Challenge.to_id(tm);
+            .map_err(|e| js_error(format!("parse challenge: {}", e)))?;
+        let expected = CommunicationType::Challenge
+            .try_to_id(tm)
+            .ok_or_else(|| js_error("Challenge is absent from the type map"))?;
         if challenge.get_type() != expected {
             self.set_state(ConnectionState::Disconnected);
-            return Err(unexpected_response_type_error(
+            return Err(auth::unexpected_response_type_error(
                 context,
                 expected,
                 challenge.get_type(),
@@ -1039,7 +866,21 @@ impl WasmClient {
             }
         };
 
-        if let Err(e) = verify_host_challenge(&challenge, tm, host_pk, bound_id, server_challenge) {
+        if challenge.get_data(DataType::RequirePq) == &DataValue::BoolTrue && !client_has_pq_key {
+            self.set_state(ConnectionState::Disconnected);
+            return Err(js_error(
+                "host requires post-quantum authentication but the client PQ key is absent",
+            ));
+        }
+
+        if let Err(e) = auth::verify_host_challenge(
+            &challenge,
+            tm,
+            host_pk,
+            bound_id,
+            server_challenge,
+            require_pq,
+        ) {
             self.set_state(ConnectionState::Disconnected);
             return Err(e);
         }

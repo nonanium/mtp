@@ -1,9 +1,6 @@
 use base64::Engine;
-use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType};
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
-use time::{Duration, OffsetDateTime};
 
 pub fn load_or_generate_tls(
     cert_path: &str,
@@ -22,35 +19,13 @@ pub fn load_or_generate_tls(
         fs::create_dir_all(parent)?;
     }
 
-    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+    let (cert_pem, key_pem) = mtp::crypto::tls::generate_self_signed_cert("localhost")?;
 
-    let mut params = CertificateParams::new(vec!["localhost".into()])?;
-    params.not_before = OffsetDateTime::now_utc() - Duration::minutes(5);
-    params.not_after = OffsetDateTime::now_utc() + Duration::days(13);
-
-    params
-        .subject_alt_names
-        .push(SanType::IpAddress(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
-    params
-        .subject_alt_names
-        .push(SanType::IpAddress(IpAddr::V6(Ipv6Addr::new(
-            0, 0, 0, 0, 0, 0, 0, 1,
-        ))));
-
-    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    params.is_ca = IsCa::NoCa;
-
-    let cert = params.self_signed(&key_pair)?;
-
-    let cert_str = cert.pem();
-    let key_str = key_pair.serialize_pem();
-
-    fs::write(cert_path, cert_str.as_bytes())?;
-    fs::write(key_path, key_str.as_bytes())?;
+    fs::write(cert_path, &cert_pem)?;
+    fs::write(key_path, &key_pem)?;
     println!("Wrote {cert_path} and {key_path}");
 
-    Ok((cert_str.into_bytes(), key_str.into_bytes()))
+    Ok((cert_pem, key_pem))
 }
 
 pub fn certificate_sha256_hex(cert: &[u8]) -> Result<String, Box<dyn std::error::Error>> {

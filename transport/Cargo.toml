@@ -1,11 +1,11 @@
 [package]
 name = "mtp-transport"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-mtp-codec = { version = "0.1.0", path = "../codec" }
-mtp-common = { version = "0.1.0", path = "../common" }
+mtp-codec = { version = "0.2.0", path = "../codec" }
+mtp-common = { version = "0.2.0", path = "../common" }
 wtransport = { version = "0.7.1", default-features = false, features = [
     "aws-lc-rs",
     "quinn",
@@ -14,18 +14,25 @@ wtransport = { version = "0.7.1", default-features = false, features = [
 rustls = { version = "0.23.41" }
 tokio = { version = "1", features = ["full"] }
 rustls-native-certs = "0.8.4"
-log = "0.4"
 rcgen = "0.14"
 tracing = "0.1"
+async-trait = "0.1"
+sha2 = "0.11"
 
 [dev-dependencies]
 
 [[test]]
 name = "integration"
-required-features = ["host"]
+required-features = ["host", "insecure-tls"]
 
 [features]
 # Enables hosting a MTP server
 host = []
 
 pipes = ["mtp-codec/pipes"]
+
+# Compiles the insecure certificate verifier (NoopCertVerifier).
+# Even with this feature enabled, the verifier requires the environment
+# variable MTP_INSECURE_TLS=1 at runtime. Intended for local development
+# only; never enable in release builds.
+insecure-tls = []

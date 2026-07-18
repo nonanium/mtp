@@ -6,6 +6,7 @@ import initWasm, {
   keyring_generate,
 } from "mtp/raw";
 import * as bindings from "mtp/raw";
+import { utf8Encode } from "./utils.js";
 import type * as RawBindings from "../raw/index";
 import type { MTPCommunicationType } from "../type-map/index";
 import type { MTPSessionStorage, MTPSessionState } from "./session";
@@ -264,6 +265,7 @@ export interface MTPClientOptions {
   serverCertificateHashes?: string[];
   maxMessageSize?: number;
   authTimeoutMs?: number;
+  requestTimeoutMs?: number;
   pings?: boolean | { intervalMs?: number };
   wasm?:
     | RawBindings.InitInput
@@ -286,6 +288,7 @@ export interface MTPSendOptions {
 
 export interface MTPRequestOptions extends MTPSendOptions {
   responseType?: MTPCommunicationType;
+  timeoutMs?: number;
 }
 
 export interface MTPPipeWriter {
@@ -328,13 +331,21 @@ type NormalizedMTPClientOptions = Omit<MTPClientOptions, "hostPublicKey"> & {
 const DEFAULT_CREDENTIALS_KEY = "mtp:credentials";
 let wasmInitPromise: Promise<Awaited<ReturnType<typeof initWasm>>> | undefined;
 
-function emit(logger, event) {
+function createMessageId(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+function emit(logger: MTPClientOptions["logger"] | undefined, event: MTPLogEvent): void {
   if (typeof logger === "function") {
     logger(event);
   }
 }
 
-function isErrorType(type) {
+function isErrorType(type: string): boolean {
   return (
     type === "Error" ||
     type.startsWith("Error") ||
@@ -352,7 +363,7 @@ function isErrorType(type) {
   );
 }
 
-function errorMessage(frame) {
+function errorMessage(frame: Pick<ParsedFrame, "type" | "data"> | null | undefined): string {
   const data = frame?.data ?? {};
   return String(
     data.ErrorMessage ??
@@ -362,27 +373,27 @@ function errorMessage(frame) {
   );
 }
 
-async function storageGet(storage, key) {
+async function storageGet(storage: MTPCredentialStorage | undefined, key: string): Promise<StorageValue> {
   return storage ? await storage.getItem(key) : null;
 }
 
-async function storageSet(storage, key, value) {
+async function storageSet(storage: MTPCredentialStorage | undefined, key: string, value: string): Promise<void> {
   if (storage) {
     await storage.setItem(key, value);
   }
 }
 
-async function storageRemove(storage, key) {
+async function storageRemove(storage: MTPCredentialStorage | undefined, key: string): Promise<void> {
   if (storage) {
     await storage.removeItem(key);
   }
 }
 
-function isBytes(value) {
+function isBytes(value: unknown): value is MTPBytesInput {
   return value instanceof Uint8Array || Array.isArray(value);
 }
 
-function bytesFrom(value, name) {
+function bytesFrom(value: MTPBytesInput, name: string): Uint8Array {
   if (value instanceof Uint8Array) {
     return value;
   }
@@ -392,7 +403,7 @@ function bytesFrom(value, name) {
   throw new TypeError(`${name} must be a Uint8Array or number[]`);
 }
 
-function bytesFromString(value, name) {
+function bytesFromString(value: string, name: string): Uint8Array {
   const trimmed = value.trim();
   if (!trimmed) {
     throw new TypeError(`${name} must not be empty`);
@@ -428,7 +439,7 @@ function bytesFromString(value, name) {
 
 const HEX_DIGITS = "0123456789abcdef";
 
-function bytesToHex(bytes) {
+function bytesToHex(bytes: Uint8Array): string {
   let out = "";
   for (let i = 0; i < bytes.length; i += 1) {
     out += HEX_DIGITS[(bytes[i] >> 4) & 0xf] + HEX_DIGITS[bytes[i] & 0xf];
@@ -436,7 +447,7 @@ function bytesToHex(bytes) {
   return out;
 }
 
-export function bytesToBase64(bytes) {
+export function bytesToBase64(bytes: Uint8Array): string {
   if (typeof btoa === "function") {
     let binary = "";
     for (let i = 0; i < bytes.length; i += 1) {
@@ -450,7 +461,7 @@ export function bytesToBase64(bytes) {
   throw new TypeError("base64 encoding is not available in this environment");
 }
 
-export function base64ToBytes(input) {
+export function base64ToBytes(input: string): Uint8Array {
   if (typeof atob === "function") {
     const binary = atob(input);
     const bytes = new Uint8Array(binary.length);
@@ -465,38 +476,7 @@ export function base64ToBytes(input) {
   throw new TypeError("base64 decoding is not available in this environment");
 }
 
-function utf8Encode(text) {
-  if (typeof TextEncoder !== "undefined") {
-    return new TextEncoder().encode(text);
-  }
-  if (typeof Buffer !== "undefined") {
-    return new Uint8Array(Buffer.from(text, "utf-8"));
-  }
-  const bytes = new Uint8Array(text.length * 4);
-  let len = 0;
-  for (let i = 0; i < text.length; i += 1) {
-    const code = text.codePointAt(i);
-    if (code < 0x80) {
-      bytes[len++] = code;
-    } else if (code < 0x800) {
-      bytes[len++] = 0xc0 | (code >> 6);
-      bytes[len++] = 0x80 | (code & 0x3f);
-    } else if (code < 0x10000) {
-      bytes[len++] = 0xe0 | (code >> 12);
-      bytes[len++] = 0x80 | ((code >> 6) & 0x3f);
-      bytes[len++] = 0x80 | (code & 0x3f);
-    } else {
-      bytes[len++] = 0xf0 | (code >> 18);
-      bytes[len++] = 0x80 | ((code >> 12) & 0x3f);
-      bytes[len++] = 0x80 | ((code >> 6) & 0x3f);
-      bytes[len++] = 0x80 | (code & 0x3f);
-      i += 1;
-    }
-  }
-  return bytes.subarray(0, len);
-}
-
-function utf8Decode(bytes) {
+function utf8Decode(bytes: Uint8Array): string {
   if (typeof TextDecoder !== "undefined") {
     return new TextDecoder().decode(bytes);
   }
@@ -537,7 +517,7 @@ function utf8Decode(bytes) {
 
 const SYMMETRIC_KEY_SALT = utf8Encode("mtp-symmetric-key");
 
-export function secretKeyFromString(secret) {
+export function secretKeyFromString(secret: string): Uint8Array {
   if (typeof secret !== "string" || !secret.trim()) {
     throw new TypeError("secret must be a non-empty string");
   }
@@ -571,14 +551,14 @@ export function secretKeyFromString(secret) {
   );
 }
 
-function normalizeBytes(value, name) {
+function normalizeBytes(value: string | MTPBytesInput, name: string): Uint8Array {
   if (typeof value === "string") {
     return bytesFromString(value, name);
   }
   return bytesFrom(value, name);
 }
 
-function normalizeCredentials(value) {
+function normalizeCredentials(value: MTPCredentials | string | null): MTPCredentials | null {
   if (!value) {
     return null;
   }
@@ -590,7 +570,7 @@ function normalizeCredentials(value) {
   return value;
 }
 
-function toBigInt(value) {
+function toBigInt(value: bigint | string | number | null | undefined): bigint | null {
   if (value == null || value === "") {
     return null;
   }
@@ -601,7 +581,7 @@ function generateKeyringBytes() {
   return keyring_generate();
 }
 
-export function keyringToKeys(keyring) {
+export function keyringToKeys(keyring: string | MTPBytesInput): MTPKeyringKeys {
   const bytes =
     typeof keyring === "string"
       ? bytesFromString(keyring, "keyring")
@@ -630,7 +610,7 @@ export function keyringToKeys(keyring) {
   };
 }
 
-export function publicKeyBundleToKeys(publicKeyBundle) {
+export function publicKeyBundleToKeys(publicKeyBundle: string | MTPBytesInput): MTPPublicKeyBundleKeys {
   const bytes =
     typeof publicKeyBundle === "string"
       ? bytesFromString(publicKeyBundle, "publicKeyBundle")
@@ -740,6 +720,13 @@ function validateOptions(options) {
     (!Number.isSafeInteger(options.authTimeoutMs) || options.authTimeoutMs <= 0)
   ) {
     throw new TypeError("authTimeoutMs must be a positive safe integer");
+  }
+  if (
+    options.requestTimeoutMs != null &&
+    (!Number.isSafeInteger(options.requestTimeoutMs) ||
+      options.requestTimeoutMs <= 0)
+  ) {
+    throw new TypeError("requestTimeoutMs must be a positive safe integer");
   }
 }
 
@@ -1093,6 +1080,10 @@ export class MTPClient {
     data?: Record<string, unknown>,
     options: MTPRequestOptions = {},
   ): Promise<ParsedFrame> {
+    const timeoutMs = options.timeoutMs ?? this.#options.requestTimeoutMs ?? 30_000;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+      throw new TypeError("request timeoutMs must be a positive safe integer");
+    }
     const frame = this.#buildFrame(typeOrFrame, data, options);
     try {
       const parsed = this.raw.bindings.parse_frame(frame);
@@ -1121,7 +1112,11 @@ export class MTPClient {
         direction: "send",
       });
     }
-    return await this.raw.client.request(frame, options.responseType ?? null);
+    return await withTimeout(
+      this.raw.client.request(frame, options.responseType ?? null, timeoutMs),
+      timeoutMs,
+      `request timed out after ${timeoutMs}ms`,
+    );
   }
 
   subscribe(
@@ -1245,7 +1240,7 @@ export class MTPClient {
 
     await this.sessionManager.saveSession(newSession);
 
-    const messageId = String(Date.now());
+    const messageId = createMessageId();
     const createdAt = Date.now();
     const senderUserId = (options as { senderUserId?: string }).senderUserId;
     const frame = this.raw.bindings.build_frame(
@@ -1346,10 +1341,7 @@ export class MTPClient {
     const sub = this.raw.client.subscribe(
       "EncryptedMessage",
       async (frame: ParsedFrame) => {
-        const raw =
-          frame.data?.["encryptedPayload"] ??
-          frame.data?.["EncryptedPayload"] ??
-          frame.data?.["encrypted_payload"];
+        const raw = frame.data?.["EncryptedPayload"];
         if (!raw) return;
 
         let payloadBytes: Uint8Array;
@@ -1457,10 +1449,7 @@ export class MTPClient {
   async decryptEncryptedRecord(
     frameData: Record<string, unknown>,
   ): Promise<ParsedFrame> {
-    const raw =
-      frameData["encryptedPayload"] ??
-      frameData["EncryptedPayload"] ??
-      frameData["encrypted_payload"];
+    const raw = frameData["EncryptedPayload"];
     if (!raw) throw new Error("EncryptedPayload is required");
 
     const payloadBytes =

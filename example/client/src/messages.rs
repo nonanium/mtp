@@ -13,33 +13,33 @@ pub fn build_demo_message(
     let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)?;
 
     let tm = TypeMap::latest();
+    let version_id = DataType::Version
+        .try_to_id(&tm)
+        .ok_or_else(|| std::io::Error::other("Version is absent from the type map"))?;
+    let id_id = DataType::Id
+        .try_to_id(&tm)
+        .ok_or_else(|| std::io::Error::other("Id is absent from the type map"))?;
 
     let inner_enc = DataValue::Container(vec![
-        (
-            DataType::Version.to_id(&tm),
-            DataValue::Str("secret inner data".into()),
-        ),
-        (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(42)),
+        (version_id, DataValue::Str("secret inner data".into())),
+        (id_id, DataValue::UnsignedNumber(42)),
     ]);
     let mut dv_enc = inner_enc;
     dv_enc.encrypt_container(enc_type, server_bundle, b"demo-aad");
 
     let inner_sig = DataValue::Container(vec![
-        (
-            DataType::Version.to_id(&tm),
-            DataValue::Str("signed by client".into()),
-        ),
-        (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(99)),
+        (version_id, DataValue::Str("signed by client".into())),
+        (id_id, DataValue::UnsignedNumber(99)),
     ]);
     let mut dv_sig = inner_sig;
     dv_sig.sign_container(SigAlgorithm::ED25519, &signer);
 
     let inner_sec = DataValue::Container(vec![
         (
-            DataType::Version.to_id(&tm),
+            version_id,
             DataValue::Str("signed+encrypted payload".into()),
         ),
-        (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(7)),
+        (id_id, DataValue::UnsignedNumber(7)),
     ]);
     let mut dv_sec = inner_sec;
     dv_sec.sign_and_encrypt_container(
@@ -65,7 +65,7 @@ pub fn build_demo_message(
         )
         .add_typed_default(DataType::Data, DataValue::Str("Hello, MTP!".into()))
         .add_typed_default(DataType::Flags, DataValue::BoolTrue)
-        .add_typed_default(DataType::Value, DataValue::Float(2, 12345))
+        .add_typed_default(DataType::Value, DataValue::Float(1_234_500.0))
         .add_typed_default(
             DataType::BinaryData,
             DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42]),

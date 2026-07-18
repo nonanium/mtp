@@ -4,6 +4,12 @@ import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import YAML from "yaml";
+import {
+  FIRST_USER_TYPE_ID,
+  RESERVED_COMMUNICATION_TYPES,
+  RESERVED_DATA_TYPES,
+} from "../type-map/reserved.js";
 
 export interface MTPVitePluginOptions {
   typeMaps: string;
@@ -17,6 +23,7 @@ export interface VitePlugin {
   config?: (...args: any[]) => unknown;
   buildStart?: (...args: any[]) => unknown;
   configureServer?: (...args: any[]) => unknown;
+  addWatchFile?: (file: string) => void;
 }
 
 const packageRoot = process.env.MTP_PACKAGE_ROOT
@@ -26,51 +33,11 @@ const rawEntryName = "mtp_wasm.js";
 const wasmEntryName = "mtp_wasm_bg.wasm";
 const typeMapEntryName = "mtp_type_map.js";
 
-const reservedCommunicationTypes = [
-  "Identification",
-  "IdentificationResponse",
-  "Register",
-  "RegisterResponse",
-  "Challenge",
-  "ChallengeResponse",
-  "Ping",
-  "Pong",
-  "Disconnect",
-  "Redirect",
-  "Shutdown",
-  "Error",
-  "ErrorParsing",
-  "ErrorBadVersion",
-  "BadRequest",
-  "Unauthorized",
-  "Forbidden",
-  "NotFound",
-  "TooManyRequests",
-  "InternalServerError",
-  "BadGateway",
-  "ServiceUnavailable",
-  "GatewayTimeout",
-];
-
-const reservedDataTypes = [
-  "Version",
-  "Id",
-  "ClientNonce",
-  "ServerNonce",
-  "PublicKeys",
-  "Signature",
-  "PqSignature",
-  "Description",
-  "Connected",
-  "Timestamp",
-  "Error",
-  "ErrorParsing",
-  "ErrorMessage",
-];
-
 function normalizeOptions(options) {
   if (!options?.typeMaps) {
-    throw new Error("mtp/vite requires a typeMaps option, for example mtp({ typeMaps: './type-maps.yaml' })");
+    throw new Error(
+      "mtp/vite requires a typeMaps option, for example mtp({ typeMaps: './type-maps.yaml' })",
+    );
   }
 
   return options;
@@ -136,62 +103,69 @@ async function hashPackageInputs() {
   return hash.digest("hex");
 }
 
-function quoteList(values) {
+function quoteList(values: string[]): string {
   return values.length === 0
     ? "never"
     : values.map((value) => JSON.stringify(value)).join(" | ");
 }
 
-function parseTypeMapYaml(source, filePath) {
-  const communicationTypes = new Set(reservedCommunicationTypes);
-  const dataTypes = new Set(reservedDataTypes);
-  let section = null;
-  let sectionIndent = -1;
-
-  for (const [index, originalLine] of source.split(/\r?\n/).entries()) {
-    const withoutComment = originalLine.replace(/\s+#.*$/, "");
-    if (!withoutComment.trim()) {
-      continue;
-    }
-    if (/^\t/.test(withoutComment)) {
-      throw new Error(`${filePath}:${index + 1}: tabs are not supported in type-maps.yaml indentation`);
-    }
-
-    const indent = withoutComment.match(/^ */)?.[0].length ?? 0;
-    const trimmed = withoutComment.trim();
-    const sectionMatch = trimmed.match(/^(CommunicationTypes|DataTypes):\s*$/);
-    if (sectionMatch) {
-      section = sectionMatch[1];
-      sectionIndent = indent;
-      continue;
-    }
-
-    if (section && indent <= sectionIndent) {
-      section = null;
-    }
-    if (!section) {
-      continue;
-    }
-
-    const entryMatch = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*):\s*\d+\s*$/);
-    if (!entryMatch) {
-      throw new Error(`${filePath}:${index + 1}: expected '${section}' entries as 'Name: numeric_id'`);
-    }
-
-    if (section === "CommunicationTypes") {
-      communicationTypes.add(entryMatch[1]);
-    } else {
-      dataTypes.add(entryMatch[1]);
+function parseTypeMapYaml(source: string, filePath: string) {
+  const document = YAML.parseDocument(source, { prettyErrors: false });
+  if (document.errors.length) {
+    const error = document.errors[0];
+    const line =
+      error.pos?.[0] === undefined
+        ? 1
+        : source.slice(0, error.pos[0]).split("\n").length;
+    throw new Error(`${filePath}:${line}: ${error.message}`);
+  }
+  const root = document.toJS() as {
+    type_maps?: Record<
+      string,
+      {
+        CommunicationTypes?: Record<string, unknown>;
+        DataTypes?: Record<string, unknown>;
+      }
+    >;
+  };
+  const communicationTypes = new Set<string>(RESERVED_COMMUNICATION_TYPES);
+  const dataTypes = new Set<string>(RESERVED_DATA_TYPES);
+  for (const [version, map] of Object.entries(root.type_maps ?? {})) {
+    if (!/^\d+\.\d+$/.test(version))
+      throw new Error(`${filePath}: unparseable type-map version '${version}'`);
+    for (const [section, target] of [
+      ["CommunicationTypes", communicationTypes],
+      ["DataTypes", dataTypes],
+    ] as const) {
+      const ids = new Map<number, string>();
+      for (const [name, value] of Object.entries(
+        map[section as "CommunicationTypes" | "DataTypes"] ?? {},
+      )) {
+        if (!Number.isInteger(value) || (value as number) < FIRST_USER_TYPE_ID)
+          throw new Error(
+            `${filePath}: ${version}.${section}.${name} must use an integer id >= ${FIRST_USER_TYPE_ID}`,
+          );
+        const id = value as number;
+        const previous = ids.get(id);
+        if (previous && previous !== name)
+          throw new Error(
+            `${filePath}: duplicate type id ${id} in ${section} (${previous} and ${name})`,
+          );
+        ids.set(id, name);
+        target.add(name);
+      }
     }
   }
-
   return {
     communicationTypes: [...communicationTypes].sort(),
     dataTypes: [...dataTypes].sort(),
   };
 }
 
-function generateTypeMapModule(metadata) {
+function generateTypeMapModule(metadata: {
+  communicationTypes: string[];
+  dataTypes: string[];
+}) {
   const js = `export const communicationTypes = ${JSON.stringify(metadata.communicationTypes, null, 2)};\nexport const dataTypes = ${JSON.stringify(metadata.dataTypes, null, 2)};\n`;
   const dts = `export type MTPCommunicationType = ${quoteList(metadata.communicationTypes)};\nexport type MTPDataType = ${quoteList(metadata.dataTypes)};\nexport declare const communicationTypes: readonly MTPCommunicationType[];\nexport declare const dataTypes: readonly MTPDataType[];\n`;
   return { js, dts };
@@ -199,7 +173,9 @@ function generateTypeMapModule(metadata) {
 
 async function writeTypeMapModule(outDir, typeMapsPath) {
   const source = await fs.readFile(typeMapsPath, "utf8").catch((error) => {
-    throw new Error(`Failed to read type map '${typeMapsPath}': ${error.message}`);
+    throw new Error(
+      `Failed to read type map '${typeMapsPath}': ${error.message}`,
+    );
   });
   const metadata = parseTypeMapYaml(source, typeMapsPath);
   const module = generateTypeMapModule(metadata);
@@ -222,7 +198,7 @@ async function copyWasmBuildInputs(buildRoot) {
 
   for (const input of inputs) {
     const source = path.join(packageRoot, input);
-    if (!await pathExists(source)) {
+    if (!(await pathExists(source))) {
       continue;
     }
 
@@ -255,7 +231,9 @@ async function runWasmPack({ outDir, typeMapsPath, release, wasmPackArgs }) {
         env: {
           ...process.env,
           MTP_TYPE_MAPS: typeMapsPath,
-          RUSTFLAGS: [process.env.RUSTFLAGS, "--cfg web_sys_unstable_apis"].filter(Boolean).join(" "),
+          RUSTFLAGS: [process.env.RUSTFLAGS, "--cfg web_sys_unstable_apis"]
+            .filter(Boolean)
+            .join(" "),
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -270,7 +248,11 @@ async function runWasmPack({ outDir, typeMapsPath, release, wasmPackArgs }) {
       });
       child.on("error", (error) => {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          reject(new Error("Failed to run wasm-pack. Install wasm-pack or enter the project Nix dev shell, then retry."));
+          reject(
+            new Error(
+              "Failed to run wasm-pack. Install wasm-pack or enter the project Nix dev shell, then retry.",
+            ),
+          );
         } else {
           reject(error);
         }
@@ -279,7 +261,11 @@ async function runWasmPack({ outDir, typeMapsPath, release, wasmPackArgs }) {
         if (code === 0) {
           resolve();
         } else {
-          reject(new Error(`wasm-pack failed with exit code ${code}.\n${stdout}${stderr}`.trim()));
+          reject(
+            new Error(
+              `wasm-pack failed with exit code ${code}.\n${stdout}${stderr}`.trim(),
+            ),
+          );
         }
       });
     });
@@ -294,37 +280,60 @@ async function buildIfNeeded(state, force = false) {
   }
 
   state.buildPromise = (async () => {
-    const typeMapSource = await writeTypeMapModule(state.outDir, state.typeMapsPath);
+    const typeMapSource = await writeTypeMapModule(
+      state.outDir,
+      state.typeMapsPath,
+    );
     const packageInputs = await hashPackageInputs();
     const fingerprint = crypto
       .createHash("sha256")
-      .update(JSON.stringify({
-        packageRoot,
-        packageInputs,
-        typeMapsPath: state.typeMapsPath,
-        typeMapSource,
-        release: state.release,
-        wasmPackArgs: state.wasmPackArgs,
-      }))
+      .update(
+        JSON.stringify({
+          packageRoot,
+          packageInputs,
+          typeMapsPath: state.typeMapsPath,
+          typeMapSource,
+          release: state.release,
+          wasmPackArgs: state.wasmPackArgs,
+        }),
+      )
       .digest("hex");
     const stampPath = path.join(state.outDir, ".mtp-build.json");
     const rawEntryPath = path.join(state.outDir, rawEntryName);
     const wasmPath = path.join(state.outDir, wasmEntryName);
     let previousFingerprint = null;
     try {
-      previousFingerprint = JSON.parse(await fs.readFile(stampPath, "utf8")).fingerprint;
+      previousFingerprint = JSON.parse(
+        await fs.readFile(stampPath, "utf8"),
+      ).fingerprint;
     } catch {
       previousFingerprint = null;
     }
 
-    if (!force && previousFingerprint === fingerprint && await pathExists(rawEntryPath) && await pathExists(wasmPath)) {
+    if (
+      !force &&
+      previousFingerprint === fingerprint &&
+      (await pathExists(rawEntryPath)) &&
+      (await pathExists(wasmPath))
+    ) {
       return;
     }
 
-    console.info("\x1b[1m\x1b[35mmtp\x1b[0m compiling wasm... (this could take a minute)");
+    console.info(
+      "\x1b[1m\x1b[35mmtp\x1b[0m compiling wasm... (this could take a minute)",
+    );
     await runWasmPack(state);
-    console.log("\x1b[1m\x1b[35mmtp\x1b[0m \x1b[32mcompilation finished.\x1b[0m");
-    await fs.writeFile(stampPath, JSON.stringify({ fingerprint, builtAt: new Date().toISOString() }, null, 2));
+    console.log(
+      "\x1b[1m\x1b[35mmtp\x1b[0m \x1b[32mcompilation finished.\x1b[0m",
+    );
+    await fs.writeFile(
+      stampPath,
+      JSON.stringify(
+        { fingerprint, builtAt: new Date().toISOString() },
+        null,
+        2,
+      ),
+    );
   })().finally(() => {
     state.buildPromise = null;
   });
@@ -334,7 +343,7 @@ async function buildIfNeeded(state, force = false) {
 
 export function mtp(options: MTPVitePluginOptions): VitePlugin {
   const normalized = normalizeOptions(options);
-  const state = {
+  const state: any = {
     outDir: null,
     typeMapsPath: null,
     release: true,
@@ -347,11 +356,16 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
     async config(config, env) {
       const root = path.resolve(config.root ?? process.cwd());
       state.typeMapsPath = path.resolve(root, normalized.typeMaps);
-      state.outDir = path.resolve(root, normalized.outDir ?? path.join("node_modules", ".vite", "mtp"));
+      state.outDir = path.resolve(
+        root,
+        normalized.outDir ?? path.join("node_modules", ".vite", "mtp"),
+      );
       state.release = normalized.release ?? env.command === "build";
 
-      if (!await pathExists(state.typeMapsPath)) {
-        throw new Error(`mtp/vite could not find typeMaps file: ${state.typeMapsPath}`);
+      if (!(await pathExists(state.typeMapsPath))) {
+        throw new Error(
+          `mtp/vite could not find typeMaps file: ${state.typeMapsPath}`,
+        );
       }
 
       await buildIfNeeded(state);
@@ -367,21 +381,27 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
       };
     },
     buildStart() {
-      this.addWatchFile(state.typeMapsPath);
+      (this as any).addWatchFile(state.typeMapsPath);
     },
     async configureServer(server) {
       const wasmPath = path.join(state.outDir, wasmEntryName);
       const wasmUrl = devServerPath(server.config.root, wasmPath);
       if (wasmUrl) {
         server.middlewares.use(async (req, res, next) => {
-          if (!req.url || new URL(req.url, "http://localhost").pathname !== wasmUrl) {
+          if (
+            !req.url ||
+            new URL(req.url, "http://localhost").pathname !== wasmUrl
+          ) {
             next();
             return;
           }
 
           try {
             res.setHeader("Content-Type", "application/wasm");
-            res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+            res.setHeader(
+              "Cache-Control",
+              "no-cache, no-store, must-revalidate",
+            );
             res.end(await fs.readFile(wasmPath));
           } catch (error) {
             next(error);
@@ -408,7 +428,9 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
       const scheduleRebuild = (changedPath: string) => {
         const resolved = path.resolve(changedPath);
         const isTypeMap = resolved === state.typeMapsPath;
-        const isSource = sourceWatchDirs.some((dir) => resolved.startsWith(`${dir}${path.sep}`));
+        const isSource = sourceWatchDirs.some((dir) =>
+          resolved.startsWith(`${dir}${path.sep}`),
+        );
         if (!isTypeMap && !isSource) {
           return;
         }
@@ -423,9 +445,13 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
             try {
               await buildIfNeeded(state, true);
               server.moduleGraph.invalidateAll();
-              server.ws.send({ type: "full-reload" });
+              if (server.ws) {
+                server.ws.send({ type: "full-reload" });
+              }
             } catch (error) {
-              server.config.logger.error(error instanceof Error ? error.message : String(error));
+              server.config.logger.error(
+                error instanceof Error ? error.message : String(error),
+              );
             }
           })();
         }, 200);

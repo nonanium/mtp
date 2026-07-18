@@ -6,10 +6,14 @@ use std::io::{Cursor, Read};
 use crate::data_value::{DataKind, DataValue};
 use crate::rand_u32;
 use mtp_common::CodecError;
+#[cfg(all(test, feature = "registry"))]
+use mtp_type_map::Version;
 use mtp_type_map::{
     CommunicationType, CommunicationTypeId, DataType, DataTypeId, PROTOCOL_VERSION, TypeMap,
-    communication_type_name, data_type_name,
 };
+
+/// Largest sender or receiver identifier representable by the six-byte wire fields.
+pub const MAX_WIRE_ID: u64 = (1 << 48) - 1;
 
 #[cfg(feature = "crypto")]
 use mtp_crypto::{PublicKeyBundle, SigAlgorithm, SignatureScheme};
@@ -19,6 +23,28 @@ const FLAG_HAS_RECEIVER: u8 = 0b0000_0010;
 const FLAG_HAS_ID: u8 = 0b0000_0100;
 const FLAG_ENCRYPTED: u8 = 0b0000_1000;
 const FLAG_SIGNED: u8 = 0b0001_0000;
+const FLAG_SIGNED_ENCRYPTED: u8 = 0b0010_0000;
+
+/// An opaque, frame-level encrypted payload.
+///
+/// This is separate from [`DataValue`] because encrypted frame bytes are not a
+/// typed data map until they have been decrypted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "crypto")]
+pub enum EncryptedPayload {
+    Plain(Vec<u8>),
+    Signed(Vec<u8>),
+}
+
+#[cfg(feature = "crypto")]
+impl EncryptedPayload {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Plain(bytes) | Self::Signed(bytes) => bytes,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunicationValue {
@@ -27,7 +53,10 @@ pub struct CommunicationValue {
     sender: u64,
     receiver: u64,
     data: BTreeMap<DataTypeId, DataValue>,
+    #[cfg(feature = "crypto")]
+    encrypted_payload: Option<EncryptedPayload>,
     type_map: Option<TypeMap>,
+    mapping_error: Option<CodecError>,
     #[cfg(feature = "crypto")]
     frame_signature: Option<(u8, Vec<u8>)>,
 }
@@ -36,14 +65,19 @@ impl CommunicationValue {
     #[must_use]
     pub fn new(comm_type: CommunicationType) -> Self {
         let tm = TypeMap::new(PROTOCOL_VERSION);
-        let id = comm_type.to_id(&tm);
+        let id = comm_type.try_to_id(&tm);
         Self {
             id: rand_u32(),
-            comm_type: id,
+            comm_type: id.unwrap_or(CommunicationTypeId(0)),
             sender: 0,
             receiver: 0,
             data: BTreeMap::new(),
+            #[cfg(feature = "crypto")]
+            encrypted_payload: None,
             type_map: Some(tm),
+            mapping_error: id
+                .is_none()
+                .then(|| CodecError::UnknownCommunicationType(comm_type.name().to_string())),
             #[cfg(feature = "crypto")]
             frame_signature: None,
         }
@@ -52,14 +86,19 @@ impl CommunicationValue {
     #[cfg(feature = "registry")]
     #[must_use]
     pub fn from_comm(comm_type: CommunicationType, tm: &TypeMap) -> Self {
-        let id = comm_type.to_id(tm);
+        let id = comm_type.try_to_id(tm);
         Self {
             id: rand_u32(),
-            comm_type: id,
+            comm_type: id.unwrap_or(CommunicationTypeId(0)),
             sender: 0,
             receiver: 0,
             data: BTreeMap::new(),
+            #[cfg(feature = "crypto")]
+            encrypted_payload: None,
             type_map: Some(tm.clone()),
+            mapping_error: id
+                .is_none()
+                .then(|| CodecError::UnknownCommunicationType(comm_type.name().to_string())),
             #[cfg(feature = "crypto")]
             frame_signature: None,
         }
@@ -99,8 +138,22 @@ impl CommunicationValue {
         self.comm_type
     }
 
+    /// Returns the protocol type map attached to this frame.
+    pub fn type_map(&self) -> Option<&TypeMap> {
+        self.type_map.as_ref()
+    }
+
+    /// Binds the frame's numeric type identifiers to a protocol version.
+    pub fn set_type_map(&mut self, tm: &TypeMap) {
+        self.type_map = Some(tm.clone());
+    }
+
     #[must_use]
     pub fn add_data(mut self, data: DataTypeId, value: DataValue) -> Self {
+        #[cfg(feature = "crypto")]
+        {
+            self.encrypted_payload = None;
+        }
         self.data.insert(data, value);
         self
     }
@@ -108,14 +161,30 @@ impl CommunicationValue {
     #[cfg(feature = "registry")]
     #[must_use]
     pub fn add_typed(mut self, data: DataType, tm: &TypeMap, value: DataValue) -> Self {
-        self.data.insert(data.to_id(tm), value);
+        #[cfg(feature = "crypto")]
+        {
+            self.encrypted_payload = None;
+        }
+        if let Some(id) = data.try_to_id(tm) {
+            self.data.insert(id, value);
+        } else if self.mapping_error.is_none() {
+            self.mapping_error = Some(CodecError::UnknownDataType(data.name().to_string()));
+        }
         self
     }
 
     #[must_use]
     pub fn add_typed_default(mut self, data: DataType, value: DataValue) -> Self {
+        #[cfg(feature = "crypto")]
+        {
+            self.encrypted_payload = None;
+        }
         let tm = self.type_map.clone().unwrap_or_else(TypeMap::latest);
-        self.data.insert(data.to_id(&tm), value);
+        if let Some(id) = data.try_to_id(&tm) {
+            self.data.insert(id, value);
+        } else if self.mapping_error.is_none() {
+            self.mapping_error = Some(CodecError::UnknownDataType(data.name().to_string()));
+        }
         self
     }
 
@@ -170,7 +239,51 @@ impl CommunicationValue {
         &self.data
     }
 
+    /// Returns the number of cleartext data entries.
+    ///
+    /// An encrypted frame has no cleartext entries until
+    /// [`Self::set_decrypted_container`] is called.
     pub fn data_len(&self) -> usize {
+        self.data.len()
+    }
+
+    #[cfg(feature = "crypto")]
+    #[must_use]
+    pub fn with_encrypted_payload(mut self, payload: EncryptedPayload) -> Self {
+        self.data.clear();
+        self.encrypted_payload = Some(payload);
+        self
+    }
+
+    #[cfg(feature = "crypto")]
+    #[must_use]
+    pub fn encrypted_payload(&self) -> Option<&EncryptedPayload> {
+        self.encrypted_payload.as_ref()
+    }
+
+    #[cfg(feature = "crypto")]
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.encrypted_payload.is_some()
+    }
+
+    /// Replaces an opaque encrypted payload with its decrypted typed entries.
+    #[cfg(feature = "crypto")]
+    pub fn set_decrypted_container(
+        &mut self,
+        entries: impl IntoIterator<Item = (DataTypeId, DataValue)>,
+    ) {
+        self.data = entries.into_iter().collect();
+        self.encrypted_payload = None;
+    }
+
+    /// Returns the number of logical payload items available in the frame.
+    #[must_use]
+    pub fn payload_len(&self) -> usize {
+        #[cfg(feature = "crypto")]
+        if self.encrypted_payload.is_some() {
+            return 1;
+        }
         self.data.len()
     }
 
@@ -181,15 +294,23 @@ impl CommunicationValue {
     }
 
     pub fn get_type_name(&self) -> Option<&'static str> {
-        communication_type_name(self.comm_type.0)
+        self.type_map
+            .as_ref()
+            .and_then(|tm| tm.communication_type_name(self.comm_type.0))
     }
 
     // ── mutation ─────────────────────────────────────────────────────────────
 
     pub fn set_data(&mut self, data_type: DataType, value: DataValue) {
         let tm = self.type_map.clone().unwrap_or_else(TypeMap::latest);
-        if let Some(raw_id) = tm.data_id_enum(data_type) {
-            self.data.insert(DataTypeId(raw_id), value);
+        if let Some(id) = data_type.try_to_id(&tm) {
+            #[cfg(feature = "crypto")]
+            {
+                self.encrypted_payload = None;
+            }
+            self.data.insert(id, value);
+        } else if self.mapping_error.is_none() {
+            self.mapping_error = Some(CodecError::UnknownDataType(data_type.name().to_string()));
         }
     }
 
@@ -220,6 +341,13 @@ impl CommunicationValue {
     }
 
     pub fn merge(&mut self, other: &CommunicationValue) {
+        if self.mapping_error.is_none() {
+            self.mapping_error.clone_from(&other.mapping_error);
+        }
+        #[cfg(feature = "crypto")]
+        if !other.data.is_empty() {
+            self.encrypted_payload = None;
+        }
         for (id, value) in &other.data {
             self.data.insert(*id, value.clone());
         }
@@ -252,7 +380,7 @@ impl CommunicationValue {
         self.get_data_opt(data_type)?.as_signed_number()
     }
 
-    pub fn get_float(&self, data_type: DataType) -> Option<(u8, u32)> {
+    pub fn get_float(&self, data_type: DataType) -> Option<f64> {
         self.get_data_opt(data_type)?.as_float()
     }
 
@@ -284,6 +412,7 @@ impl CommunicationValue {
      * bit2 => has id
      * bit3 => is data encrypted If so data bytes will be an encrypted container
      * bit4 => is communication value signed
+     * bit5 => encrypted payload contains a signed container
      */
     /*
      * Build the canonical metadata header and data payload shared by both
@@ -302,20 +431,24 @@ impl CommunicationValue {
         &self,
         force_signed: bool,
     ) -> Result<(Vec<u8>, Vec<u8>), CodecError> {
+        if let Some(error) = &self.mapping_error {
+            return Err(error.clone());
+        }
+        if self.sender > MAX_WIRE_ID || self.receiver > MAX_WIRE_ID {
+            return Err(CodecError::InvalidEncoding);
+        }
         let has_sender = self.sender != 0;
         let has_receiver = self.receiver != 0;
         let has_id = self.id != 0;
 
         #[cfg(feature = "crypto")]
-        let is_encrypted = self.data.len() == 1
-            && self.data.values().any(|v| {
-                matches!(
-                    v,
-                    DataValue::EncryptedContainer(_) | DataValue::SignedEncryptedContainer(_)
-                )
-            });
+        let is_encrypted = self.encrypted_payload.is_some();
         #[cfg(not(feature = "crypto"))]
         let is_encrypted = false;
+
+        #[cfg(feature = "crypto")]
+        let is_signed_encrypted =
+            matches!(self.encrypted_payload, Some(EncryptedPayload::Signed(_)));
 
         #[cfg(feature = "crypto")]
         let has_frame_sig = self.frame_signature.is_some();
@@ -334,6 +467,10 @@ impl CommunicationValue {
         }
         if is_encrypted {
             flags |= FLAG_ENCRYPTED;
+        }
+        #[cfg(feature = "crypto")]
+        if is_signed_encrypted {
+            flags |= FLAG_SIGNED_ENCRYPTED;
         }
         if has_frame_sig || force_signed {
             flags |= FLAG_SIGNED;
@@ -358,17 +495,9 @@ impl CommunicationValue {
         }
 
         #[cfg(feature = "crypto")]
-        let data_bytes = if is_encrypted {
-            self.data
-                .values()
-                .find_map(|v| match v {
-                    DataValue::EncryptedContainer(ct) => Some(ct.clone()),
-                    DataValue::SignedEncryptedContainer(ct) => Some(ct.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default()
-        } else {
-            DataValue::container_from_map(&self.data).to_bytes()?
+        let data_bytes = match &self.encrypted_payload {
+            Some(payload) => payload.as_bytes().to_vec(),
+            None => DataValue::container_from_map(&self.data).to_bytes()?,
         };
 
         #[cfg(not(feature = "crypto"))]
@@ -409,11 +538,12 @@ impl CommunicationValue {
         let total_len = cursor
             .read_u32::<BigEndian>()
             .map_err(|_| CodecError::InvalidEncoding)? as usize;
-        if bytes.len() < 4 + total_len {
+        let frame_end = 4usize
+            .checked_add(total_len)
+            .ok_or(CodecError::InvalidEncoding)?;
+        if bytes.len() != frame_end {
             return Err(CodecError::InvalidEncoding);
         }
-
-        let frame_end = 4 + total_len;
 
         let comm_type_num = cursor
             .read_u16::<BigEndian>()
@@ -426,9 +556,14 @@ impl CommunicationValue {
         let has_id = (flags & FLAG_HAS_ID) != 0;
         let is_encrypted = (flags & FLAG_ENCRYPTED) != 0;
         let is_signed = (flags & FLAG_SIGNED) != 0;
+        let is_signed_encrypted = (flags & FLAG_SIGNED_ENCRYPTED) != 0;
+
+        if is_signed_encrypted && !is_encrypted {
+            return Err(CodecError::InvalidEncoding);
+        }
 
         #[cfg(not(feature = "crypto"))]
-        if is_signed || is_encrypted {
+        if is_signed || is_encrypted || is_signed_encrypted {
             return Err(CodecError::InvalidEncoding);
         }
 
@@ -481,17 +616,20 @@ impl CommunicationValue {
         let data_bytes = &bytes[pos..frame_end];
 
         #[cfg(feature = "crypto")]
-        let data = if is_encrypted {
-            let mut map = BTreeMap::new();
-            map.insert(
-                DataType::Version.to_id(&TypeMap::latest()),
-                DataValue::EncryptedContainer(data_bytes.to_vec()),
-            );
-            map
+        let (encrypted_payload, data) = if is_encrypted {
+            let payload = if is_signed_encrypted {
+                EncryptedPayload::Signed(data_bytes.to_vec())
+            } else {
+                EncryptedPayload::Plain(data_bytes.to_vec())
+            };
+            (Some(payload), BTreeMap::new())
         } else {
             let data_value =
                 DataValue::from_bytes(data_bytes).ok_or(CodecError::InvalidEncoding)?;
-            data_value.as_map().ok_or(CodecError::InvalidEncoding)?
+            (
+                None,
+                data_value.as_map().ok_or(CodecError::InvalidEncoding)?,
+            )
         };
 
         #[cfg(not(feature = "crypto"))]
@@ -507,7 +645,10 @@ impl CommunicationValue {
             sender,
             receiver,
             data,
-            type_map: None,
+            #[cfg(feature = "crypto")]
+            encrypted_payload,
+            type_map: Some(TypeMap::new(PROTOCOL_VERSION)),
+            mapping_error: None,
             #[cfg(feature = "crypto")]
             frame_signature,
         })
@@ -515,7 +656,7 @@ impl CommunicationValue {
 
     pub fn from_bytes_with(bytes: &[u8], tm: &TypeMap) -> Result<Self, CodecError> {
         let mut val = Self::from_bytes(bytes)?;
-        val.type_map = Some(tm.clone());
+        val.set_type_map(tm);
         Ok(val)
     }
 
@@ -635,8 +776,18 @@ impl CommunicationValue {
     }
 
     #[cfg(feature = "registry")]
+    /// Migrates this frame to `target_tm`.
+    ///
+    /// Migration changes the signed wire representation, so any existing frame
+    /// signature is discarded. Call [`Self::sign_frame`] after migration when
+    /// the migrated frame needs to be authenticated.
     pub fn migrate(&self, target_tm: &TypeMap) -> Result<Self, CodecError> {
-        let comm_name = communication_type_name(self.comm_type.0)
+        if let Some(error) = &self.mapping_error {
+            return Err(error.clone());
+        }
+        let source_tm = self.type_map.as_ref().ok_or(CodecError::InvalidEncoding)?;
+        let comm_name = source_tm
+            .communication_type_name(self.comm_type.0)
             .ok_or_else(|| CodecError::UnknownCommunicationType(self.comm_type.0.to_string()))?;
         let comm_variant = CommunicationType::from_name(comm_name)
             .ok_or_else(|| CodecError::UnknownCommunicationType(comm_name.to_string()))?;
@@ -648,7 +799,8 @@ impl CommunicationValue {
 
         let mut new_data = BTreeMap::new();
         for (&old_id, value) in &self.data {
-            let name = data_type_name(old_id.0)
+            let name = source_tm
+                .data_type_name(old_id.0)
                 .ok_or_else(|| CodecError::UnknownDataType(old_id.0.to_string()))?;
             let variant = DataType::from_name(name)
                 .ok_or_else(|| CodecError::UnknownDataType(name.to_string()))?;
@@ -666,14 +818,17 @@ impl CommunicationValue {
             sender: self.sender,
             receiver: self.receiver,
             data: new_data,
-            type_map: Some(target_tm.clone()),
             #[cfg(feature = "crypto")]
-            frame_signature: self.frame_signature.clone(),
+            encrypted_payload: self.encrypted_payload.clone(),
+            type_map: Some(target_tm.clone()),
+            mapping_error: None,
+            #[cfg(feature = "crypto")]
+            frame_signature: None,
         })
     }
 }
 
-fn fmt_data_value(val: &DataValue, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+fn fmt_data_value(val: &DataValue, tm: &TypeMap, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match val {
         DataValue::Container(entries) => {
             write!(f, "{{")?;
@@ -681,9 +836,9 @@ fn fmt_data_value(val: &DataValue, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                let name = data_type_name(key.0).unwrap_or("?");
+                let name = tm.data_type_name(key.0).unwrap_or("?");
                 write!(f, "{}: ", name)?;
-                fmt_data_value(value, f)?;
+                fmt_data_value(value, tm, f)?;
             }
             write!(f, "}}")
         }
@@ -693,7 +848,7 @@ fn fmt_data_value(val: &DataValue, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                fmt_data_value(value, f)?;
+                fmt_data_value(value, tm, f)?;
             }
             write!(f, "]")
         }
@@ -745,25 +900,27 @@ impl fmt::Display for CommunicationValue {
             write!(f, ", R:{}{:X}{}", ORANGE, self.receiver, RESET)?;
         }
 
-        let name = self
-            .get_comm_type_enum()
-            .map(|t| t.name())
-            .unwrap_or_else(|| communication_type_name(self.comm_type.0).unwrap_or("?"));
+        let name = self.get_comm_type_enum().map(|t| t.name()).unwrap_or("?");
         write!(f, ", {}: ", name)?;
 
         let tm = self.type_map.clone().unwrap_or_else(TypeMap::latest);
         write!(f, "{{")?;
+        #[cfg(feature = "crypto")]
+        if let Some(payload) = &self.encrypted_payload {
+            match payload {
+                EncryptedPayload::Plain(bytes) => write!(f, "(Encrypted, {} bytes)", bytes.len())?,
+                EncryptedPayload::Signed(bytes) => {
+                    write!(f, "(SignedEncrypted, {} bytes)", bytes.len())?
+                }
+            }
+        }
         for (i, (raw_id, value)) in self.data.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            let dname = tm
-                .data_enum_id(raw_id.0)
-                .map(|t| t.name())
-                .or_else(|| data_type_name(raw_id.0))
-                .unwrap_or("?");
+            let dname = tm.data_enum_id(raw_id.0).map(|t| t.name()).unwrap_or("?");
             write!(f, "{}: ", dname)?;
-            fmt_data_value(value, f)?;
+            fmt_data_value(value, &tm, f)?;
         }
         write!(f, "}}")
     }
@@ -854,7 +1011,12 @@ mod tests {
         assert_eq!(decoded.get_id(), 1234);
         assert_eq!(decoded.get_sender(), 111);
         assert_eq!(decoded.get_receiver(), 222);
-        assert_eq!(decoded.get_type(), CommunicationType::Disconnect.to_id(&tm));
+        assert_eq!(
+            decoded.get_type(),
+            CommunicationType::Disconnect
+                .try_to_id(&tm)
+                .expect("built-in type must be mapped")
+        );
         assert_eq!(
             decoded.get_data(DataType::Id),
             &DataValue::Str("alice".to_string())
@@ -867,11 +1029,205 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_ids_are_limited_to_wire_width() -> Result<(), Box<dyn std::error::Error>> {
+        let max = CommunicationValue::new(CommunicationType::Ping)
+            .with_sender(MAX_WIRE_ID)
+            .with_receiver(MAX_WIRE_ID);
+        let decoded = roundtrip(max)?;
+        assert_eq!(decoded.get_sender(), MAX_WIRE_ID);
+        assert_eq!(decoded.get_receiver(), MAX_WIRE_ID);
+
+        assert!(
+            CommunicationValue::new(CommunicationType::Ping)
+                .with_sender(MAX_WIRE_ID + 1)
+                .to_bytes()
+                .is_err()
+        );
+        assert!(
+            CommunicationValue::new(CommunicationType::Ping)
+                .with_receiver(MAX_WIRE_ID + 1)
+                .to_bytes()
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn missing_version_mappings_return_codec_errors() {
+        let v0 = TypeMap::new(Version(0, 0));
+        assert_eq!(DataType::AnotherType.try_to_id(&v0), None);
+
+        let data_error = CommunicationValue::from_comm(CommunicationType::Ping, &v0)
+            .add_typed(
+                DataType::AnotherType,
+                &v0,
+                DataValue::Str("not available in v0".into()),
+            )
+            .to_bytes();
+        assert_eq!(
+            data_error,
+            Err(CodecError::UnknownDataType("AnotherType".into()))
+        );
+
+        let unknown_version = TypeMap::new(Version(99, 0));
+        assert_eq!(CommunicationType::Ping.try_to_id(&unknown_version), None);
+        assert_eq!(
+            CommunicationValue::from_comm(CommunicationType::Ping, &unknown_version).to_bytes(),
+            Err(CodecError::UnknownCommunicationType("Ping".into()))
+        );
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn decoded_and_migrated_frames_use_the_source_version_map()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let v1 = TypeMap::new(Version(1, 0));
+        let v2 = TypeMap::new(Version(2, 0));
+        let original = CommunicationValue::from_comm(CommunicationType::Ping, &v1).add_typed(
+            DataType::SomeType,
+            &v1,
+            DataValue::Str("v1 value".into()),
+        );
+        let bytes = original.to_bytes()?;
+
+        let decoded = CommunicationValue::from_bytes_with(&bytes, &v1)?;
+        assert_eq!(decoded.get_type_name(), Some("Ping"));
+        assert_eq!(
+            decoded.get_data(DataType::SomeType),
+            &DataValue::Str("v1 value".into())
+        );
+        assert_eq!(
+            decoded.type_map().map(|tm| &tm.version),
+            Some(&Version(1, 0))
+        );
+
+        let migrated = decoded.migrate(&v2)?;
+        assert_eq!(
+            migrated.get_data(DataType::SomeType).as_str(),
+            Some("v1 value")
+        );
+        assert_eq!(
+            migrated.data().get(
+                &DataType::SomeType
+                    .try_to_id(&v2)
+                    .expect("SomeType must be mapped in v2"),
+            ),
+            Some(&DataValue::Str("v1 value".into()))
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_plain_encrypted_payload_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let ciphertext = vec![1, 2, 3, 4, 5];
+        let cv = CommunicationValue::new(CommunicationType::Ping)
+            .with_encrypted_payload(EncryptedPayload::Plain(ciphertext.clone()));
+
+        let bytes = cv.to_bytes()?;
+        assert_ne!(bytes[6] & FLAG_ENCRYPTED, 0);
+        assert_eq!(bytes[6] & FLAG_SIGNED_ENCRYPTED, 0);
+
+        let decoded = roundtrip(cv)?;
+        assert_eq!(
+            decoded.encrypted_payload(),
+            Some(&EncryptedPayload::Plain(ciphertext))
+        );
+        assert!(decoded.data().is_empty());
+        assert_eq!(decoded.data_len(), 0);
+        assert_eq!(decoded.payload_len(), 1);
+        assert_eq!(decoded.get_data(DataType::Version), &DataValue::Null);
+        Ok(())
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_signed_encrypted_payload_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let ciphertext = vec![9, 8, 7, 6];
+        let cv = CommunicationValue::new(CommunicationType::Ping)
+            .with_encrypted_payload(EncryptedPayload::Signed(ciphertext.clone()));
+
+        let bytes = cv.to_bytes()?;
+        assert_ne!(bytes[6] & FLAG_ENCRYPTED, 0);
+        assert_ne!(bytes[6] & FLAG_SIGNED_ENCRYPTED, 0);
+
+        let decoded = roundtrip(cv)?;
+        assert_eq!(
+            decoded.encrypted_payload(),
+            Some(&EncryptedPayload::Signed(ciphertext))
+        );
+        assert!(decoded.data().is_empty());
+        Ok(())
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_decrypted_payload_serializes_as_cleartext() -> Result<(), Box<dyn std::error::Error>> {
+        let tm = TypeMap::latest();
+        let data_id = DataType::Version
+            .try_to_id(&tm)
+            .expect("built-in type must be mapped");
+        let mut cv = CommunicationValue::new(CommunicationType::Ping)
+            .with_encrypted_payload(EncryptedPayload::Plain(vec![1, 2, 3]));
+
+        cv.set_decrypted_container([(data_id, DataValue::Str("clear".into()))]);
+
+        assert!(!cv.is_encrypted());
+        assert_eq!(cv.payload_len(), 1);
+        assert_eq!(cv.get_data(DataType::Version).as_str(), Some("clear"));
+        let bytes = cv.to_bytes()?;
+        assert_eq!(bytes[6] & FLAG_ENCRYPTED, 0);
+        assert_eq!(bytes[6] & FLAG_SIGNED_ENCRYPTED, 0);
+        Ok(())
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn test_nested_encrypted_value_remains_typed_data() -> Result<(), Box<dyn std::error::Error>> {
+        let cv = CommunicationValue::new(CommunicationType::Ping).add_typed_default(
+            DataType::Version,
+            DataValue::SignedEncryptedContainer(vec![4, 3, 2, 1]),
+        );
+
+        let bytes = cv.to_bytes()?;
+        assert_eq!(bytes[6] & FLAG_ENCRYPTED, 0);
+        assert_eq!(bytes[6] & FLAG_SIGNED_ENCRYPTED, 0);
+
+        let decoded = roundtrip(cv)?;
+        assert!(!decoded.is_encrypted());
+        assert!(matches!(
+            decoded.get_data(DataType::Version),
+            DataValue::SignedEncryptedContainer(bytes) if bytes == &[4, 3, 2, 1]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_signed_encrypted_flag_requires_encrypted_flag() {
+        let mut bytes = CommunicationValue::new(CommunicationType::Ping)
+            .to_bytes()
+            .expect("frame should encode");
+        bytes[6] |= FLAG_SIGNED_ENCRYPTED;
+        assert!(CommunicationValue::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
     fn test_corrupted_length_returns_none() {
         let mut bad = vec![0u8; 8];
         // total_length claims more than available
         bad[0..4].copy_from_slice(&(1000u32.to_be_bytes()));
         assert!(CommunicationValue::from_bytes(&bad).is_err());
+    }
+
+    #[test]
+    fn test_trailing_bytes_are_rejected() {
+        let mut bytes = CommunicationValue::new(CommunicationType::Ping)
+            .to_bytes()
+            .expect("frame should encode");
+        bytes.extend_from_slice(&[0xAA, 0xBB]);
+
+        assert!(CommunicationValue::from_bytes(&bytes).is_err());
     }
 
     #[cfg(feature = "crypto")]
@@ -916,6 +1272,24 @@ mod tests {
         let wrong = Ed25519Signer::new(&other_sk)?;
         assert!(cv.verify_frame(&wrong).is_err());
 
+        Ok(())
+    }
+
+    #[cfg(all(feature = "crypto", feature = "registry"))]
+    #[test]
+    fn test_migrate_discards_frame_signature() -> Result<(), Box<dyn std::error::Error>> {
+        use mtp_crypto::{Ed25519Signer, SigAlgorithm};
+        use mtp_type_map::Version;
+
+        let (signer, _, _) = Ed25519Signer::generate();
+        let mut cv = CommunicationValue::new(CommunicationType::Ping)
+            .add_typed_default(DataType::Version, DataValue::Str("1.0".into()));
+        assert!(cv.sign_frame(SigAlgorithm::ED25519, &signer).is_some());
+        assert!(cv.get_frame_signature().is_some());
+
+        let migrated = cv.migrate(&TypeMap::new(Version(2, 0)))?;
+
+        assert!(migrated.get_frame_signature().is_none());
         Ok(())
     }
 }

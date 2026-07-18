@@ -1,48 +1,21 @@
 # MTP Native Host
 
-The native host is a Rust library (`mtp-host`) that runs a QUIC server, accepts
-MTP client connections, negotiates protocol versions, and optionally performs a
-mutual-authentication handshake (login/register) using Ed25519 and ML-DSA-65
-signatures.
+The native host is a Rust library (`mtp-host`) that runs a QUIC server, accepts MTP client connections, negotiates protocol versions, and optionally performs a mutual-authentication handshake (login/register) using Ed25519 and ML-DSA-65 signatures.
 
 ## Cargo Dependency
 
-```toml
-[dependencies]
-mtp = { path = "/path/to/mtp", features = ["host"] }
-
-# Add crypto for authenticated connections:
-mtp = { path = "/path/to/mtp", features = ["host", "crypto"] }
-
-# Add pipes for raw binary streams:
-mtp = { path = "/path/to/mtp", features = ["host", "pipes"] }
-```
+Add the `mtp` umbrella crate with `host`. Add `crypto` for authenticated connections and `pipes` for raw streams. The feature table is in the [README](../README.md).
 
 ## HostConfig
 
-```rust
-use mtp::host::HostConfig;
-use std::net::{IpAddr, Ipv4Addr};
+`HostConfig::new` takes the bind address, port, PEM certificate chain, and PEM private key. Configure authentication and transport behavior with builders:
 
-let config = HostConfig::new(
-    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-    4433,
-    std::fs::read("cert.pem")?,
-    std::fs::read("key.pem")?,
-)
-.with_authentication(
-    /* Keyring */,
-    |client_id: u64| {
-        let db = CLIENT_DB.clone();
-        Box::pin(async move { db.lock().unwrap().get(&client_id).cloned() })
-    },
-    |bundle: PublicKeyBundle| {
-        let mut db = CLIENT_DB.lock().unwrap();
-        let id = next_id();
-        db.insert(id, bundle);
-        Box::pin(async move { id })
-    },
-);
+```rust
+let config = HostConfig::new(ip, port, certificate, private_key)
+    .with_pongs(true)
+    .with_policy(Policy::default())
+    .with_authentication(host_keyring, get_existing_client, complete_register)
+    .with_authentication_policy(AuthenticationPolicy::ForceAuthentication);
 ```
 
 | Field                  | Type                                    | Description                                    |
@@ -54,61 +27,37 @@ let config = HostConfig::new(
 | `send_pongs`           | `bool`                                  | Sends a Pong for each received Ping (default `true`) |
 | `authentication_policy` | `AuthenticationPolicy` (crypto)       | `ForceAuthentication`, `AllowAuthentication`, or `Unauthenticated` |
 | `host_keyring`         | `Keyring` (crypto)                      | Host's signing and KEM keys                    |
-| `get_existing_user`    | `Fn(u64) -> Pin<Box<dyn Future<Output = Option<PublicKeyBundle>> + Send>> + Send + Sync` (crypto) | Async lookup callback for login |
-| `complete_register`    | `Fn(PublicKeyBundle) -> Pin<Box<dyn Future<Output = u64> + Send>> + Send + Sync` (crypto) | Async registration callback, returns new client ID |
+| `get_existing_client`  | Async callback returning `Option<PublicKeyBundle>` | Receives `(client_id, description)`. `Some` supplies the stored key bundle. `description = None` is used for guest-ID collision checks. |
+| `guest_id_generator`   | Async callback returning `Option<u64>` | Custom guest ID assignment. The default generates random IDs. |
+| `complete_register`    | Async callback returning `u64` | Stores the public bundle and returns its assigned client ID. |
 
 ### AuthenticationPolicy
 
-`ForceAuthentication` requires every client to complete the login/register handshake. `AllowAuthentication` accepts both authenticated and unauthenticated connections — unauthenticated clients get a random ID and `AuthState::Unauthenticated`. `Unauthenticated` rejects any client that tries to authenticate and is the default.
-
-```rust
-use mtp::host::AuthenticationPolicy;
-
-// Force authentication (default was `require_authentication: true`):
-let config = HostConfig::new(ip, port, cert, key)
-    .with_authentication(host_keyring, get_user, register);
-
-// Allow both authenticated and unauthenticated:
-let config = HostConfig::new(ip, port, cert, key)
-    .with_allow_authentication(host_keyring, get_user, register);
-
-// Unauthenticated only (default):
-let config = HostConfig::new(ip, port, cert, key);
-```
+`ForceAuthentication` requires every client to complete the login or registration handshake. `AllowAuthentication` accepts both authenticated and unauthenticated connections; unauthenticated clients receive an ID and `AuthState::Unauthenticated`. `Unauthenticated` rejects authentication attempts and is the default.
+Authentication policy details are in [Security](SECURITY.md).
 
 ### TLS
 
-The host requires a TLS certificate. For development, generate a self-signed
-certificate using `rcgen`. For production, use a CA-signed certificate.
+`HostConfig::new` always uses the certificate and key supplied by the caller.
+Certificate trust and development settings are in [Security](SECURITY.md).
 
 ### Ping-Pong
 
-The host handles protocol Ping/Pong automatically unless you disable it with
-`with_pongs(false)`. Enable the default responder explicitly when constructing
-the host if you want to make the choice visible in application configuration:
+Keepalive behavior is defined in [Protocol Reference](PROTOCOL-REFERENCE.md#protocol-keepalive).
 
 ```rust
 let config = HostConfig::new(ip, port, cert, key)
     .with_pongs(true);
 ```
 
-For every received Ping, the responder sends a Pong with the same frame id and
-copies the optional `Timestamp` data entry. Ping and Pong frames handled this
-way are not delivered by `conn.receiver.receive()`. This lets native clients
-use `ClientConfig::with_ping_interval` and `MTPConnection::get_ping()` without
-adding application-level handlers.
-
-Disable it only when the application needs to handle Ping frames itself:
+Disable automatic responses only when the application needs to handle Ping frames itself:
 
 ```rust
 let config = HostConfig::new(ip, port, cert, key)
     .with_pongs(false);
 ```
 
-With automatic responses disabled, Ping frames are delivered through the normal
-receiver and the application is responsible for sending a compatible Pong (the
-same frame id, and normally the Ping's `Timestamp`) if it wants clients to
-continue their protocol ping loop.
+Follow the responder contract in [Protocol Reference](PROTOCOL-REFERENCE.md).
 
 ## Accepting Connections
 
@@ -125,50 +74,12 @@ while let Some(conn) = host.accept().await? {
 
 ### MTPConnection
 
-Returned by `accept()` after version negotiation (and authentication if
-enabled):
-
-```rust
-pub struct MTPConnection {
-    pub version: Version,
-    pub codec: VersionedCodec,
-    pub sender: Sender,
-    pub receiver: Receiver,
-    pub description: Option<String>,
-    #[cfg(feature = "crypto")]
-    pub auth_state: AuthState,
-    #[cfg(feature = "crypto")]
-    pub client_id: u64,
-    #[cfg(feature = "crypto")]
-    pub client_public_key: Option<PublicKeyBundle>,
-}
-```
-
-- `version` -- the negotiated protocol version
-- `codec` -- a `VersionedCodec` scoped to the negotiated version (use for
-  version-aware encode/decode)
-- `sender` / `receiver` -- for message I/O
-- `description` -- optional client-provided label (e.g. `"phone"`, `"desktop"`)
-- `client_id` -- the authenticated client's ID
-- `client_public_key` -- the client's public key bundle (for signature
-  verification of subsequent messages)
+`accept()` returns the shared connection shape in [MTP Connections](CONNECTIONS.md)
+after version negotiation and authentication, when enabled. The host-specific `codec` is scoped to the negotiated version, and `client_public_key` is set for authenticated clients.
 
 ## Version Negotiation
 
-When a client connects, `accept()` performs the following sequence:
-
-1. Accept the QUIC connection
-2. Read the client's first `CommunicationValue` (always encoded with reserved
-   type IDs)
-3. Extract the protocol version from `DataType::Version` (reserved data type ID 0) as a
-   `DataValue::Str("major.minor")`
-4. Call `registry.negotiate(&[client_version])` to find the highest mutually
-   supported version
-5. Return an `AcceptError` (closing the connection) if no compatible version exists
-6. Return `Ok(Some(MTPConnection))` with the negotiated version
-
-The `Registry` is built automatically from all type maps defined in your
-`type-maps.yaml` via `Registry::builtin()`.
+`accept()` uses the version-bearing opening frame and registry flow in [Connector](CONNECTOR.md). The host registry is built from the type maps in `type-maps.yaml` by `Registry::builtin()`.
 
 ### Registry
 
@@ -184,97 +95,9 @@ let negotiated = registry.negotiate(&[Version(1, 0), Version(2, 0)]);
 
 ## Authentication Flow
 
-When `authentication_policy` is `ForceAuthentication`, `accept()` runs a mutually-authenticated
-**challenge-response** handshake before returning the connection. The host issues
-a fresh, random `server_challenge` that the client must sign, which is what makes
-the client's proof unreplayable: a captured proof is bound to a one-time challenge
-the host generates per connection and will never reissue. The challenge lives only
-on the accepting task's stack; there is no replay database or shared state.
+The connection lifecycle and authentication sequence are in [Protocol Reference](PROTOCOL-REFERENCE.md). Host callback contracts are documented below.
 
-All signed payloads begin with a one-byte domain-separation tag (see
-`mtp::crypto::auth`) so a signature for one step can never be reused as another.
-
-### Login
-
-```
-Client                                    Host
-  |                                         |
-  |  QUIC connect                           |
-  |---------------------------------------->|
-  |                                         |
-  |  Identification { Version, Id }         |  (unsigned hello)
-  |---------------------------------------->|
-  |                                         |  lookup get_existing_user(id)
-  |                                         |  generate random server_challenge
-  |  Challenge {                            |
-  |    ServerNonce(server_challenge),       |
-  |    Signature, [PqSignature]             |  host signs the challenge
-  |  }                                      |
-  |<----------------------------------------|
-  |  ChallengeResponse {                    |
-  |    ClientNonce, Signature, [PqSignature]|  client signs the challenge
-  |  }                                      |
-  |---------------------------------------->|
-  |                                         |  verify proof over server_challenge
-  |  IdentificationResponse {              |
-  |    Connected=true, Id,                  |
-  |    ClientNonce(echoed),                 |
-  |    Signature, [PqSignature]             |
-  |  }                                      |
-  |<----------------------------------------|
-```
-
-Payloads (`||` is concatenation, integers big-endian; `DS_*` are domain tags):
-
-- Host challenge: `DS_CHALLENGE || id (8) || server_challenge (16)`
-- Client proof:   `DS_LOGIN_PROOF || version_string || id (8) || server_challenge (16) || client_nonce (16)`
-- Host final:     `DS_HOST_FINAL || assigned_id (8) || client_nonce (16) || server_challenge (16)`
-
-### Register
-
-```
-Client                                    Host
-  |                                         |
-  |  QUIC connect                           |
-  |---------------------------------------->|
-  |                                         |
-  |  Register {                             |
-  |    Version,                             |  (unsigned hello)
-  |    PublicKeys (serialized PublicKeyBundle)
-  |  }                                      |
-  |---------------------------------------->|
-  |                                         |  generate random server_challenge
-  |  Challenge {                            |
-  |    ServerNonce(server_challenge),       |
-  |    Signature, [PqSignature]             |  (challenge binds id = 0)
-  |  }                                      |
-  |<----------------------------------------|
-  |  ChallengeResponse {                    |
-  |    ClientNonce, Signature, [PqSignature]|
-  |  }                                      |
-  |---------------------------------------->|
-  |                                         |  verify proof over server_challenge
-  |                                         |  call complete_register(bundle) -> new_id
-  |  RegisterResponse {                    |
-  |    Connected=true, Id(new_id),          |
-  |    ClientNonce(echoed),                 |
-  |    Signature, [PqSignature]             |
-  |  }                                      |
-  |<----------------------------------------|
-```
-
-The register client proof is:
-`DS_REGISTER_PROOF || version_string || server_challenge (16) || client_nonce (16) || public_key_bytes`
-
-After a successful handshake, `accept()` returns an `MTPConnection` with
-`auth_state = Authenticated`, `client_id` set, and `client_public_key`
-available for verifying subsequent signed messages from the client.
-
-### Rejection
-
-If verification fails or the client is not found (login), the host sends a
-rejection response with `Connected=false` and closes the send stream, returning
-`AcceptError::AuthenticationFailed` from `accept()`.
+After a successful handshake, `MTPConnection` exposes `AuthState::Authenticated`, the client ID, and the client's public key bundle when one is available.
 
 ## Handling Messages
 
@@ -298,8 +121,7 @@ while let Some(conn) = host.accept().await? {
 
 ### Versioned Codec
 
-The `conn.codec` is a `VersionedCodec` pre-configured with the negotiated
-version. Use it to encode/decode with version-specific type maps:
+The `conn.codec` is a `VersionedCodec` pre-configured with the negotiated version. Use it to encode/decode with version-specific type maps:
 
 ```rust
 let tm = conn.codec.registry().get(&conn.version).unwrap();
@@ -311,166 +133,66 @@ let value = msg.get_data(desc_id);
 
 ## Pipes
 
-With the `pipes` feature enabled, the host can accept **raw binary streams**
-from clients. A Pipe is a unidirectional QUIC stream opened by the client that
-carries a lightweight `PipeRequest` handshake frame, then transitions to raw
-bytes with zero per-frame overhead.
-
-### Enabling Pipes
-
-Add the `pipes` feature to your dependency:
-
-```toml
-[dependencies]
-mtp = { path = "/path/to/mtp", features = ["host", "pipes"] }
-```
-
-### Receiving Pipe Requests
-
-When `pipes` is enabled, **do not call `conn.receiver.receive()` directly**.
-Instead, use `conn.receive()` for normal messages and `conn.receive_pipe()`
-for incoming pipe requests. A background dispatcher task routes events
-internally so the two channels do not race.
-
-```rust
-use mtp::host::{MTPHost, PipeRequest};
-use tokio::io::AsyncReadExt;
-
-while let Some(conn) = host.accept().await? {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                Ok(msg) = conn.receive() => {
-                    // handle normal CommunicationValue
-                }
-                Ok(req) = conn.receive_pipe() => {
-                    handle_pipe(req).await;
-                }
-                else => break,
-            }
-        }
-    });
-}
-
-async fn handle_pipe(req: PipeRequest) {
-    println!("Pipe {} requested: {}", req.id(), req.description());
-    // Accept or deny...
-}
-```
-
-### PipeRequest
-
-```rust
-pub struct PipeRequest {
-    // pipe_id assigned by the creator
-    // description provided by the creator
-}
-```
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `id()` | `u32` | The pipe ID chosen by the creator |
-| `description()` | `&str` | Creator-provided label (e.g. `"file-transfer"`) |
-| `accept()` | `Result<PipeReader, PipeError>` | Accept the pipe; returns an `AsyncRead` stream |
-| `deny()` | `Result<(), PipeError>` | Reject the pipe |
-
-### Accepting a Pipe
-
-```rust
-use tokio::io::AsyncReadExt;
-
-async fn handle_pipe(req: PipeRequest) {
-    match req.accept().await {
-        Ok(mut reader) => {
-            let mut buf = Vec::new();
-            if let Err(e) = reader.read_to_end(&mut buf).await {
-                eprintln!("pipe read error: {e}");
-            }
-            println!("received {} bytes", buf.len());
-        }
-        Err(e) => {
-            eprintln!("pipe accept failed: {e}");
-        }
-    }
-}
-```
-
-`PipeReader` implements `tokio::io::AsyncRead`. The stream reads until the
-creator calls `PipeWriter::finish()` or the connection closes.
-
-### Rejecting a Pipe
-
-```rust
-async fn handle_pipe(req: PipeRequest) {
-    if !should_allow(&req) {
-        req.deny().await.ok();
-        return;
-    }
-    // ... accept
-}
-```
-
-### PipeError
-
-```rust
-pub enum PipeError {
-    Rejected,          // pipe request was rejected
-    HandshakeTimeout,  // pipe handshake timed out
-    StreamClosed,      // pipe stream closed unexpectedly
-    IoError(String),   // pipe I/O error
-    ConnectionClosed,  // connection closed
-}
-```
-
-`PipeError` implements `std::error::Error` and can be converted from
-`CommunicationError` via `PipeError::from()`.
-
-### Important: Do Not Use `receiver.receive()` with Pipes
-
-When the `pipes` feature is active, `conn.receiver.receive()` will **skip**
-`PipeRequest` frames and may return them as ordinary messages if called from
-the wrong task. Always use the facade methods:
-
-- `conn.receive()` -- normal `CommunicationValue` messages
-- `conn.receive_pipe()` -- incoming `PipeRequest` objects
-
-These methods are internally synchronised and safe to call from separate tasks.
+The complete pipe protocol and host API are documented in [Pipes](PIPES.md).
 
 ## Host Callbacks
 
-### get_existing_user
+### get_existing_client
 
-Called during login to retrieve a client's public key bundle for signature
-verification. Must return `Some(PublicKeyBundle)` if the client ID is known,
-or `None` to reject.
+Called during login to retrieve a client's public key bundle for signature verification, and also during guest ID generation to check whether a random candidate collides with a registered client.  When used for collision checking the `description` argument is `None`.
+
+Must return `Some(PublicKeyBundle)` if the client ID is known, or `None` otherwise.
 
 ```rust
-let get_existing_user = |id: u64| {
+// db: Arc<tokio::sync::Mutex<HashMap<u64, PublicKeyBundle>>>
+let get_existing_client = |id: u64, _description: Option<String>| {
     let db = db.clone();
-    Box::pin(async move { db.lock().unwrap().get(&id).cloned() })
+    Box::pin(async move { db.lock().await.get(&id).cloned() })
 };
+```
+
+### guest_id_generator
+
+Optional callback that controls how unauthenticated connections receive their client ID.  When `None` (the default), the host generates a random 48-bit ID and checks it against `get_existing_client` to avoid collisions.
+
+Return `Some(id)` to accept the guest with that ID, or `None` to reject the connection.  The ID must fit in 48 bits (`id <= mtp_codec::MAX_WIRE_ID`);
+values outside that range are rejected automatically and fall back to the built-in generator.
+
+```rust
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Sequential guest IDs:
+let counter = AtomicU64::new(1);
+let guest_id_generator = Box::new(move || {
+    Box::pin(async move { Some(counter.fetch_add(1, Ordering::SeqCst)) })
+});
+
+// Reject all guests (no unauthenticated connections):
+let guest_id_generator = Box::new(|| Box::pin(async { None }));
+
+let config = HostConfig::new(ip, port, cert, key)
+    .with_authentication(host_keyring, get_existing_client, complete_register)
+    .with_authentication_policy(AuthenticationPolicy::AllowAuthentication)
+    .with_guest_id_generator(guest_id_generator);
 ```
 
 ### complete_register
 
-Called during registration to persist a new client's public key bundle and
-assign a client ID. The returned `u64` becomes the client's permanent
-identifier.
+Called during registration to persist a new client's public key bundle and assign a client ID. The returned `u64` becomes the client's permanent identifier.
 
 ```rust
-let complete_register = |bundle: PublicKeyBundle| {
+// db: Arc<tokio::sync::Mutex<HashMap<u64, PublicKeyBundle>>>
+let complete_register = |bundle: PublicKeyBundle, _description: Option<String>| {
     let db = db.clone();
     let id = next_id.fetch_add(1, Ordering::SeqCst);
     Box::pin(async move {
-        db.lock().unwrap().insert(id, bundle);
+        db.lock().await.insert(id, bundle);
         id
     })
 };
 ```
 
-Both callbacks are called from within `accept()` and must be `Send + Sync`. They
-are `async` (returning `Pin<Box<dyn Future<...>>`) and are `.await`ed by the
-host, so they can perform I/O or other async work as needed.
+All callbacks are called from within `accept()` and must be `Send + Sync`. They are `async` (returning `Pin<Box<dyn Future<...>>`) and are `.await`ed by the host, so they can perform I/O or other async work as needed. The `complete_register` callback returns no error value. A panic aborts the normal callback flow; validate storage and ID allocation before returning the ID.
 
 ## Host Key Generation
 
@@ -502,21 +224,17 @@ std::fs::write("host_sig_pq_pk.bin", bundle.sig_pq_public_key.as_bytes())?;
 
 ## Policy
 
-The transport `Policy` is set to defaults internally. To customise (timeouts,
-send mode, etc.), use `mtp_transport::host()` directly instead of `MTPHost`:
+Customize transport limits and timeouts through `HostConfig::with_policy`:
 
 ```rust
-use mtp_transport::{host, Policy};
-
-let transport = host(ip, port, cert, key, custom_policy).await?;
-// Then build version negotiation on top:
-// - accept transport.next()
-// - read first frame
-// - registry.negotiate()
-// - return MTPConnection
+let config = HostConfig::new(ip, port, cert, key)
+    .with_policy(custom_policy);
+let host = MTPHost::new(config).await?;
 ```
 
 ## Graceful Shutdown
 
-Drop the `MTPHost` to stop accepting new connections. Active connections
-continue until their `Sender`/`Receiver` are dropped or the peer disconnects.
+Drop the `MTPHost` to stop accepting new connections. Active connections continue until their `Sender`/`Receiver` are dropped or the peer disconnects.
+
+Run one accept loop per `MTPHost` and spawn one task per accepted connection.
+Stop the accept loop before dropping the host, then close active senders and wait for application tasks to finish. Use [Operations](OPERATIONS.md) for the deployment sequence and monitoring signals.

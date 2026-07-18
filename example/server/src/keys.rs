@@ -1,7 +1,7 @@
 use std::fs;
 
 use mtp::crypto::Keyring;
-use mtp::files::{load_keyring, save_keyring, save_public_key_bundle};
+use mtp::files::{load_keyring_raw, save_keyring_raw, save_public_key_bundle};
 
 /* Host id is fixed for the example; only the keyring itself is persisted. */
 const HOST_ID: u64 = 1;
@@ -9,13 +9,13 @@ const HOST_ID: u64 = 1;
 pub fn load_or_generate_host_keys(
     keyring_path: &str,
 ) -> Result<(u64, Keyring), Box<dyn std::error::Error>> {
-    if let Ok(keyring) = load_keyring(keyring_path) {
+    if let Ok(keyring) = load_keyring_raw(keyring_path) {
         println!("Loaded host keyring from {keyring_path}");
         return Ok((HOST_ID, keyring));
     }
 
     let keyring = Keyring::generate();
-    save_keyring(&keyring, keyring_path)?;
+    save_keyring_raw(&keyring, keyring_path)?;
     println!("Generated host keyring -> {keyring_path}");
     Ok((HOST_ID, keyring))
 }

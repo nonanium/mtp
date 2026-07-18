@@ -9,6 +9,7 @@ members = [
     "client",
     "wasm",
     "files",
+    "mtp-webserver",
 ]
 # `wasm` is a wasm32-only crate: it relies on web-sys unstable APIs
 # (`--cfg=web_sys_unstable_apis`, set in wasm/.cargo/config.toml) and the
@@ -28,6 +29,7 @@ default-members = [
     "host",
     "client",
     "files",
+    "mtp-webserver",
 ]
 resolver = "3"
 
@@ -43,23 +45,24 @@ resolver = "3"
 # =============================================================================
 [package]
 name = "mtp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
 # --- always-on core ---
-mtp-common = { version = "0.1.0", path = "common" }
-mtp-type-map = { version = "0.1.0", path = "type-map" }
-mtp-codec = { version = "0.1.0", path = "codec" }
-mtp-transport = { version = "0.1.0", path = "transport", optional = true }
+mtp-common = { version = "0.2.0", path = "common" }
+mtp-type-map = { version = "0.2.0", path = "type-map" }
+mtp-codec = { version = "0.2.0", path = "codec" }
 # --- optional, behind features ---
-mtp-crypto = { version = "0.1.0", path = "crypto", optional = true, features = [
+mtp-crypto = { version = "0.2.0", path = "crypto", optional = true, features = [
     "serde",
     "mlkem-tls",
 ] }
-mtp-host = { version = "0.1.0", path = "host", optional = true }
-mtp-client = { version = "0.1.0", path = "client", optional = true }
-mtp-files = { version = "0.1.0", path = "files", optional = true }
+mtp-host = { version = "0.2.0", path = "host", optional = true }
+mtp-client = { version = "0.2.0", path = "client", optional = true }
+mtp-files = { version = "0.2.0", path = "files", optional = true }
+mtp-webserver = { version = "0.2.0", path = "mtp-webserver", optional = true }
+mtp-transport = { version = "0.2.0", path = "transport", optional = true }
 
 [features]
 # Serialization
@@ -72,6 +75,7 @@ crypto = [
     "mtp-codec/crypto",
     "mtp-host?/crypto",
     "mtp-client?/crypto",
+    "mtp-webserver?/crypto",
 ]
 
 # MTP server host - version negotiation, Registry, incoming QUIC connections.
@@ -86,13 +90,29 @@ transport = ["dep:mtp-transport"]
 
 # Direct access to the pipes. Pipes can be used to send raw binary
 # without after creation overhead.
-pipes = ["mtp-common/pipes", "mtp-codec/pipes", "mtp-transport?/pipes", "mtp-host?/pipes", "mtp-client?/pipes"]
+pipes = ["mtp-common/pipes", "mtp-codec/pipes", "mtp-transport?/pipes", "mtp-host?/pipes", "mtp-client?/pipes", "mtp-webserver?/pipes"]
 
 # On-disk storage for keyrings (`.mk`) and public key bundles (`.mpkb`).
 # Pulls in `crypto` so the `Keyring` / `PublicKeyBundle` types are in scope.
 files = ["dep:mtp-files", "crypto"]
 
+# HTTP/3 routing and WebTransport-based MTP hosting on one QUIC endpoint.
+web-server = ["dep:mtp-webserver", "dep:mtp-host", "mtp-codec/registry", "transport"]
+
+# Complete native server surface.
+full-server = ["host", "web-server", "crypto", "pipes"]
+
+# Self-signed certificate generation helper (requires crypto).
+tls = ["crypto", "mtp-crypto?/tls"]
+
+# Insecure TLS certificate verification (development only).
+# Requires MTP_INSECURE_TLS=1 at runtime.
+insecure-tls = ["dep:mtp-transport", "mtp-transport?/insecure-tls"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 rcgen = "0.14"
-rand = "0.8"
+rand = "0.10.1"
+
+[package.metadata.cargo-machete]
+ignored = ["mtp-transport"]

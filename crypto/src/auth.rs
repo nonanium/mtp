@@ -11,7 +11,7 @@
  * Step 4. Host -> Client : IdentificationResponse { connected, id, host_sig } host_sig over host_final_payload
  */
 
-/// Domain-separation tags — a distinct leading byte per signed context.
+/// Domain-separation tags
 pub mod domain {
     /// Host's signature over the challenge it issues (step 2).
     pub const CHALLENGE: u8 = 0x10;

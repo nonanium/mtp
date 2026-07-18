@@ -4,7 +4,7 @@ use mtp::client::{ClientConfig, MTPClient, MTPConnection};
 use mtp::crypto::{
     Ed25519Signer, KemPrivateKey, KemPublicKey, Keyring, MlDsaSigner, PublicKeyBundle,
 };
-use mtp::files::{load_keyring, save_keyring};
+use mtp::files::{load_keyring_raw, save_keyring_raw};
 
 pub async fn connect_or_register(
     mut config: ClientConfig,
@@ -14,7 +14,10 @@ pub async fn connect_or_register(
     let keyring_path = format!("{key_prefix}.mk");
     let id_path = format!("{key_prefix}.id");
 
-    if let (Ok(keyring), Ok(id)) = (load_keyring(&keyring_path), fs::read_to_string(&id_path)) {
+    if let (Ok(keyring), Ok(id)) = (
+        load_keyring_raw(&keyring_path),
+        fs::read_to_string(&id_path),
+    ) {
         let client_id: u64 = id.trim().parse()?;
         println!("Loaded client keys (ID: {client_id})");
 
@@ -41,7 +44,7 @@ pub async fn connect_or_register(
     let conn = MTPClient::auth_register(config, &keyring, &host_public_key).await?;
     println!("Registered with ID: {}", conn.client_id);
 
-    save_keyring(&keyring, &keyring_path)?;
+    save_keyring_raw(&keyring, &keyring_path)?;
     fs::write(&id_path, conn.client_id.to_string())?;
     println!("Saved client keys -> {keyring_path}");
 

@@ -338,6 +338,48 @@ await describe("E2EE Encrypt/Decrypt", async () => {
     assert.deepEqual(aliceAfter2.sendChainKey, bobAfter2.recvChainKey);
     assert.equal(aliceAfter2.sendCount, 2);
   });
+
+  await it("decrypts messages delivered out of order exactly once", async () => {
+    const ss = sdk.crypto.sha256(new Uint8Array([4, 5, 6]));
+    const { initSessions } = setupSessions(ss);
+    let { aliceSession, bobSession } = await initSessions();
+
+    const sent = [];
+    for (const label of ["first", "second", "third"]) {
+      const encrypted = await encryptPayload({
+        plaintext: sdk.codec.encode("Ping", { Version: label }),
+        session: aliceSession,
+      });
+      sent.push(encrypted.payload);
+      aliceSession = encrypted.session;
+    }
+
+    const third = await decryptPayload({ payload: sent[2], session: bobSession });
+    bobSession = third.session;
+    assert.equal(sdk.codec.decode(third.plaintext).data["Version"], "third");
+    assert.equal(bobSession.recvCount, 3);
+    assert.deepEqual(
+      bobSession.skippedMessageKeys.map(({ messageNumber }) => messageNumber),
+      [0, 1],
+    );
+
+    const first = await decryptPayload({ payload: sent[0], session: bobSession });
+    bobSession = first.session;
+    assert.equal(sdk.codec.decode(first.plaintext).data["Version"], "first");
+    assert.deepEqual(
+      bobSession.skippedMessageKeys.map(({ messageNumber }) => messageNumber),
+      [1],
+    );
+
+    const second = await decryptPayload({ payload: sent[1], session: bobSession });
+    bobSession = second.session;
+    assert.equal(sdk.codec.decode(second.plaintext).data["Version"], "second");
+    assert.equal(bobSession.skippedMessageKeys.length, 0);
+    await assert.rejects(
+      decryptPayload({ payload: sent[0], session: bobSession }),
+      /replay/,
+    );
+  });
 });
 
 await describe("E2EE Public Key Bundle", async () => {

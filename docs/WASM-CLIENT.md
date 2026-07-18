@@ -2,6 +2,17 @@
 
 The browser client is exposed through the `mtp` npm package. Most applications should use the SDK-first `MTPClient` API; direct generated WASM bindings remain available from `mtp/raw` for advanced integrations.
 
+## Browser Compatibility
+
+The SDK requires the browser to expose `WebTransport`. `MTPClient.isSupported()` is the runtime check. A browser without WebTransport cannot connect through this client.
+
+| Requirement | Check |
+| --- | --- |
+| WebTransport API | `MTPClient.isSupported()` |
+| Certificate trust | Browser validation or `serverCertificateHashes` |
+| Secure context | Serve the application from HTTPS where required by the browser |
+| Generated bindings | Run the Vite integration during development and build |
+
 ## Package Entry Points
 
 ```typescript
@@ -17,19 +28,11 @@ import { mtp } from "mtp/vite";
 
 ## Vite Type-Map Workflow
 
-Browser apps provide their own type map. The Vite plugin runs `wasm-pack` during dev/build with `MTP_TYPE_MAPS` set, writes generated output under `node_modules/.vite/mtp/` by default, and aliases `mtp/raw` plus `mtp/type-map` to that generated output.
-
-```typescript
-// vite.config.ts
-import { defineConfig } from "vite";
-import { mtp } from "mtp/vite";
-
-export default defineConfig({
-  plugins: [mtp({ typeMaps: "./type-maps.yaml" })],
-});
-```
+Browser apps provide their own type map. The Vite plugin runs `wasm-pack` during dev and build with `MTP_TYPE_MAPS` set, writes generated output under `node_modules/.vite/mtp/` by default, and aliases `mtp/raw` plus `mtp/type-map` to that generated output. Configuration: [Type Map](TYPE-MAP.md).
 
 You do not need to publish, fork, or copy an app-specific generated WASM package.
+
+The [web client example](../example/web-client/src/main.ts) shows the entry point. Its [Vite configuration](../example/web-client/vite.config.ts) shows the generated binding integration.
 
 ## SDK Quick Start
 
@@ -79,6 +82,41 @@ if (!MTPClient.isSupported()) {
   throw new Error("WebTransport is not available in this browser");
 }
 ```
+
+## MTPClient Options
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `url` | Required | WebTransport endpoint. |
+| `descriptor` | None | Client label sent during connection setup. |
+| `hostPublicKey` | None | Host public key bundle for authenticated login or registration. |
+| `credentials` | None | Existing client ID and serialized keyring. |
+| `credentialsStorageKey` | `mtp:credentials` | Key used by configured credential storage. |
+| `storage` | None | Sync or async credential storage adapter. |
+| `serverCertificateHashes` | Omitted | WebTransport certificate pins. |
+| `maxMessageSize` | 16 MiB | Inbound and outbound frame limit. Values below frame overhead are rejected by the transport. |
+| `authTimeoutMs` | No SDK timeout | Login and registration timeout. `undefined` leaves the promise pending until transport or peer failure. |
+| `requestTimeoutMs` | 30 seconds | Default `request()` timeout. |
+| `pings` | `false` | Protocol pings, or an object with `intervalMs`. |
+| `logger` | No-op | Receives SDK state and error events. |
+| `sessionStorage` | In-memory | E2EE session state storage. |
+| `encryptedDeviceSecretProvider` | In-memory | Device-secret storage for E2EE. |
+
+`wasm` selects a custom generated WASM module. `MTPClient.create` validates positive safe-integer values for the numeric limits and timeout options.
+
+## Differences from Native Client
+
+The browser SDK uses WebTransport and JavaScript promises. The native client uses Rust futures, direct QUIC configuration, and `MTPConnection` handles. Browser pipes expose promise-based readers and writers; native pipes implement Tokio I/O traits.
+
+### Native and Browser Credential Persistence
+
+The `storage` option supplies the credential adapter. The adapter stores the client ID and serialized keyring after registration and returns them for later connections. The SDK does not select `localStorage` or IndexedDB for an application. Treat the serialized keyring as private key material.
+
+`sessionStorage` and `encryptedDeviceSecretProvider` are separate E2EE session stores. The latter exchanges `EncryptedDeviceSecretRecord` values through `setEncryptedDeviceSecret` and `getEncryptedDeviceSecret`; the application chooses the backing store and protects its wrapping key.
+
+### Native and Browser Certificate Checks
+
+WebTransport certificate pins must match the server certificate hash. A pin mismatch is a TLS failure, not an MTP authentication failure. Check the browser network panel, endpoint origin, and WebTransport CONNECT path before inspecting frames.
 
 ## Credentials And Storage
 
@@ -148,12 +186,12 @@ If hashes are omitted, the browser uses its normal TLS root store.
 
 `maxMessageSize` caps inbound and outbound MTP frames before buffering/sending.
 `authTimeoutMs` bounds connect/login/register promises at the SDK layer.
+`requestTimeoutMs` sets the default timeout for `request()` calls; a request can override it with `timeoutMs` in its options.
 
 ## Streams
 
 The browser client uses one WebTransport session per `MTPClient` instance.
-`send()`, `request()`, and `subscribe()` all operate over that session; the SDK
-does not expose browser stream objects directly.
+`send()`, `request()`, and `subscribe()` all operate over that session; the SDK does not expose browser stream objects directly.
 
 Use the normal message APIs to send and receive over that session:
 
@@ -169,18 +207,9 @@ await client.send("SomeType", { value: "hello" });
 unsubscribe();
 ```
 
-Internally, each outbound MTP frame is written to a new WebTransport
-unidirectional stream as a four-byte big-endian length followed by the frame,
-then that stream is closed. Incoming frames are read from the session's
-incoming unidirectional streams. The reader accepts both one-frame streams and
-native peers that place several frames on a persistent stream, so browser and
-native clients interoperate without stream configuration.
+Internally, each outbound MTP frame is written to a new WebTransport unidirectional stream as a four-byte big-endian length followed by the frame, then that stream is closed. Incoming frames are read from the session's incoming unidirectional streams. The reader accepts both one-frame streams and native peers that place several frames on a persistent stream, so browser and native clients interoperate without stream configuration.
 
-The SDK deliberately owns stream lifetime and framing. Do not create browser
-streams for MTP frames yourself through the SDK. For direct generated bindings,
-use `client.raw.client` or import `WasmClient` from `mtp/raw`; a `WasmClient`
-still owns one active WebTransport session, so create another instance for an
-independent connection.
+The SDK owns stream lifetime and framing. Do not create browser streams for MTP frames yourself through the SDK. For direct generated bindings, use `client.raw.client` or import `WasmClient` from `mtp/raw`; a `WasmClient` still owns one active WebTransport session, so create another instance for an independent connection.
 
 ## Sending, Requests, Subscriptions, And Pings
 
@@ -200,7 +229,7 @@ await client.send("SomeType", { value: "hello" }, {
 });
 ```
 
-`request` sends one frame and resolves with the parsed response carrying the same frame id. `responseType` is validated after the id match:
+`request` sends one frame and resolves with the parsed response carrying the same frame id. If the matching response has a different `responseType`, the promise rejects with a response-type error. A timeout rejects the promise and removes the pending request:
 
 ```typescript
 const response = await client.request(
@@ -220,7 +249,7 @@ const unsubscribe = client.subscribe("SomeType", (message) => {
 unsubscribe();
 ```
 
-Protocol pings are real MTP `Ping` frames sent by the WASM client, not just transport keepalives:
+Protocol ping behavior is defined in [Protocol Reference](PROTOCOL-REFERENCE.md#protocol-keepalive). The SDK configuration is:
 
 ```typescript
 await MTPClient.create({
@@ -359,6 +388,8 @@ interface ParsedFrame {
 }
 ```
 
+### Frames
+
 Raw message helpers that remain available include:
 
 - `build_frame(messageType, data, options?)`
@@ -376,6 +407,8 @@ const frame = codec.encode("SomeType", { value: "hello" });
 const parsed = codec.decode(frame);
 const display = codec.format(frame);
 ```
+
+### Crypto
 
 Raw crypto and key helpers include:
 
@@ -409,48 +442,25 @@ const confirmedId = await rawClient.auth_connect(
 );
 ```
 
-### Raw Pipes
+### Pipes
 
-The raw `WasmClient` exposes the same pipe operations as the SDK wrapper:
+The raw `WasmClient` exposes the same pipe operations as the SDK wrapper. The shared lifecycle is in [Pipes](PIPES.md); raw bindings use snake_case names.
 
 ```typescript
-// Incoming pipe requests
 rawClient.set_on_pipe_request((event) => {
-  const { pipeId, description } = event;
-  // accept or deny
+  void rawClient.accept_pipe(event.pipeId);
 });
 
-// Outgoing pipe
 const handle = await rawClient.create_pipe("file-transfer");
 const writer = await handle.wait();
 if (writer) {
-  await writer.write(new Uint8Array([0x01, 0x02]));
+  await writer.write(chunk);
   await writer.close();
-}
-
-// Accept incoming pipe
-const reader = await rawClient.accept_pipe(pipeId);
-const chunk = await reader.read();
-
-// Deny incoming pipe
-await rawClient.deny_pipe(pipeId);
-```
-
-Raw `PipeWriter` and `PipeReader` have the same interface as the SDK types:
-
-```typescript
-interface PipeWriter {
-  write(data: Uint8Array): Promise<void>;
-  close(): Promise<void>;
-  abort(): void;
-  readonly pipeId: number;
-}
-
-interface PipeReader {
-  read(): Promise<Uint8Array | null>;
-  readonly pipeId: number;
-  readonly description: string;
 }
 ```
 
 A `WasmClient` manages one active WebTransport session. Create a new instance for independent connections, and call `free()` or `[Symbol.dispose]()` on raw WASM objects when you want to release memory eagerly.
+
+### State Management
+
+A `WasmClient` owns one active WebTransport session. Create a separate client for each independent connection. Call `free()` or `[Symbol.dispose]()` on raw WASM objects when the application no longer needs them. SDK session and device secret persistence are documented in [Security](SECURITY.md#browser-end-to-end-encryption).

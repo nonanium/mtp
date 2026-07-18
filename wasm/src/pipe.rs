@@ -43,7 +43,7 @@ impl PipeWriter {
             .map_err(|_| js_error("write not a function"))?;
         let write_promise = write_fn
             .call1(&self.writer, &chunk)
-            .map_err(|e| js_error(&format!("write failed: {:?}", e)))?;
+            .map_err(|e| js_error(format!("write failed: {:?}", e)))?;
         JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await?;
         Ok(())
     }
@@ -55,7 +55,7 @@ impl PipeWriter {
             .map_err(|_| js_error("close not a function"))?;
         let close_promise = close_fn
             .call0(&self.writer)
-            .map_err(|e| js_error(&format!("close failed: {:?}", e)))?;
+            .map_err(|e| js_error(format!("close failed: {:?}", e)))?;
         if let Err(e) = JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await {
             crate::transport::log_stream_error_code(&e, "pipe writer close");
         }

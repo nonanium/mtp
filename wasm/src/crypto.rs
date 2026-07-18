@@ -1,4 +1,5 @@
 use wasm_bindgen::prelude::*;
+use zeroize::Zeroizing;
 
 use mtp_crypto::{
     AeadDecrypt, AeadEncrypt, ChaCha20Poly1305, Ed25519Signer, HybridKem, KemPrivateKey,
@@ -22,14 +23,14 @@ impl WasmKeyring {
     /// Serialise the keyring to bytes.
     #[wasm_bindgen]
     pub fn to_bytes(&self) -> Vec<u8> {
-        self.inner.to_bytes()
+        self.inner.to_bytes().to_vec()
     }
 
     /// Deserialise a keyring from bytes.
     #[wasm_bindgen]
     pub fn from_bytes(bytes: &[u8]) -> Result<WasmKeyring, JsValue> {
         let inner = Keyring::from_bytes(bytes)
-            .map_err(|e| js_error(&format!("Keyring::from_bytes: {}", e)))?;
+            .map_err(|e| js_error(format!("Keyring::from_bytes: {}", e)))?;
         Ok(Self { inner })
     }
 
@@ -45,7 +46,7 @@ impl WasmKeyring {
 /// Generate a full keyring with KEM, ML-DSA, and Ed25519 keys.
 #[wasm_bindgen]
 pub fn keyring_generate() -> Vec<u8> {
-    Keyring::generate().to_bytes()
+    Keyring::generate().to_bytes().to_vec()
 }
 
 /// Build a [`Keyring`] containing only an Ed25519 keypair (no KEM, no ML-DSA).
@@ -68,7 +69,7 @@ pub fn keyring_from_ed25519(secret_key: &[u8], public_key: &[u8]) -> Result<Vec<
         SignaturePublicKey::new(public_key.to_vec()),
         SignaturePrivateKey::new(secret_key.to_vec()),
     );
-    Ok(keyring.to_bytes())
+    Ok(keyring.to_bytes().to_vec())
 }
 
 // ===========================================================================
@@ -105,7 +106,7 @@ impl WasmPublicKeyBundle {
     #[wasm_bindgen]
     pub fn from_bytes(bytes: &[u8]) -> Result<WasmPublicKeyBundle, JsValue> {
         let inner = PublicKeyBundle::from_bytes(bytes)
-            .map_err(|e| js_error(&format!("PublicKeyBundle::from_bytes: {}", e)))?;
+            .map_err(|e| js_error(format!("PublicKeyBundle::from_bytes: {}", e)))?;
         Ok(Self { inner })
     }
 }
@@ -121,7 +122,7 @@ impl WasmPublicKeyBundle {
 /// decapsulate and recover the same shared secret.
 #[wasm_bindgen]
 pub struct WasmEncapsulated {
-    inner_shared_secret: Vec<u8>,
+    inner_shared_secret: Zeroizing<Vec<u8>>,
     inner_ciphertext: Vec<u8>,
 }
 
@@ -130,7 +131,7 @@ impl WasmEncapsulated {
     /// Symmetric secret derived during encapsulation.
     #[wasm_bindgen(getter)]
     pub fn shared_secret(&self) -> Vec<u8> {
-        self.inner_shared_secret.clone()
+        self.inner_shared_secret.to_vec()
     }
 
     /// KEM ciphertext to transmit to the recipient.
@@ -149,7 +150,7 @@ impl WasmEncapsulated {
 pub fn wasm_kem_encapsulate(recipient_public_key: &[u8]) -> Result<WasmEncapsulated, JsValue> {
     let pk = KemPublicKey::new(recipient_public_key.to_vec());
     let enc = HybridKem::encapsulate(&pk)
-        .map_err(|e| js_error(&format!("kem_encapsulate failed: {}", e)))?;
+        .map_err(|e| js_error(format!("kem_encapsulate failed: {}", e)))?;
     Ok(WasmEncapsulated {
         inner_shared_secret: enc.shared_secret,
         inner_ciphertext: enc.ciphertext,
@@ -167,7 +168,8 @@ pub fn wasm_kem_decapsulate(
 ) -> Result<Vec<u8>, JsValue> {
     let sk = KemPrivateKey::new(recipient_private_key.to_vec());
     HybridKem::decapsulate(&sk, ciphertext)
-        .map_err(|e| js_error(&format!("kem_decapsulate failed: {}", e)))
+        .map(|secret| secret.to_vec())
+        .map_err(|e| js_error(format!("kem_decapsulate failed: {}", e)))
 }
 
 // ===========================================================================
@@ -200,7 +202,7 @@ impl WasmChaCha20Poly1305 {
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, JsValue> {
         self.inner
             .encrypt(plaintext, aad)
-            .map_err(|e| js_error(&format!("encrypt failed: {}", e)))
+            .map_err(|e| js_error(format!("encrypt failed: {}", e)))
     }
 
     /// Decrypt `nonce || ciphertext` with `aad`.
@@ -208,7 +210,7 @@ impl WasmChaCha20Poly1305 {
     pub fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, JsValue> {
         self.inner
             .decrypt(ciphertext, aad)
-            .map_err(|e| js_error(&format!("decrypt failed: {}", e)))
+            .map_err(|e| js_error(format!("decrypt failed: {}", e)))
     }
 }
 
@@ -228,7 +230,7 @@ impl WasmEd25519Signer {
     pub fn new(secret_key: Vec<u8>) -> Result<WasmEd25519Signer, JsValue> {
         let sk = SignaturePrivateKey::new(secret_key);
         let inner =
-            Ed25519Signer::new(&sk).map_err(|e| js_error(&format!("Ed25519Signer::new: {}", e)))?;
+            Ed25519Signer::new(&sk).map_err(|e| js_error(format!("Ed25519Signer::new: {}", e)))?;
         Ok(Self { inner })
     }
 
@@ -237,7 +239,7 @@ impl WasmEd25519Signer {
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, JsValue> {
         self.inner
             .sign(message)
-            .map_err(|e| js_error(&format!("sign failed: {}", e)))
+            .map_err(|e| js_error(format!("sign failed: {}", e)))
     }
 
     /// Verify `signature` against `message`.
@@ -245,7 +247,7 @@ impl WasmEd25519Signer {
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), JsValue> {
         self.inner
             .verify(message, signature)
-            .map_err(|e| js_error(&format!("verify failed: {}", e)))
+            .map_err(|e| js_error(format!("verify failed: {}", e)))
     }
 }
 
@@ -290,7 +292,7 @@ pub fn ed25519_verify(
 ) -> Result<(), JsValue> {
     let pk = SignaturePublicKey::new(public_key);
     mtp_crypto::verify_ed25519(&pk, message, signature)
-        .map_err(|e| js_error(&format!("verify_ed25519 failed: {}", e)))
+        .map_err(|e| js_error(format!("verify_ed25519 failed: {}", e)))
 }
 
 // ===========================================================================
@@ -322,7 +324,7 @@ pub fn wasm_hkdf_expand(
     len: usize,
 ) -> Result<Vec<u8>, JsValue> {
     mtp_crypto::hkdf_expand(ikm, salt, info, len)
-        .map_err(|e| js_error(&format!("hkdf_expand failed: {}", e)))
+        .map_err(|e| js_error(format!("hkdf_expand failed: {}", e)))
 }
 
 /// Derive a 32-byte encryption key from `ikm` with `salt` and `context`.
@@ -334,7 +336,7 @@ pub fn wasm_derive_encryption_key(
 ) -> Result<Vec<u8>, JsValue> {
     mtp_crypto::derive_encryption_key(ikm, salt, context)
         .map(|key| key.to_vec())
-        .map_err(|e| js_error(&format!("derive_encryption_key failed: {}", e)))
+        .map_err(|e| js_error(format!("derive_encryption_key failed: {}", e)))
 }
 
 #[cfg(test)]

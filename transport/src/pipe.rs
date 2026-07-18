@@ -1,16 +1,17 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tracing::warn;
 
 #[derive(Debug)]
-pub struct PipeWriter {
-    pub(crate) stream: wtransport::SendStream,
+pub struct PipeWriter<S = wtransport::SendStream> {
+    pub(crate) stream: S,
 }
 
 impl PipeWriter {
     pub async fn finish(mut self) -> Result<(), mtp_common::CommunicationError> {
         self.stream.finish().await.map_err(|e| {
-            log::warn!("[PipeWriter] finish failed: {e}");
+            warn!("[PipeWriter] finish failed: {e}");
             mtp_common::CommunicationError::StreamWriteError(e)
         })
     }
@@ -20,7 +21,18 @@ impl PipeWriter {
     }
 }
 
-impl AsyncWrite for PipeWriter {
+impl<S: tokio::io::AsyncWrite + Send + Unpin> PipeWriter<S> {
+    pub async fn finish_async(mut self) -> Result<(), mtp_common::CommunicationError> {
+        tokio::io::AsyncWriteExt::shutdown(&mut self)
+            .await
+            .map_err(|e| {
+                warn!("[PipeWriter] finish_async failed: {e}");
+                mtp_common::CommunicationError::StreamError
+            })
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Send + Unpin> AsyncWrite for PipeWriter<S> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -39,13 +51,13 @@ impl AsyncWrite for PipeWriter {
 }
 
 #[derive(Debug)]
-pub struct PipeReader {
-    pub(crate) stream: wtransport::RecvStream,
+pub struct PipeReader<R = wtransport::RecvStream> {
+    pub(crate) stream: R,
     pub(crate) description: String,
     pub(crate) pipe_id: u32,
 }
 
-impl PipeReader {
+impl<R> PipeReader<R> {
     pub fn description(&self) -> &str {
         &self.description
     }
@@ -55,7 +67,7 @@ impl PipeReader {
     }
 }
 
-impl AsyncRead for PipeReader {
+impl<R: tokio::io::AsyncRead + Send + Unpin> AsyncRead for PipeReader<R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,

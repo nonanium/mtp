@@ -1,10 +1,10 @@
 [package]
 name = "mtp-crypto"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [package.metadata.cargo-machete]
-ignored = ["getrandom"]
+ignored = ["rand_core"]
 
 [dependencies]
 chacha20poly1305 = { version = "0.10", optional = true }
@@ -18,11 +18,14 @@ sha2 = { version = "0.11", optional = true }
 zeroize = { version = "1.9", features = ["derive"] }
 thiserror = "1"
 base64 = "0.22"
-rand_core = { version = "0.6", features = ["getrandom"] }
+rand_core = { version = "0.10.1" }
+rand = "0.10.2"
 getrandom = "0.4.3"
 mlkem-tls = { version = "0.2", optional = true }
 ml-dsa = { version = "0.1.1", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
+rcgen = { version = "0.14", optional = true }
+time = { version = "0.3", optional = true }
 
 [features]
 default = ["chacha20poly1305", "ed25519-dalek", "hkdf", "sha2", "ml-dsa"]
@@ -32,3 +35,6 @@ full = ["default", "aes-gcm"]
 pqc = ["mlkem-tls", "ml-dsa"]
 serde = ["dep:serde"]
 wasm = ["getrandom/wasm_js"]
+hkdf = ["dep:hkdf", "dep:sha2"]
+sha2 = ["dep:sha2"]
+tls = ["dep:rcgen", "dep:time"]

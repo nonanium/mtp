@@ -32,15 +32,15 @@ async fn test_ping_rtt_and_missed_ping_teardown() -> Result<(), Box<dyn std::err
     let (mut host, cert_pem) = start_host(true).await?;
     let url = format!("https://127.0.0.1:{}", host.local_addr().port());
 
-    let client = MTPClient::connect(
+    let client_connect = MTPClient::connect(
         ClientConfig::new(url)
             .with_pinned_pem(cert_pem)
             .with_ping_interval(std::time::Duration::from_millis(25))
             .with_max_missed_pings(3),
-    )
-    .await?;
-
-    let _accepted = host.accept().await?;
+    );
+    let (client, accepted) = tokio::join!(client_connect, host.accept());
+    let client = client?;
+    let _accepted = accepted?;
 
     let ping = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -56,15 +56,15 @@ async fn test_ping_rtt_and_missed_ping_teardown() -> Result<(), Box<dyn std::err
 
     let (mut silent_host, silent_cert_pem) = start_host(false).await?;
     let silent_url = format!("https://127.0.0.1:{}", silent_host.local_addr().port());
-    let silent_client = MTPClient::connect(
+    let silent_connect = MTPClient::connect(
         ClientConfig::new(silent_url)
             .with_pinned_pem(silent_cert_pem)
             .with_ping_interval(std::time::Duration::from_millis(25))
             .with_max_missed_pings(2),
-    )
-    .await?;
-
-    let _accepted = silent_host.accept().await?;
+    );
+    let (silent_client, accepted) = tokio::join!(silent_connect, silent_host.accept());
+    let silent_client = silent_client?;
+    let _accepted = accepted?;
 
     let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {

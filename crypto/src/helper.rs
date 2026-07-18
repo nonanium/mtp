@@ -9,7 +9,9 @@ use crate::kem::HybridKem;
 #[cfg(all(feature = "mlkem-tls", feature = "chacha20poly1305", feature = "hkdf"))]
 use crate::keypair::{Keyring, PublicKeyBundle};
 #[cfg(all(feature = "mlkem-tls", feature = "chacha20poly1305", feature = "hkdf"))]
-use rand_core::RngCore;
+use rand::Rng;
+#[cfg(all(feature = "mlkem-tls", feature = "chacha20poly1305", feature = "hkdf"))]
+use zeroize::Zeroizing;
 
 pub struct RecipientEntry {
     pub kem_ciphertext: Vec<u8>,
@@ -126,10 +128,10 @@ pub fn encrypt_multi(
     aad: &[u8],
     entities: &[PublicKeyBundle],
 ) -> Result<MultiEncryptedMessage, CryptoError> {
-    let mut cek = [0u8; 32];
-    rand_core::OsRng.fill_bytes(&mut cek);
+    let mut cek = Zeroizing::new([0u8; 32]);
+    rand::rng().fill_bytes(cek.as_mut());
 
-    let cipher = ChaCha20Poly1305::new(cek);
+    let cipher = ChaCha20Poly1305::new(*cek);
     let encrypted_payload = cipher.encrypt(plaintext, aad)?;
 
     let nonce: [u8; 24] = encrypted_payload[..24]
@@ -140,14 +142,14 @@ pub fn encrypt_multi(
     let mut recipients = Vec::with_capacity(entities.len());
     for entity in entities {
         let enc = HybridKem::encapsulate(&entity.kem_public_key)?;
-        let wrap_key = derive_encryption_key(
+        let wrap_key = Zeroizing::new(derive_encryption_key(
             &enc.shared_secret,
             b"mtp-multi-key-wrap",
             b"multi-recipient",
-        )?;
+        )?);
 
-        let wrap_cipher = ChaCha20Poly1305::new(wrap_key);
-        let encrypted_key = wrap_cipher.encrypt(&cek, b"")?;
+        let wrap_cipher = ChaCha20Poly1305::new(*wrap_key);
+        let encrypted_key = wrap_cipher.encrypt(cek.as_ref(), b"")?;
 
         recipients.push(RecipientEntry {
             kem_ciphertext: enc.ciphertext,
@@ -179,19 +181,27 @@ pub fn decrypt_multi(
             Ok(s) => s,
             Err(_) => continue,
         };
-        let wrap_key = derive_encryption_key(&ss, b"mtp-multi-key-wrap", b"multi-recipient")?;
-        let wrap_cipher = ChaCha20Poly1305::new(wrap_key);
+        let wrap_key = Zeroizing::new(derive_encryption_key(
+            &ss,
+            b"mtp-multi-key-wrap",
+            b"multi-recipient",
+        )?);
+        let wrap_cipher = ChaCha20Poly1305::new(*wrap_key);
         let cek = match wrap_cipher.decrypt(&entry.encrypted_key, b"") {
-            Ok(k) => k,
+            Ok(k) => Zeroizing::new(k),
             Err(_) => continue,
         };
-        let cek_arr: [u8; 32] = cek.try_into().map_err(|_| CryptoError::DecryptionFailed)?;
+        let cek_arr = Zeroizing::new(
+            cek.as_slice()
+                .try_into()
+                .map_err(|_| CryptoError::DecryptionFailed)?,
+        );
 
         let mut full_ct = Vec::with_capacity(24 + msg.ciphertext.len());
         full_ct.extend_from_slice(&msg.nonce);
         full_ct.extend_from_slice(&msg.ciphertext);
 
-        let data_cipher = ChaCha20Poly1305::new(cek_arr);
+        let data_cipher = ChaCha20Poly1305::new(*cek_arr);
         return data_cipher.decrypt(&full_ct, aad);
     }
     Err(CryptoError::DecryptionFailed)

@@ -144,6 +144,10 @@ mod registry {
             self.versions.last_key_value().map(|(_, v)| v)
         }
 
+        pub fn versions(&self) -> impl Iterator<Item = &Version> {
+            self.versions.keys()
+        }
+
         pub fn builtin() -> Self {
             let mut r = Self::new();
             for tm in builtin_type_maps() {

@@ -4,16 +4,17 @@ use crate::pipe::PipeReader;
 use mtp_codec::CommunicationValue;
 use mtp_common::CommunicationError;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore, mpsc};
 use tokio::time::{Duration, sleep, timeout};
-use tracing::{debug, info, instrument, trace};
+use tracing::{debug, info, instrument, trace, warn};
 use wtransport::Connection;
 
 #[cfg(feature = "pipes")]
 #[derive(Debug)]
-pub enum TransportEvent {
+pub enum TransportEvent<R = wtransport::RecvStream> {
     Message(CommunicationValue),
-    Pipe(PipeReader),
+    Pipe(PipeReader<R>),
 }
 
 const APPLICATION_CLOSE_REASON: &str = "mtp-close";
@@ -28,6 +29,8 @@ pub enum SendMode {
 pub struct Policy {
     pub send_mode: SendMode,
     pub max_message_size: u64,
+    /// Receive limit used until the application-level handshake completes.
+    pub handshake_max_message_size: u64,
     pub close_frame_len: u32,
     pub application_close_code: u32,
     pub open_stream_timeout: Duration,
@@ -37,8 +40,6 @@ pub struct Policy {
     pub keep_alive_interval: Option<Duration>,
     pub max_idle_timeout: Option<Duration>,
     pub force_close_delay: Duration,
-    pub max_transient_recv_errors: usize,
-    pub transient_recv_backoff: Duration,
     pub persistent_stream_max_retries: usize,
     pub persistent_stream_retry_backoff: Duration,
     pub receiver_queue_capacity: usize,
@@ -50,7 +51,8 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             send_mode: SendMode::PersistentStream,
-            max_message_size: 1_000_000_000,
+            max_message_size: 16 * 1024 * 1024,
+            handshake_max_message_size: 64 * 1024,
             close_frame_len: u32::MAX,
             application_close_code: 0,
             open_stream_timeout: Duration::from_millis(2_000),
@@ -60,8 +62,6 @@ impl Default for Policy {
             keep_alive_interval: Some(Duration::from_secs(3)),
             max_idle_timeout: Some(Duration::from_secs(30)),
             force_close_delay: Duration::from_millis(300),
-            max_transient_recv_errors: 20,
-            transient_recv_backoff: Duration::from_millis(100),
             persistent_stream_max_retries: 4,
             persistent_stream_retry_backoff: Duration::from_millis(20),
             receiver_queue_capacity: 1000,
@@ -79,6 +79,11 @@ impl Policy {
 
     pub fn with_max_message_size(mut self, max_message_size: u64) -> Self {
         self.max_message_size = max_message_size;
+        self
+    }
+
+    pub fn with_handshake_max_message_size(mut self, max_message_size: u64) -> Self {
+        self.handshake_max_message_size = max_message_size;
         self
     }
 
@@ -179,15 +184,15 @@ impl Sender {
         match timeout(policy.write_timeout, write_result).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
-                log::warn!("[Sender] write failed: peer sent STOP_SENDING (error code {code})");
+                warn!("[Sender] write failed: peer sent STOP_SENDING (error code {code})");
                 Err(CommunicationError::StreamClosed)
             }
             Ok(Err(other)) => {
-                log::warn!("[Sender] write failed: {other}");
+                warn!("[Sender] write failed: {other}");
                 Err(CommunicationError::StreamError)
             }
             Err(_) => {
-                log::warn!("[Sender] write timed out (len={})", bytes.len());
+                warn!("[Sender] write timed out (len={})", bytes.len());
                 Err(CommunicationError::StreamError)
             }
         }
@@ -260,6 +265,12 @@ impl Sender {
             }
 
             let err = res.err().unwrap_or(CommunicationError::StreamError);
+            if !matches!(
+                err,
+                CommunicationError::StreamError | CommunicationError::StreamClosed
+            ) {
+                return Err(err);
+            }
             *stream_opt = None;
             tries += 1;
             if tries > policy.persistent_stream_max_retries {
@@ -283,15 +294,15 @@ impl Sender {
         match timeout(policy.write_timeout, stream.finish()).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
-                log::warn!("[Sender] finish failed: peer sent STOP_SENDING (error code {code})");
+                warn!("[Sender] finish failed: peer sent STOP_SENDING (error code {code})");
                 Err(CommunicationError::StreamClosed)
             }
             Ok(Err(other)) => {
-                log::warn!("[Sender] finish failed: {other}");
+                warn!("[Sender] finish failed: {other}");
                 Err(CommunicationError::StreamError)
             }
             Err(_) => {
-                log::warn!("[Sender] finish timed out");
+                warn!("[Sender] finish timed out");
                 Err(CommunicationError::StreamError)
             }
         }
@@ -308,30 +319,30 @@ impl Sender {
         match timeout(policy.write_timeout, stream.write_all(&len_bytes)).await {
             Ok(Ok(())) => {}
             Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
-                log::warn!(
+                warn!(
                     "[Sender] close frame write failed: peer sent STOP_SENDING (error code {code})"
                 );
             }
             Ok(Err(other)) => {
-                log::warn!("[Sender] close frame write failed: {other}");
+                warn!("[Sender] close frame write failed: {other}");
             }
             Err(_) => {
-                log::warn!("[Sender] close frame write timed out");
+                warn!("[Sender] close frame write timed out");
             }
         }
 
         match timeout(policy.write_timeout, stream.finish()).await {
             Ok(Ok(())) => {}
             Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
-                log::warn!(
+                warn!(
                     "[Sender] close frame finish failed: peer sent STOP_SENDING (error code {code})"
                 );
             }
             Ok(Err(other)) => {
-                log::warn!("[Sender] close frame finish failed: {other}");
+                warn!("[Sender] close frame finish failed: {other}");
             }
             Err(_) => {
-                log::warn!("[Sender] close frame finish timed out");
+                warn!("[Sender] close frame finish timed out");
             }
         }
 
@@ -402,17 +413,15 @@ impl Sender {
             match timeout(self.policy.write_timeout, stream.finish()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
-                    log::warn!(
-                        "[Sender] finish_stream: peer sent STOP_SENDING (error code {code})"
-                    );
+                    warn!("[Sender] finish_stream: peer sent STOP_SENDING (error code {code})");
                     return Err(CommunicationError::StreamClosed);
                 }
                 Ok(Err(other)) => {
-                    log::warn!("[Sender] finish_stream failed: {other}");
+                    warn!("[Sender] finish_stream failed: {other}");
                     return Err(CommunicationError::StreamError);
                 }
                 Err(_) => {
-                    log::warn!("[Sender] finish_stream timed out");
+                    warn!("[Sender] finish_stream timed out");
                     return Err(CommunicationError::StreamError);
                 }
             }
@@ -478,13 +487,13 @@ impl Sender {
             if let Some(mut stream) = stream_guard.lock().await.take() {
                 match timeout(policy.write_timeout, stream.finish()).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => log::warn!(
+                    Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => warn!(
                         "[Sender] persistent stream finish failed: peer sent STOP_SENDING (error code {code})"
                     ),
                     Ok(Err(e)) => {
-                        log::warn!("[Sender] persistent stream finish failed: {e}")
+                        warn!("[Sender] persistent stream finish failed: {e}")
                     }
-                    Err(_) => log::warn!("[Sender] persistent stream finish timed out"),
+                    Err(_) => warn!("[Sender] persistent stream finish timed out"),
                 }
             }
 
@@ -526,11 +535,11 @@ impl Sender {
 
             match timeout(policy.write_timeout, close_write).await {
                 Ok(Ok(())) => {}
-                Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => log::warn!(
+                Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => warn!(
                     "[Sender] close_and_wait failed: peer sent STOP_SENDING (error code {code})"
                 ),
-                Ok(Err(e)) => log::warn!("[Sender] close_and_wait failed: {e}"),
-                Err(_) => log::warn!("[Sender] close_and_wait timed out"),
+                Ok(Err(e)) => warn!("[Sender] close_and_wait failed: {e}"),
+                Err(_) => warn!("[Sender] close_and_wait timed out"),
             }
         } else {
             let _ = Self::send_close_frame(&connection, &policy).await;
@@ -585,6 +594,7 @@ struct ReceiverInner {
     handle: Arc<ConnectionHandle>,
     ping_control: Arc<RwLock<PingControl>>,
     queue_notify: Arc<Notify>,
+    max_message_size: Arc<AtomicU64>,
 }
 
 impl Clone for Receiver {
@@ -611,6 +621,26 @@ struct PingControl {
 
 impl Receiver {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>, policy: Arc<Policy>) -> Self {
+        Self::new_with_max_message_size(connection, handle, policy.clone(), policy.max_message_size)
+    }
+
+    pub(crate) fn new_for_handshake(
+        connection: Connection,
+        handle: Arc<ConnectionHandle>,
+        policy: Arc<Policy>,
+    ) -> Self {
+        let initial_max = policy
+            .handshake_max_message_size
+            .min(policy.max_message_size);
+        Self::new_with_max_message_size(connection, handle, policy, initial_max)
+    }
+
+    fn new_with_max_message_size(
+        connection: Connection,
+        handle: Arc<ConnectionHandle>,
+        policy: Arc<Policy>,
+        initial_max_message_size: u64,
+    ) -> Self {
         #[cfg(feature = "pipes")]
         let (msg_tx, msg_rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(
             policy.receiver_queue_capacity,
@@ -629,6 +659,8 @@ impl Receiver {
         let accept_ping_control = ping_control.clone();
         let queue_notify = Arc::new(Notify::new());
         let accept_queue_notify = queue_notify.clone();
+        let max_message_size = Arc::new(AtomicU64::new(initial_max_message_size));
+        let accept_max_message_size = max_message_size.clone();
         let stream_limit = Arc::new(Semaphore::new(policy.max_concurrent_stream_tasks.max(1)));
         let accept_stream_limit = stream_limit.clone();
         debug!(
@@ -695,6 +727,7 @@ impl Receiver {
                                 let stream_handle = conn_handle.clone();
                                 let stream_policy = accept_policy.clone();
                                 let stream_ping_control = accept_ping_control.clone();
+                                let stream_max_message_size = accept_max_message_size.clone();
 
                                 tokio::spawn(async move {
                                     let _permit = permit;
@@ -713,7 +746,8 @@ impl Receiver {
                                             break;
                                         }
 
-                                        match Self::read_one_frame(&mut s, &stream_policy).await {
+                                        let frame_limit = stream_max_message_size.load(Ordering::Relaxed);
+                                        match Self::read_one_frame(&mut s, &stream_policy, frame_limit).await {
                                             Ok(ReceivedFrame::Message(msg)) => {
                                                 frame_count += 1;
 
@@ -721,8 +755,8 @@ impl Receiver {
                                                 {
                                                     let pipe_request_type =
                                                         mtp_codec::CommunicationType::PipeRequest
-                                                            .to_id(&mtp_codec::TypeMap::latest());
-                                                    if msg.get_type() == pipe_request_type
+                                                            .try_to_id(&mtp_codec::TypeMap::latest());
+                                                    if Some(msg.get_type()) == pipe_request_type
                                                         && frame_count == 1
                                                     {
                                                         let pipe_id = msg.get_id();
@@ -751,17 +785,17 @@ impl Receiver {
                                                 }
 
                                                 let ping_type = mtp_codec::CommunicationType::Ping
-                                                    .to_id(&mtp_codec::TypeMap::latest());
+                                                    .try_to_id(&mtp_codec::TypeMap::latest());
                                                 let pong_type = mtp_codec::CommunicationType::Pong
-                                                    .to_id(&mtp_codec::TypeMap::latest());
+                                                    .try_to_id(&mtp_codec::TypeMap::latest());
                                                 let control = {
                                                     let control = stream_ping_control.read().await;
-                                                    if msg.get_type() == ping_type {
+                                                    if Some(msg.get_type()) == ping_type {
                                                         control
                                                             .pong_sender
                                                             .clone()
                                                             .map(|sender| (Some(sender), None))
-                                                    } else if msg.get_type() == pong_type {
+                                                    } else if Some(msg.get_type()) == pong_type {
                                                         control
                                                             .pong_observer
                                                             .clone()
@@ -781,7 +815,7 @@ impl Receiver {
                                                             );
                                                     }
                                                     if let Err(e) = sender.send(&pong).await {
-                                                        log::warn!("[Receiver] failed to send Pong: {e}");
+                                                        warn!("[Receiver] failed to send Pong: {e}");
                                                     }
                                                     continue;
                                                 }
@@ -882,8 +916,16 @@ impl Receiver {
                 handle,
                 ping_control,
                 queue_notify,
+                max_message_size,
             }),
         }
+    }
+
+    /// Change the receive cap for subsequently parsed frames.
+    pub fn set_max_message_size(&self, max_message_size: u64) {
+        self.inner
+            .max_message_size
+            .store(max_message_size, Ordering::Relaxed);
     }
 
     /* Respond to reserved Ping frames without exposing them to application I/O. */
@@ -891,7 +933,7 @@ impl Receiver {
         if let Ok(mut control) = self.inner.ping_control.try_write() {
             control.pong_sender = Some(sender);
         } else {
-            log::warn!("[Receiver] could not register Ping responder: control lock busy");
+            warn!("[Receiver] could not register Ping responder: control lock busy");
         }
     }
 
@@ -900,7 +942,7 @@ impl Receiver {
         if let Ok(mut control) = self.inner.ping_control.try_write() {
             control.pong_observer = Some(observer);
         } else {
-            log::warn!("[Receiver] could not register Pong observer: control lock busy");
+            warn!("[Receiver] could not register Pong observer: control lock busy");
         }
     }
 
@@ -908,6 +950,7 @@ impl Receiver {
     async fn read_one_frame(
         stream: &mut wtransport::RecvStream,
         policy: &Policy,
+        max_message_size: u64,
     ) -> Result<ReceivedFrame, CommunicationError> {
         use wtransport::error::{StreamReadError, StreamReadExactError};
 
@@ -918,23 +961,23 @@ impl Receiver {
                 return Ok(ReceivedFrame::Idle);
             }
             Ok(Err(StreamReadExactError::FinishedEarly(n))) => {
-                log::warn!(
+                warn!(
                     "[Receiver] length-prefix read ended early ({n}/4 bytes): stream closed by peer"
                 );
                 return Err(CommunicationError::StreamError);
             }
             Ok(Err(StreamReadExactError::Read(StreamReadError::Reset(code)))) => {
-                log::warn!(
+                warn!(
                     "[Receiver] length-prefix read failed: peer sent RESET_STREAM (error code {code})"
                 );
                 return Err(CommunicationError::StreamError);
             }
             Ok(Err(other)) => {
-                log::warn!("[Receiver] length-prefix read failed: {other}");
+                warn!("[Receiver] length-prefix read failed: {other}");
                 return Err(CommunicationError::StreamError);
             }
             Err(_) => {
-                log::warn!("[Receiver] length-prefix read timed out");
+                warn!("[Receiver] length-prefix read timed out");
                 return Err(CommunicationError::StreamError);
             }
         }
@@ -945,32 +988,50 @@ impl Receiver {
         }
 
         let len_usize = len as usize;
-        if len as u64 > policy.max_message_size {
+        if len as u64 > max_message_size {
             return Err(CommunicationError::MessageTooLarge);
         }
 
-        let mut buf = vec![0u8; len_usize];
-        match timeout(policy.read_timeout, stream.read_exact(&mut buf)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(StreamReadExactError::FinishedEarly(n))) => {
-                log::warn!(
-                    "[Receiver] body read ended early ({n}/{len_usize} bytes): stream closed by peer"
-                );
-                return Err(CommunicationError::StreamError);
-            }
-            Ok(Err(StreamReadExactError::Read(StreamReadError::Reset(code)))) => {
-                log::warn!(
-                    "[Receiver] body read failed: peer sent RESET_STREAM (error code {code})"
-                );
-                return Err(CommunicationError::StreamError);
-            }
-            Ok(Err(other)) => {
-                log::warn!("[Receiver] body read failed: {other}");
-                return Err(CommunicationError::StreamError);
-            }
-            Err(_) => {
-                log::warn!("[Receiver] body read timed out (len={len_usize})");
-                return Err(CommunicationError::StreamError);
+        // Grow in bounded chunks instead of trusting the peer's length prefix
+        // enough to allocate the complete frame up front.
+        let mut buf = Vec::new();
+        buf.try_reserve(len_usize.min(16 * 1024))
+            .map_err(|_| CommunicationError::MessageTooLarge)?;
+        while buf.len() < len_usize {
+            let chunk_len = (len_usize - buf.len()).min(16 * 1024);
+            let mut chunk = [0u8; 16 * 1024];
+            match timeout(
+                policy.read_timeout,
+                stream.read_exact(&mut chunk[..chunk_len]),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    buf.try_reserve(chunk_len)
+                        .map_err(|_| CommunicationError::MessageTooLarge)?;
+                    buf.extend_from_slice(&chunk[..chunk_len]);
+                }
+                Ok(Err(StreamReadExactError::FinishedEarly(n))) => {
+                    warn!(
+                        "[Receiver] body read ended early ({}/{len_usize} bytes): stream closed by peer",
+                        buf.len() + n
+                    );
+                    return Err(CommunicationError::StreamError);
+                }
+                Ok(Err(StreamReadExactError::Read(StreamReadError::Reset(code)))) => {
+                    warn!(
+                        "[Receiver] body read failed: peer sent RESET_STREAM (error code {code})"
+                    );
+                    return Err(CommunicationError::StreamError);
+                }
+                Ok(Err(other)) => {
+                    warn!("[Receiver] body read failed: {other}");
+                    return Err(CommunicationError::StreamError);
+                }
+                Err(_) => {
+                    warn!("[Receiver] body read timed out (len={len_usize})");
+                    return Err(CommunicationError::StreamError);
+                }
             }
         }
 
@@ -1155,7 +1216,8 @@ mod tests {
     fn test_policy_default_values() {
         let p = Policy::default();
         assert_eq!(p.send_mode, SendMode::PersistentStream);
-        assert_eq!(p.max_message_size, 1_000_000_000);
+        assert_eq!(p.max_message_size, 16 * 1024 * 1024);
+        assert_eq!(p.handshake_max_message_size, 64 * 1024);
         assert_eq!(p.close_frame_len, u32::MAX);
         assert_eq!(p.application_close_code, 0);
         assert_eq!(p.open_stream_timeout, Duration::from_millis(2_000));
@@ -1165,8 +1227,6 @@ mod tests {
         assert_eq!(p.keep_alive_interval, Some(Duration::from_secs(3)));
         assert_eq!(p.max_idle_timeout, Some(Duration::from_secs(30)));
         assert_eq!(p.force_close_delay, Duration::from_millis(300));
-        assert_eq!(p.max_transient_recv_errors, 20);
-        assert_eq!(p.transient_recv_backoff, Duration::from_millis(100));
         assert_eq!(p.persistent_stream_max_retries, 4);
         assert_eq!(p.persistent_stream_retry_backoff, Duration::from_millis(20));
         assert_eq!(p.receiver_queue_capacity, 1000);

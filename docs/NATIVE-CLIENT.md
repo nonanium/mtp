@@ -2,22 +2,27 @@
 
 The native client is a Rust library (`mtp-client`) for connecting to an MTP host over QUIC. It uses `wtransport` under the hood and provides both unauthenticated and authenticated (crypto handshake) connection modes.
 
-## Cargo Dependency
+## Prerequisites
 
-Add the `mtp` umbrella crate with the `client` feature (and optionally `crypto` for authentication):
+Add the `mtp` umbrella crate with `client`. Add `crypto` for authenticated connections, `pipes` for raw streams, and `tls` for development certificate generation. The `insecure-tls` feature applies only to the lower-level transport API. The feature table is in the [README](../README.md).
 
-```toml
-[dependencies]
-mtp = { path = "/path/to/mtp", features = ["client"] }
+## Quick Start
 
-# Add crypto for auth_connect / auth_register:
-mtp = { path = "/path/to/mtp", features = ["client", "crypto"] }
+```rust
+use mtp::client::{ClientConfig, MTPClient};
+use mtp::codec::{CommunicationType, CommunicationValue};
 
-# Add pipes for raw binary streams:
-mtp = { path = "/path/to/mtp", features = ["client", "pipes"] }
+let conn = MTPClient::connect(
+    ClientConfig::new("https://host.example.com:4433").with_client_id(42),
+).await?;
+let request = CommunicationValue::new(CommunicationType::Ping).with_id(1);
+conn.sender.send(&request).await?;
+let response = conn.receive().await?;
+println!("received {}", response.get_id());
+conn.sender.close();
 ```
 
-## ClientConfig
+## Configuration
 
 ```rust
 use mtp::client::{ClientConfig, ClientTlsConfig};
@@ -42,66 +47,39 @@ let config = ClientConfig::new("https://host.example.com:4433")
 | `ping_jitter`           | `Option<Duration>` | `None`           | Random jitter added to each interval        |
 | `max_missed_pings`      | `usize`            | `3`              | Disconnect after this many unanswered Pings |
 | `ping_timestamp`        | `bool`             | `true`           | Include a `Timestamp` data entry in Ping    |
+| `request_timeout`       | `Duration`         | `30s`            | Max time for `MTPConnection::request`      |
 | `auth_timeout` (crypto) | `Duration`         | `30s`            | Max time for auth handshake                 |
+| `require_pq` (crypto)   | `bool`             | `true`           | Require ML-DSA-65 during authentication    |
 
 ### TLS Certificate Handling
 
-When `tls` is `ClientTlsConfig::SystemRoots` (the default), the client loads the **system's
-native root certificate store** via `rustls_native_certs`. This works with
-publicly-trusted CAs out of the box on Linux (using `openssl-probe`), macOS
-(Keychain), and Windows (Root Store).
+`ClientTlsConfig::SystemRoots` is the default. Use `ClientTlsConfig::PinnedPem` or `ClientConfig::with_pinned_pem` for a supplied certificate chain. SPKI pinning and development or insecure transport configuration are available through lower-level transport APIs. See [Security](SECURITY.md) for trust models, certificate generation, rotation, and the insecure-mode gates.
 
-For development or self-signed certificates, provide one or more PEM-encoded
-certificates:
-
-```rust
-let pem = std::fs::read("my-server-cert.pem")?;
-let config = ClientConfig::new("https://host.example.com:4433").with_pinned_pem(pem);
-```
-
-When pinned, **only** the given certificate(s) are trusted for the TLS
-handshake.
-
-## Connection Methods
+## Connecting
 
 All methods return a `Result<MTPConnection, CommunicationError>`.
 
 ### MTPConnection
 
+Shared fields and lifecycle: [MTP Connections](CONNECTIONS.md).
+
+Keepalive behavior is defined in [Protocol Reference](PROTOCOL-REFERENCE.md#protocol-keepalive).
+
+### Requests
+
+`MTPConnection::request` sends a `CommunicationValue` and waits for a response with the same frame ID. It uses `ClientConfig::request_timeout`; timeout and connection errors reject the request.
+
+The request must have a non-zero ID. The response is removed from the pending request table and is not returned by a later `conn.receive()` call. A timeout removes the pending request and returns `CommunicationError`; a response with the wrong expected type also returns an error. Frames with other IDs remain available through `conn.receive()`.
+
 ```rust
-pub struct MTPConnection {
-    pub version: Version,
-    pub sender: Sender,
-    pub receiver: Receiver,
-    pub description: Option<String>,
-    #[cfg(feature = "crypto")]
-    pub auth_state: AuthState,
-    #[cfg(feature = "crypto")]
-    pub client_id: u64,
-}
+let response = conn
+    .request(&request_value, Some(CommunicationType::Pong))
+    .await?;
 ```
 
-- `version` -- the negotiated protocol version
-- `sender` / `receiver` -- for message I/O
-- `description` -- the label sent during handshake (set via `ClientConfig::with_description`)
-- `client_id` -- the confirmed/assigned client identifier (crypto only)
+### Protocol keepalive
 
-When `ping_interval` is non-zero, MTP sends Ping frames in the background and
-consumes their Pong responses before application message handling. `get_ping()`
-returns the round-trip duration of the latest matched Pong, or `None` until a
-Pong arrives. A connection closes when the configured unanswered Ping limit is
-reached.
-
-### Ping-Pong
-
-Ping/Pong is part of the protocol, not just a transport keepalive. Each Ping
-frame is matched against a Pong with the same frame id, and the client uses the
-response to update `get_ping()`. If the host does not answer within the
-configured limit, the connection closes.
-
-Enable it in `ClientConfig`, then inspect the latest round-trip time on the
-connection. Pings start after the connection has been established; `None` is
-normal until the first matching Pong arrives.
+Enable it with `ClientConfig` and inspect the latest matched round-trip time with `get_ping()`. See [Protocol Reference](PROTOCOL-REFERENCE.md).
 
 ```rust
 use mtp::client::{ClientConfig, MTPClient};
@@ -120,11 +98,7 @@ if let Some(round_trip) = conn.get_ping() {
 }
 ```
 
-The client consumes the Pong frames used by this loop, so they are not returned
-by `conn.receiver.receive()`. Set `ping_interval` to `Duration::ZERO` (the
-default) to disable protocol pings. `max_missed_pings` is the number of
-outstanding Ping frames allowed before the client closes the connection; use a
-host with automatic Pong responses, or provide an equivalent responder.
+Pong dispatch and missed-Ping behavior are defined in [Protocol Reference](PROTOCOL-REFERENCE.md#protocol-keepalive). Set `ping_interval` to `Duration::ZERO` (the default) to disable protocol pings.
 
 ### Unauthenticated Connect
 
@@ -136,8 +110,7 @@ let config = ClientConfig::new("https://host.example.com:4433").with_client_id(4
 let conn = MTPClient::connect(config).await?;
 ```
 
-Sends an `Identification` frame with the compiled-in protocol version and
-client ID. No cryptographic handshake is performed.
+Sends an `Identification` frame with the compiled-in protocol version and client ID. No cryptographic handshake is performed.
 
 ### Authenticated Login
 
@@ -154,21 +127,7 @@ let config = ClientConfig::new("https://host.example.com:4433")
 let conn = MTPClient::auth_connect(config, &keys, &host_pk).await?;
 ```
 
-Protocol (challenge-response, the host issues the freshness):
-1. Client sends an unsigned `Identification` hello (version, client ID)
-2. Host replies with a `Challenge` carrying a fresh random `server_challenge`
-   and the host's signature over it; the client verifies that signature
-3. Client generates a random `client_nonce` and signs
-   `version || client_id || server_challenge || client_nonce` with Ed25519
-   (and optionally ML-DSA-65)
-4. Client sends a `ChallengeResponse` frame (nonce + signature(s))
-5. Host verifies the proof against `server_challenge` and responds with
-   `IdentificationResponse` (echoed nonce + host signature)
-6. Client verifies the host signature and nonce echo
-
-Because the client's signature covers the host-issued `server_challenge`, a
-captured proof cannot be replayed on another connection (each connection gets a
-different challenge).
+Authentication uses the signed challenge flow in [Protocol Reference](PROTOCOL-REFERENCE.md#authentication-flow). Cryptographic fields and domain separation are defined in [Security](SECURITY.md).
 
 ### Registration
 
@@ -186,8 +145,7 @@ let id = conn.client_id;
 let keyring_bytes = keyring.to_bytes();
 ```
 
-When callers already know whether a saved client id exists, the convenience
-helper chooses login or registration:
+When callers already know whether a saved client ID exists, the convenience helper uses `Some(id)` for login and `None` for registration:
 
 ```rust
 let conn = MTPClient::auth_connect_or_register(
@@ -198,17 +156,7 @@ let conn = MTPClient::auth_connect_or_register(
 ).await?;
 ```
 
-Protocol (challenge-response):
-1. Client sends an unsigned `Register` hello (version, public key bundle)
-2. Host replies with a `Challenge` carrying a fresh random `server_challenge`
-   (signed by the host); the client verifies that signature
-3. Client generates a random `client_nonce` and signs
-   `version || server_challenge || client_nonce || public_key_bytes` with
-   Ed25519 (and optionally ML-DSA-65)
-4. Client sends a `ChallengeResponse` frame (nonce + signature(s))
-5. Host verifies the proof against `server_challenge`, assigns a new client ID,
-   and responds with `RegisterResponse` (the ID, echoed nonce, host signature)
-6. Client verifies the host signature and nonce echo
+Registration uses the authentication flow in [Protocol Reference](PROTOCOL-REFERENCE.md#authentication-flow).
 
 ## Key Material
 
@@ -233,8 +181,7 @@ pub struct Keyring {
 
 ### PublicKeyBundle
 
-The public half of a keyring, used by the host for signature verification and
-by the client for host signature verification:
+The public half of a keyring, used by the host for signature verification and by the client for host signature verification:
 
 ```rust
 pub struct PublicKeyBundle {
@@ -244,10 +191,11 @@ pub struct PublicKeyBundle {
 }
 ```
 
-Obtain the host's `PublicKeyBundle` out of band (e.g. from files exported by
-the host, or from a trusted directory).
+Obtain the host's `PublicKeyBundle` out of band (e.g. from files exported by the host, or from a trusted directory).
 
-## Sending and Receiving Messages
+## Communicate
+
+### Sending and Receiving Messages
 
 ### CommunicationValue
 
@@ -264,9 +212,7 @@ let msg = CommunicationValue::new(CommunicationType::Ping)
     .to_bytes();
 ```
 
-When the `registry` feature is enabled (via the `host` feature), you can also
-use `add_typed` with a `TypeMap` to resolve data type names from your project's
-type-map configuration.
+When the `registry` feature is enabled (via the `host` feature), you can also use `add_typed` with a `TypeMap` to resolve data type names from your project's type-map configuration.
 
 ### Send
 
@@ -274,9 +220,7 @@ type-map configuration.
 conn.sender.send(&msg).await?;
 ```
 
-For request/response flows, `MTPConnection::request` sends one frame and waits
-for a response with the same non-zero frame id. An expected response type can be
-provided for validation:
+For request/response flows, `MTPConnection::request` sends one frame and waits for a response with the same non-zero frame id. An expected response type can be provided for validation:
 
 ```rust
 let response = conn
@@ -284,24 +228,22 @@ let response = conn
     .await?;
 ```
 
-Frames with other ids are consumed by this helper. Applications that need
-subscriptions or broad routing should use one receive task and correlate there.
+Requests are routed by id through the connection's receive dispatcher. Frames with other ids remain available through `conn.receive()`.
 
 Two send modes (configured via `mtp::transport::Policy`):
-- `PersistentStream` (default) -- reuses one QUIC uni-directional stream
-- `SingleStreamPerMessage` -- opens a new stream per message
+- `PersistentStream` (default): reuses one QUIC unidirectional stream
+- `SingleStreamPerMessage`: opens a new stream per message
 
 ### Receive
 
 ```rust
-match conn.receiver.receive().await {
+match conn.receive().await {
     Ok(msg) => { /* handle CommunicationValue */ }
     Err(e) => { /* connection closed or error */ }
 }
 ```
 
-Inbound frames are queued internally. The `receive()` method returns the next
-available message.
+Inbound frames are queued internally. The `receive()` method returns the next available message. Do not read from `conn.receiver` directly because the connection dispatcher owns the shared transport receive loop.
 
 ### Close
 
@@ -311,121 +253,15 @@ conn.sender.close();
 conn.receiver.close();
 ```
 
-Sends a close frame and signals the peer. The `Sender::close()` spawns an async
-task that sends the frame, waits for `force_close_delay` (default 300ms), then
-force-closes the QUIC connection if the peer has not already done so.
+Sends a close frame and signals the peer. The `Sender::close()` spawns an async task that sends the frame, waits for `force_close_delay` (default 300ms), then force-closes the QUIC connection if the peer has not already done so.
 
-## Pipes
+### Pipes
 
-With the `pipes` feature enabled, the client can open **raw binary streams**
-to the host. A Pipe is a unidirectional QUIC stream that carries a lightweight
-`PipeRequest` handshake frame, then transitions to raw bytes with zero per-frame
-overhead.
+The complete pipe protocol, native API, browser API, lifecycle, and errors are documented in [Pipes](PIPES.md). Use the connection facade described there when the `pipes` feature is enabled.
 
-### Enabling Pipes
+## Appendix: Crypto Containers
 
-Add the `pipes` feature to your dependency:
-
-```toml
-[dependencies]
-mtp = { path = "/path/to/mtp", features = ["client", "pipes"] }
-```
-
-### Creating a Pipe
-
-```rust
-use mtp::client::MTPClient;
-use tokio::io::AsyncWriteExt;
-
-let conn = MTPClient::connect(config).await?;
-
-// Initiate a pipe request
-let handle = conn.create_pipe("file-transfer").await?;
-
-// Wait for the host to accept or reject
-match handle.wait().await? {
-    Some(mut writer) => {
-        writer.write_all(b"raw binary data").await?;
-        writer.finish().await?; // graceful close
-    }
-    None => {
-        println!("host rejected the pipe");
-    }
-}
-```
-
-### PipeHandle
-
-```rust
-pub struct PipeHandle {
-    pipe_id: u32,
-    description: String,
-}
-```
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `wait()` | `Result<Option<PipeWriter>, PipeError>` | Block until the host responds. `Some(writer)` if accepted, `None` if rejected. |
-
-`PipeHandle` consumes itself on `wait()`, so you cannot poll it multiple times.
-
-### PipeWriter
-
-```rust
-pub struct PipeWriter {
-    // wraps a QUIC SendStream
-}
-```
-
-`PipeWriter` implements `tokio::io::AsyncWrite`. After the handshake succeeds,
-writes go directly to the QUIC stream with no framing overhead.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `finish()` | `Result<(), CommunicationError>` | Gracefully close the stream (sends FIN) |
-| `abort()` | `Result<(), ClosedStream>` | Abruptly reset the stream |
-
-```rust
-use tokio::io::AsyncWriteExt;
-
-let mut writer = handle.wait().await?.unwrap();
-writer.write_all(b"chunk 1").await?;
-writer.write_all(b"chunk 2").await?;
-writer.finish().await?;
-```
-
-### PipeError
-
-```rust
-pub enum PipeError {
-    Rejected,          // pipe request was rejected
-    HandshakeTimeout,  // pipe handshake timed out
-    StreamClosed,      // pipe stream closed unexpectedly
-    IoError(String),   // pipe I/O error
-    ConnectionClosed,  // connection closed
-}
-```
-
-`PipeError` implements `std::error::Error` and can be converted from
-`CommunicationError` via `PipeError::from()`.
-
-### Do Not Use `receiver.receive()` for Pipes
-
-When the `pipes` feature is active, `conn.receiver.receive()` will **skip**
-`PipeResponse` frames and may return them as ordinary messages if called from
-the wrong task. Use the facade methods:
-
-- `conn.receive()` to receive normal `CommunicationValue` messages
-- `conn.create_pipe(description)` to initiate a new pipe
-
-These methods are internally synchronised and safe to call from separate tasks.
-
-## Crypto Containers
-
-With the `crypto` feature, `DataValue` supports encrypted, signed, and
-signed+encrypted containers. Encryption uses ML-KEM to encapsulate to a
-recipient's KEM public key (from their `PublicKeyBundle`); only the holder of
-the matching `Keyring` can decrypt. Signing uses the sender's Ed25519 key.
+With the `crypto` feature, `DataValue` supports encrypted, signed, and signed+encrypted containers. Encryption uses ML-KEM to encapsulate to a recipient's KEM public key (from their `PublicKeyBundle`); only the holder of the matching `Keyring` can decrypt. Signing uses the sender's Ed25519 key.
 
 ```rust
 use mtp::crypto::{EncryptionType, Ed25519Signer, SigAlgorithm};
@@ -454,10 +290,10 @@ let mut sec = DataValue::Container(vec![
 ]);
 sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, enc_type, &recipient, b"aad");
 ```
+> Note: DataTypeId(1) maps intenally to the reserved DataType::Id, uncareful work with reserved DataTypes & CommunicationTypes (0 - 31) may lead to unexpected behaviour.
+> Prefer registring your own.
 
-On the receiving side, the recipient decrypts with its own `Keyring` (each blob
-is self-describing: its leading byte selects the algorithm and the matching KEM
-key from the keyring):
+On the receiving side, the recipient decrypts with its own `Keyring` (each blob is self-describing: its leading byte selects the algorithm and the matching KEM key from the keyring):
 
 ```rust
 enc.decrypt_into_container(&keyring, b"aad");                // -> Container
@@ -465,7 +301,7 @@ sig.verify_into_container(&verifier);                        // verifier: impl S
 sec.decrypt_signed_encrypted_container(&keyring, b"aad");    // -> SignedContainer, then verify_into_container
 ```
 
-## Policy Configuration
+### Policy Configuration
 
 The `Policy` struct controls transport behaviour:
 
@@ -474,7 +310,8 @@ use mtp::transport::{Policy, SendMode};
 
 let policy = Policy {
     send_mode: SendMode::PersistentStream,
-    max_message_size: 1_000_000_000,
+    max_message_size: 16 * 1024 * 1024,
+    handshake_max_message_size: 64 * 1024,
     open_stream_timeout: Duration::from_millis(2000),
     write_timeout: Duration::from_millis(2000),
     read_timeout: Duration::from_millis(30_000),
@@ -484,41 +321,20 @@ let policy = Policy {
 };
 ```
 
-To apply a custom policy, call `mtp_transport::connect()` directly instead of
-using `MTPClient`:
+Apply a custom policy with `ClientConfig::with_policy`:
 
 ```rust
-use mtp_transport::{connect, Policy};
-
-let server_cert = match &config.tls {
-    ClientTlsConfig::SystemRoots => None,
-    ClientTlsConfig::PinnedPem(pem) => Some(pem.clone()),
-};
-let (sender, receiver) = connect(&config.url, server_cert, policy).await?;
+let config = config.with_policy(policy);
+let conn = MTPClient::connect(config).await?;
 ```
 
-Then build and send the initial `Identification` frame manually to complete
-version negotiation.
+### Version
 
-## Version
+The client's protocol version is baked in at compile time via the `PROTOCOL_VERSION` constant from `mtp::codec`. The version is set by the `protocol_version` field in your `type-maps.yaml`.
 
-The client's protocol version is baked in at compile time via the
-`PROTOCOL_VERSION` constant from `mtp::codec`. The version is set by the
-`protocol_version` field in your `type-maps.yaml`.
+The client never imports the `registry` module; it uses a single compiled-in version and expects the host to negotiate a compatible version.
 
-The client never imports the `registry` module; it uses a single compiled-in
-version and expects the host to negotiate a compatible version.
+### Error Handling
 
-## Error Handling
-
-`CommunicationError` covers transport errors:
-
-| Variant                 | Meaning                                    |
-|-------------------------|--------------------------------------------|
-| `StreamClosed`          | Connection was closed by peer or timed out |
-| `StreamError`           | Transport-level I/O error                  |
-| `MessageTooLarge`       | Frame exceeds `max_message_size`           |
-| `ParseCommunicationValue` | Failed to deserialize incoming frame     |
-| `AuthenticationFailed`  | Nonce mismatch or invalid host signature   |
-| `ConnectionError`       | QUIC connection failure                    |
-| `UseAfterClosed`        | Attempted send/receive after close         |
+`CommunicationError` is summarized in the [Error Reference](ERRORS.md).
+Native builds can expose additional variants that wrap QUIC and WebTransport errors.

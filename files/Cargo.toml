@@ -1,10 +1,13 @@
 [package]
 name = "mtp-files"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
 # Only the plain key types (`Keyring`, `PublicKeyBundle`, `CryptoError`) are
 # needed here; those are always compiled, so no crypto features are required.
-mtp-crypto = { version = "0.1.0", path = "../crypto", default-features = false }
+mtp-crypto = { version = "0.2.0", path = "../crypto", default-features = false, features = ["chacha20poly1305", "hkdf"] }
+rand = "0.10.2"
+
 thiserror = "1"
+zeroize = "1.9"

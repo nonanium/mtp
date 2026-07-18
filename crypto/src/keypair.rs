@@ -2,179 +2,59 @@ use std::fmt;
 
 use base64::Engine;
 use base64::engine::general_purpose;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 // --- Private key types ---
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub struct EncryptionPrivateKey(Vec<u8>);
+macro_rules! impl_private_key {
+    ($name:ident) => {
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        #[cfg_attr(feature = "serde", serde(transparent))]
+        #[derive(Zeroize, ZeroizeOnDrop)]
+        pub struct $name(Vec<u8>);
 
-impl EncryptionPrivateKey {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
+        impl $name {
+            pub fn new(bytes: Vec<u8>) -> Self {
+                Self(bytes)
+            }
+            pub fn as_bytes(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct(stringify!($name))
+                    .field("len", &self.0.len())
+                    .field("data", &"[REDACTED]")
+                    .finish()
+            }
+        }
+
+        impl AsRef<[u8]> for $name {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
+        impl From<Vec<u8>> for $name {
+            fn from(bytes: Vec<u8>) -> Self {
+                Self(bytes)
+            }
+        }
+
+        impl From<&[u8]> for $name {
+            fn from(bytes: &[u8]) -> Self {
+                Self(bytes.to_vec())
+            }
+        }
+    };
 }
 
-impl fmt::Debug for EncryptionPrivateKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EncryptionPrivateKey")
-            .field("len", &self.0.len())
-            .field("data", &"[REDACTED]")
-            .finish()
-    }
-}
-
-impl AsRef<[u8]> for EncryptionPrivateKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<Vec<u8>> for EncryptionPrivateKey {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-}
-
-impl From<&[u8]> for EncryptionPrivateKey {
-    fn from(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-// ---
-
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub struct SignaturePrivateKey(Vec<u8>);
-
-impl SignaturePrivateKey {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for SignaturePrivateKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SignaturePrivateKey")
-            .field("len", &self.0.len())
-            .field("data", &"[REDACTED]")
-            .finish()
-    }
-}
-
-impl AsRef<[u8]> for SignaturePrivateKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<Vec<u8>> for SignaturePrivateKey {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-}
-
-impl From<&[u8]> for SignaturePrivateKey {
-    fn from(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-// ---
-
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub struct KemPrivateKey(Vec<u8>);
-
-impl KemPrivateKey {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for KemPrivateKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KemPrivateKey")
-            .field("len", &self.0.len())
-            .field("data", &"[REDACTED]")
-            .finish()
-    }
-}
-
-impl AsRef<[u8]> for KemPrivateKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<Vec<u8>> for KemPrivateKey {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-}
-
-impl From<&[u8]> for KemPrivateKey {
-    fn from(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-// ---
-
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-#[derive(Zeroize, ZeroizeOnDrop)]
-pub struct SignaturePqPrivateKey(Vec<u8>);
-
-impl SignaturePqPrivateKey {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for SignaturePqPrivateKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SignaturePqPrivateKey")
-            .field("len", &self.0.len())
-            .field("data", &"[REDACTED]")
-            .finish()
-    }
-}
-
-impl AsRef<[u8]> for SignaturePqPrivateKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<Vec<u8>> for SignaturePqPrivateKey {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-}
-
-impl From<&[u8]> for SignaturePqPrivateKey {
-    fn from(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec())
-    }
-}
+impl_private_key!(EncryptionPrivateKey);
+impl_private_key!(SignaturePrivateKey);
+impl_private_key!(KemPrivateKey);
+impl_private_key!(SignaturePqPrivateKey);
 
 // --- Public key types ---
 
@@ -210,213 +90,64 @@ fn base64_to_bytes(s: &str) -> Result<Vec<u8>, crate::error::CryptoError> {
         .map_err(|_| crate::error::CryptoError::InvalidBase64)
 }
 
-// ---
+macro_rules! impl_public_key {
+    ($name:ident) => {
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        #[cfg_attr(feature = "serde", serde(transparent))]
+        #[derive(Clone)]
+        pub struct $name(Vec<u8>);
 
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-#[derive(Clone)]
-pub struct EncryptionPublicKey(Vec<u8>);
+        impl $name {
+            pub fn new(bytes: Vec<u8>) -> Self {
+                Self(bytes)
+            }
+            pub fn as_bytes(&self) -> &[u8] {
+                &self.0
+            }
+            pub fn to_hex(&self) -> String {
+                bytes_to_hex(&self.0)
+            }
+            pub fn from_hex(s: &str) -> Result<Self, crate::error::CryptoError> {
+                hex_to_bytes(s).map(Self)
+            }
+        }
 
-impl EncryptionPublicKey {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-    pub fn to_hex(&self) -> String {
-        bytes_to_hex(&self.0)
-    }
-    pub fn from_hex(s: &str) -> Result<Self, crate::error::CryptoError> {
-        hex_to_bytes(s).map(Self)
-    }
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}({})", stringify!($name), self.to_hex())
+            }
+        }
+
+        impl AsRef<[u8]> for $name {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
+        impl From<Vec<u8>> for $name {
+            fn from(bytes: Vec<u8>) -> Self {
+                Self(bytes)
+            }
+        }
+
+        impl From<&[u8]> for $name {
+            fn from(bytes: &[u8]) -> Self {
+                Self(bytes.to_vec())
+            }
+        }
+
+        impl From<&$name> for Vec<u8> {
+            fn from(key: &$name) -> Vec<u8> {
+                key.0.clone()
+            }
+        }
+    };
 }
 
-impl fmt::Debug for EncryptionPublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "EncryptionPublicKey({})", self.to_hex())
-    }
-}
-
-impl AsRef<[u8]> for EncryptionPublicKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<Vec<u8>> for EncryptionPublicKey {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-}
-
-impl From<&[u8]> for EncryptionPublicKey {
-    fn from(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-impl From<&EncryptionPublicKey> for Vec<u8> {
-    fn from(key: &EncryptionPublicKey) -> Vec<u8> {
-        key.0.clone()
-    }
-}
-
-// ---
-
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-#[derive(Clone)]
-pub struct SignaturePublicKey(Vec<u8>);
-
-impl SignaturePublicKey {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-    pub fn to_hex(&self) -> String {
-        bytes_to_hex(&self.0)
-    }
-    pub fn from_hex(s: &str) -> Result<Self, crate::error::CryptoError> {
-        hex_to_bytes(s).map(Self)
-    }
-}
-
-impl fmt::Debug for SignaturePublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SignaturePublicKey({})", self.to_hex())
-    }
-}
-
-impl AsRef<[u8]> for SignaturePublicKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<Vec<u8>> for SignaturePublicKey {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-}
-
-impl From<&[u8]> for SignaturePublicKey {
-    fn from(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-impl From<&SignaturePublicKey> for Vec<u8> {
-    fn from(key: &SignaturePublicKey) -> Vec<u8> {
-        key.0.clone()
-    }
-}
-
-// ---
-
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-#[derive(Clone)]
-pub struct KemPublicKey(Vec<u8>);
-
-impl KemPublicKey {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-    pub fn to_hex(&self) -> String {
-        bytes_to_hex(&self.0)
-    }
-    pub fn from_hex(s: &str) -> Result<Self, crate::error::CryptoError> {
-        hex_to_bytes(s).map(Self)
-    }
-}
-
-impl fmt::Debug for KemPublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "KemPublicKey({})", self.to_hex())
-    }
-}
-
-impl AsRef<[u8]> for KemPublicKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<Vec<u8>> for KemPublicKey {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-}
-
-impl From<&[u8]> for KemPublicKey {
-    fn from(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-impl From<&KemPublicKey> for Vec<u8> {
-    fn from(key: &KemPublicKey) -> Vec<u8> {
-        key.0.clone()
-    }
-}
-
-// ---
-
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-#[derive(Clone)]
-pub struct SignaturePqPublicKey(Vec<u8>);
-
-impl SignaturePqPublicKey {
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-    pub fn to_hex(&self) -> String {
-        bytes_to_hex(&self.0)
-    }
-    pub fn from_hex(s: &str) -> Result<Self, crate::error::CryptoError> {
-        hex_to_bytes(s).map(Self)
-    }
-}
-
-impl fmt::Debug for SignaturePqPublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SignaturePqPublicKey({})", self.to_hex())
-    }
-}
-
-impl AsRef<[u8]> for SignaturePqPublicKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<Vec<u8>> for SignaturePqPublicKey {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-}
-
-impl From<&[u8]> for SignaturePqPublicKey {
-    fn from(bytes: &[u8]) -> Self {
-        Self(bytes.to_vec())
-    }
-}
-
-impl From<&SignaturePqPublicKey> for Vec<u8> {
-    fn from(key: &SignaturePqPublicKey) -> Vec<u8> {
-        key.0.clone()
-    }
-}
+impl_public_key!(EncryptionPublicKey);
+impl_public_key!(SignaturePublicKey);
+impl_public_key!(KemPublicKey);
+impl_public_key!(SignaturePqPublicKey);
 
 // --- Keyring ---
 
@@ -477,7 +208,7 @@ impl Keyring {
         }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Zeroizing<Vec<u8>> {
         let fields: &[&[u8]] = &[
             self.kem_public_key.as_bytes(),
             self.kem_secret_key.as_bytes(),
@@ -486,7 +217,7 @@ impl Keyring {
             self.sig_cl_public_key.as_bytes(),
             self.sig_cl_secret_key.as_bytes(),
         ];
-        let mut out = Vec::new();
+        let mut out = Zeroizing::new(Vec::new());
         for f in fields {
             out.extend_from_slice(&(f.len() as u16).to_be_bytes());
             out.extend_from_slice(f);
@@ -546,12 +277,6 @@ impl TryFrom<&[u8]> for Keyring {
     type Error = crate::error::CryptoError;
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         Self::from_bytes(bytes)
-    }
-}
-
-impl From<&Keyring> for Vec<u8> {
-    fn from(keyring: &Keyring) -> Vec<u8> {
-        keyring.to_bytes()
     }
 }
 
@@ -787,7 +512,7 @@ mod tests {
             SignaturePublicKey::new(vec![4u8; 16]),
             SignaturePrivateKey::new(vec![5u8; 16]),
         );
-        let bytes: Vec<u8> = Vec::from(&keyring);
+        let bytes = keyring.to_bytes();
         let recovered = Keyring::try_from(bytes.as_slice())?;
         assert_eq!(keyring.to_bytes(), recovered.to_bytes());
         Ok(())

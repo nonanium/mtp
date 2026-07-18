@@ -6,6 +6,7 @@ pub struct ConnectionConfig {
     pub(crate) server_certificate_hashes: Option<Vec<String>>,
     pub(crate) client_id: u64,
     pub(crate) max_message_size: u32,
+    pub(crate) require_pq: bool,
     pub(crate) description: Option<String>,
 }
 
@@ -24,7 +25,8 @@ impl ConnectionConfig {
             url,
             server_certificate_hashes: None,
             client_id: 0,
-            max_message_size: 1_000_000_000,
+            max_message_size: 16 * 1024 * 1024,
+            require_pq: true,
             description: None,
         }
     }
@@ -57,6 +59,16 @@ impl ConnectionConfig {
     #[wasm_bindgen(getter)]
     pub fn max_message_size(&self) -> u32 {
         self.max_message_size
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_require_pq(&mut self, require_pq: bool) {
+        self.require_pq = require_pq;
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn require_pq(&self) -> bool {
+        self.require_pq
     }
 
     #[wasm_bindgen(setter)]

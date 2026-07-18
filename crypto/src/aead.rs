@@ -1,10 +1,10 @@
 use crate::error::CryptoError;
 
 #[cfg(any(feature = "chacha20poly1305", feature = "aes-gcm"))]
-use rand_core::OsRng;
+use zeroize::Zeroizing;
 
 #[cfg(any(feature = "chacha20poly1305", feature = "aes-gcm"))]
-use rand_core::RngCore;
+use getrandom::fill;
 
 pub trait AeadEncrypt {
     fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError>;
@@ -28,13 +28,15 @@ fn prepend_nonce(nonce: &[u8], ciphertext: &mut Vec<u8>) -> Vec<u8> {
 
 #[cfg(feature = "chacha20poly1305")]
 pub struct ChaCha20Poly1305 {
-    key: [u8; 32],
+    key: Zeroizing<[u8; 32]>,
 }
 
 #[cfg(feature = "chacha20poly1305")]
 impl ChaCha20Poly1305 {
     pub fn new(key: [u8; 32]) -> Self {
-        Self { key }
+        Self {
+            key: Zeroizing::new(key),
+        }
     }
 }
 
@@ -45,11 +47,11 @@ impl AeadEncrypt for ChaCha20Poly1305 {
         use chacha20poly1305::XNonce;
         use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 
-        let key = chacha20poly1305::Key::from_slice(&self.key);
+        let key = chacha20poly1305::Key::from_slice(self.key.as_ref());
         let cipher = XChaCha20Poly1305::new(key);
 
         let mut nonce = [0u8; 24];
-        OsRng.fill_bytes(&mut nonce);
+        fill(&mut nonce).map_err(|_| CryptoError::EncryptionFailed)?;
         let nonce_ref = XNonce::from_slice(&nonce);
 
         let payload = Payload {
@@ -77,7 +79,7 @@ impl AeadDecrypt for ChaCha20Poly1305 {
         }
 
         let (nonce, ct) = ciphertext.split_at(24);
-        let key = chacha20poly1305::Key::from_slice(&self.key);
+        let key = chacha20poly1305::Key::from_slice(self.key.as_ref());
         let cipher = XChaCha20Poly1305::new(key);
         let nonce_ref = XNonce::from_slice(nonce);
 
@@ -98,13 +100,15 @@ impl AeadCipher for ChaCha20Poly1305 {
 
 #[cfg(feature = "aes-gcm")]
 pub struct Aes256Gcm {
-    key: [u8; 32],
+    key: Zeroizing<[u8; 32]>,
 }
 
 #[cfg(feature = "aes-gcm")]
 impl Aes256Gcm {
     pub fn new(key: [u8; 32]) -> Self {
-        Self { key }
+        Self {
+            key: Zeroizing::new(key),
+        }
     }
 }
 
@@ -115,11 +119,11 @@ impl AeadEncrypt for Aes256Gcm {
         use aes_gcm::Nonce;
         use aes_gcm::aead::{Aead, KeyInit, Payload};
 
-        let key = aes_gcm::Key::<AesGcmInner>::from_slice(&self.key);
+        let key = aes_gcm::Key::<AesGcmInner>::from_slice(self.key.as_ref());
         let cipher = AesGcmInner::new(key);
 
         let mut nonce = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce);
+        fill(&mut nonce).map_err(|_| CryptoError::EncryptionFailed)?;
         let nonce_ref = Nonce::from_slice(&nonce);
 
         let payload = Payload {
@@ -147,7 +151,7 @@ impl AeadDecrypt for Aes256Gcm {
         }
 
         let (nonce, ct) = ciphertext.split_at(12);
-        let key = aes_gcm::Key::<AesGcmInner>::from_slice(&self.key);
+        let key = aes_gcm::Key::<AesGcmInner>::from_slice(self.key.as_ref());
         let cipher = AesGcmInner::new(key);
         let nonce_ref = Nonce::from_slice(nonce);
 

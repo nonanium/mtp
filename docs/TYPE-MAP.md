@@ -1,6 +1,26 @@
 # Type Map
 
-This file documents the Type Map & Registry configuration used by the MTP protocol.
+This file documents the Type Map & Registry configuration used by the MTP protocol. It will assume you are working with the [example-type-maps.yaml](./../example-type-maps.yaml).
+
+## Binary Frame Format
+
+Every transport frame is a four-byte big-endian length followed by one `CommunicationValue`. The length counts all bytes after the length field.
+
+```text
+u32 length
+u16 communication_type
+u8  flags
+u32 id              if flag 0x04 is set
+u48 sender          if flag 0x01 is set
+u48 receiver        if flag 0x02 is set
+u8  signature_type  if flag 0x10 is set
+... signature       if flag 0x10 is set, length depends on signature_type
+... data container or encrypted payload
+```
+
+The flag values are `0x01` for sender, `0x02` for receiver, `0x04` for frame ID, `0x08` for encrypted data, `0x10` for a frame signature, and `0x20` for a signed encrypted container. Sender and receiver IDs are six-byte unsigned big-endian values. The `communication_type` and every container field use IDs from the negotiated `TypeMap`.
+
+Data values begin with a one-byte kind marker. MTP assigns `0x01` and `0x02` to boolean true and false, `0x03` to signed integers, `0x04` to unsigned integers, `0x05` to floats, `0x06` to UTF-8 strings, `0x07` to bytes, `0x08` to arrays, `0x09` to containers, `0x0A` through `0x0C` to crypto containers, and `0xFF` to null. Length-prefixed values use a four-byte big-endian payload length; container and array counts use two-byte big-endian counts.
 
 ## TypeMap & Compile-Time Type Safety
 
@@ -34,7 +54,7 @@ let tm = TypeMap::v2_0();
 let id = tm.data_id_enum(DataType::SomeType).unwrap();
 ```
 
-The enums are a **union across all versions**; every type name from every version is a variant. The version-specific `TypeMap` maps each variant to the correct wire ID for that version. Types not defined in a version return `None`:
+The enums are a **union across all versions**; every type name from every version is a variant. The version-specific `TypeMap` maps each variant to the correct wire ID for that version. For a type absent from a selected version, the lookup returns `None`.
 
 Encoding/decoding uses a `TypeMap` to resolve type names to wire IDs:
 
@@ -58,6 +78,8 @@ let tm_v1 = TypeMap::v1_0();
 assert!(tm_v1.data_id_enum(DataType::ExampleType).is_some());  // defined in v1.0
 ```
 
+When communicating with a peer on another version, encode only variants that map in the negotiated version. If an incoming frame names a type absent from the selected map, reject it as a protocol or type-map compatibility error; do not reinterpret its wire ID using another version's map. Keep old IDs stable, register both versions during migration, and remove a version only after its clients have moved.
+
 ### Forward/Backward Compatibility Between Versions
 
 Because enums are a union of all types across versions, a variant might exist that has no wire mapping in the *negotiated* version:
@@ -67,7 +89,7 @@ v2.0 client sends DataType::SomeType    → host encodes with v2.0 TypeMap → w
 v2.0 host receives DataType::ExampleType (from v1.0 client) → not in v2.0 TypeMap → None → Error
 ```
 
-This is by design: the host maps unknown types to `Error`, and the client should only send types that exist in its compiled-in version.
+Encoding a frame with an unmapped communication or data type returns `CodecError::UnknownCommunicationType` or `CodecError::UnknownDataType`. Select a mapped variant from the compiled-in version before sending it.
 
 ## Registry
 
@@ -95,20 +117,11 @@ let decoded = codec.decode(&bytes, Version(2, 0)).unwrap();
 
 ## Customizing Type Maps in Downstream Projects
 
-External projects must provide their own type map configuration. Browser projects should install `mtp` and configure `mtp/vite`; they do not need to publish, fork, or copy a generated WASM package.
-
-```typescript
-import { defineConfig } from "vite";
-import { mtp } from "mtp/vite";
-
-export default defineConfig({
-  plugins: [mtp({ typeMaps: "./type-maps.yaml" })],
-});
-```
+External projects must provide their own type map configuration. Browser projects use the Vite plugin from [Defining Type Maps](#defining-type-maps) and do not need to publish, fork, or copy a generated WASM package.
 
 For Rust builds, or when invoking `wasm-pack` manually, set the `MTP_TYPE_MAPS` environment variable. If the variable points to an invalid file, the build fails. If `MTP_TYPE_MAPS` is not set, the build script emits a warning and generates reserved protocol types only; application-specific communication and data types will not be available.
 
-1. Create a `type-maps.yaml` in your project root
+1. Create a `type-maps.yaml` in your project root (or anywhere else, adapt the path accordingly)
 2. Set the `MTP_TYPE_MAPS` environment variable in `.cargo/config.toml`:
 
 ```toml

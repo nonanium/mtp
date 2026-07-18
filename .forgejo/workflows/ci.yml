@@ -35,9 +35,12 @@ jobs:
             pnpm install --frozen-lockfile
             pnpm run dup
 
+            RUSTFLAGS="--cfg web_sys_unstable_apis" wasm-pack test --node wasm
             RUSTFLAGS="--cfg web_sys_unstable_apis" wasm-pack build wasm --target web
             RUSTFLAGS="--cfg web_sys_unstable_apis" pnpm run build
             pnpm --filter mtp-web-client run build
+
+            node test/e2ee.mjs
 
             (
               cd example

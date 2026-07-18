@@ -61,7 +61,7 @@ impl fmt::Display for DataKind {
     }
 }
 
-#[derive(Debug, Clone, Eq)]
+#[derive(Debug, Clone)]
 pub enum DataValue {
     BoolTrue,
     BoolFalse,
@@ -69,7 +69,8 @@ pub enum DataValue {
 
     SignedNumber(i128),
     UnsignedNumber(u128),
-    Float(u8, u32),
+    /// An IEEE-754 double-precision floating-point value.
+    Float(f64),
 
     Str(String),
     Bytes(Vec<u8>),
@@ -120,6 +121,10 @@ pub enum DataValue {
 
 impl DataValue {
     /*
+     * Top-level format:
+     * [1 byte kind]
+     * [remaining bytes payload]       // interpreted according to kind
+     *
      * Container format:
      * [2 bytes u16 entry_count]       // number of entries
      * [1 byte kind]                   // DataValue kind marker
@@ -198,7 +203,7 @@ impl DataValue {
             DataValue::Bool(_) | DataValue::BoolTrue | DataValue::BoolFalse => DataKind::Bool,
             DataValue::SignedNumber(_) => DataKind::SignedNumber,
             DataValue::UnsignedNumber(_) => DataKind::UnsignedNumber,
-            DataValue::Float(_, _) => DataKind::Float,
+            DataValue::Float(_) => DataKind::Float,
             DataValue::Str(_) => DataKind::Str,
             DataValue::Array(a) => {
                 if let Some(first) = a.first() {
@@ -253,9 +258,9 @@ impl DataValue {
         }
     }
 
-    pub fn as_float(&self) -> Option<(u8, u32)> {
+    pub fn as_float(&self) -> Option<f64> {
         match self {
-            DataValue::Float(a, b) => Some((*a, *b)),
+            DataValue::Float(value) => Some(*value),
             _ => None,
         }
     }
@@ -337,7 +342,7 @@ impl DataValue {
             DataValue::Bool(_) | DataValue::BoolTrue | DataValue::BoolFalse => "Bool",
             DataValue::SignedNumber(_) => "SignedNumber",
             DataValue::UnsignedNumber(_) => "UnsignedNumber",
-            DataValue::Float(_, _) => "Float",
+            DataValue::Float(_) => "Float",
             DataValue::Str(_) => "Str",
             DataValue::Bytes(_) => "Bytes",
             DataValue::Array(_) => "Array",
@@ -426,7 +431,7 @@ impl DataValue {
     #[cfg(feature = "crypto")]
     pub fn sign_container(&mut self, algorithm: u8, signer: &impl SignatureScheme) -> Option<()> {
         let entries = self.as_container()?;
-        let container_bytes = Self::encode_container(&entries).ok()?;
+        let container_bytes = DataValue::Container(entries).to_bytes().ok()?;
 
         let sig = signer.sign(&container_bytes).ok()?;
 
@@ -576,20 +581,17 @@ impl DataValue {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, CodecError> {
-        match self {
-            DataValue::Container(entries) => Self::encode_container(entries),
-            DataValue::Array(arr) => Self::encode_array(arr),
-            _ => {
-                let mut out = Vec::new();
-                Self::write_value_payload(&mut out, self)?;
-                Ok(out)
-            }
-        }
+        let mut out = Vec::new();
+        out.push(Self::kind_marker(self));
+        Self::write_value_payload(&mut out, self)?;
+        Ok(out)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let mut cursor = Cursor::new(bytes);
-        let value = Self::read_value(&mut cursor, true)?;
+        let kind = cursor.read_u8().ok()?;
+        let payload_len = bytes.len().checked_sub(1)?;
+        let value = Self::read_value_by_kind(&mut cursor, kind, Some(payload_len))?;
         if cursor.position() as usize != bytes.len() {
             return None;
         }
@@ -694,9 +696,8 @@ impl DataValue {
                     .map_err(|_| CodecError::InvalidEncoding)?;
                 Ok(())
             }
-            DataValue::Float(a, b) => {
-                buf.write_u8(*a).map_err(|_| CodecError::InvalidEncoding)?;
-                buf.write_u32::<BigEndian>(*b)
+            DataValue::Float(value) => {
+                buf.write_f64::<BigEndian>(*value)
                     .map_err(|_| CodecError::InvalidEncoding)?;
                 Ok(())
             }
@@ -736,28 +737,6 @@ impl DataValue {
 
             DataValue::Null => Ok(()),
         }
-    }
-
-    fn read_value(cursor: &mut Cursor<&[u8]>, top_level: bool) -> Option<Self> {
-        if top_level {
-            let start = cursor.position() as usize;
-            let remaining = cursor.get_ref().len().checked_sub(start)?;
-            if remaining < 2 {
-                return None;
-            }
-
-            let snapshot = cursor.clone();
-            if let Some(container) = Self::try_read_container(cursor) {
-                return Some(container);
-            }
-            *cursor = snapshot;
-
-            let array = Self::read_array(cursor)?;
-            return Some(array);
-        }
-
-        let kind = cursor.read_u8().ok()?;
-        Self::read_value_by_kind(cursor, kind, None)
     }
 
     fn try_read_container(cursor: &mut Cursor<&[u8]>) -> Option<Self> {
@@ -837,11 +816,7 @@ impl DataValue {
             Self::KIND_UNSIGNED_NUMBER => Some(DataValue::UnsignedNumber(
                 cursor.read_u128::<BigEndian>().ok()?,
             )),
-            Self::KIND_FLOAT => {
-                let a = cursor.read_u8().ok()?;
-                let b = cursor.read_u32::<BigEndian>().ok()?;
-                Some(DataValue::Float(a, b))
-            }
+            Self::KIND_FLOAT => Some(DataValue::Float(cursor.read_f64::<BigEndian>().ok()?)),
             Self::KIND_STR => {
                 let s = std::str::from_utf8(Self::read_payload_slice(cursor, payload_len?)?)
                     .ok()?
@@ -884,7 +859,7 @@ impl DataValue {
             )),
             Self::KIND_NULL => Some(DataValue::Null),
             #[cfg(not(feature = "crypto"))]
-            0x0A | 0x0B | 0x0C => None,
+            0x0A..=0x0C => None,
             _ => None,
         }
     }
@@ -902,7 +877,7 @@ impl DataValue {
             }
             DataValue::SignedNumber(_) => Self::KIND_SIGNED_NUMBER,
             DataValue::UnsignedNumber(_) => Self::KIND_UNSIGNED_NUMBER,
-            DataValue::Float(_, _) => Self::KIND_FLOAT,
+            DataValue::Float(_) => Self::KIND_FLOAT,
             DataValue::Str(_) => Self::KIND_STR,
             DataValue::Array(_) => Self::KIND_ARRAY,
             DataValue::Bytes(_) => Self::KIND_BYTES,
@@ -953,7 +928,7 @@ impl fmt::Display for DataValue {
             DataValue::Bool(v) => write!(f, "{}", v),
             DataValue::SignedNumber(n) => write!(f, "{}", n),
             DataValue::UnsignedNumber(n) => write!(f, "{}", n),
-            DataValue::Float(exp, mant) => write!(f, "{}e{}", mant, exp),
+            DataValue::Float(value) => write!(f, "{}", value),
             DataValue::Str(s) => write!(f, "\"{}\"", s),
             DataValue::Container(entries) => {
                 write!(f, "{{")?;
@@ -997,7 +972,7 @@ impl PartialEq for DataValue {
             (Bool(a), Bool(b)) => a == b,
             (SignedNumber(a), SignedNumber(b)) => a == b,
             (UnsignedNumber(a), UnsignedNumber(b)) => a == b,
-            (Float(a, b), Float(c, d)) => a == c && b == d,
+            (Float(a), Float(b)) => a.to_bits() == b.to_bits(),
             (Str(a), Str(b)) => a == b,
             (Array(a), Array(b)) => a == b,
             (Bytes(a), Bytes(b)) => a == b,
@@ -1014,6 +989,8 @@ impl PartialEq for DataValue {
     }
 }
 
+impl Eq for DataValue {}
+
 impl Hash for DataValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
         use DataValue::*;
@@ -1025,10 +1002,7 @@ impl Hash for DataValue {
             BoolTrue | BoolFalse | Bool(_) | Null => {}
             SignedNumber(n) => n.hash(state),
             UnsignedNumber(n) => n.hash(state),
-            Float(n, m) => {
-                n.hash(state);
-                m.hash(state);
-            }
+            Float(value) => value.to_bits().hash(state),
             Str(s) => s.hash(state),
             Array(a) => a.hash(state),
             Bytes(a) => a.hash(state),
@@ -1200,7 +1174,9 @@ impl TryFrom<DataValue> for Vec<u8> {
 mod tests {
     use super::*;
 
-    fn container_roundtrip(values: Vec<(DataTypeId, DataValue)>) -> Result<(), Box<dyn std::error::Error>> {
+    fn container_roundtrip(
+        values: Vec<(DataTypeId, DataValue)>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let dv = DataValue::Container(values.clone());
         let bytes = dv.to_bytes()?;
         let decoded = DataValue::from_bytes(&bytes).ok_or("roundtrip failed")?;
@@ -1216,12 +1192,97 @@ mod tests {
         Ok(())
     }
 
+    fn value_roundtrip(value: DataValue) -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = value.to_bytes()?;
+        assert_eq!(bytes.first(), Some(&DataValue::kind_marker(&value)));
+        let decoded = DataValue::from_bytes(&bytes).ok_or("roundtrip failed")?;
+        assert_eq!(value, decoded, "value roundtrip mismatch");
+        Ok(())
+    }
+
+    #[test]
+    fn test_every_top_level_variant_roundtrips() -> Result<(), Box<dyn std::error::Error>> {
+        let values = vec![
+            DataValue::BoolTrue,
+            DataValue::BoolFalse,
+            DataValue::Bool(true),
+            DataValue::Bool(false),
+            DataValue::SignedNumber(i128::MIN),
+            DataValue::UnsignedNumber(u128::MAX),
+            DataValue::Float(-0.125),
+            DataValue::Str("top level".to_string()),
+            DataValue::Bytes(vec![0x00, 0xFF, 0x42]),
+            DataValue::Array(vec![DataValue::Str("nested".to_string())]),
+            DataValue::Container(vec![(DataTypeId(7), DataValue::BoolTrue)]),
+            DataValue::Null,
+        ];
+
+        for value in values {
+            value_roundtrip(value)?;
+        }
+
+        #[cfg(feature = "crypto")]
+        for value in [
+            DataValue::EncryptedContainer(vec![1, 2, 3]),
+            DataValue::SignedContainer(vec![4, 5, 6]),
+            DataValue::SignedEncryptedContainer(vec![7, 8, 9]),
+        ] {
+            value_roundtrip(value)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_container_and_array_have_distinct_framing() {
+        let container = DataValue::Container(vec![])
+            .to_bytes()
+            .expect("container should encode");
+        let array = DataValue::Array(vec![])
+            .to_bytes()
+            .expect("array should encode");
+
+        assert_ne!(container, array);
+        assert_eq!(
+            DataValue::from_bytes(&container),
+            Some(DataValue::Container(vec![]))
+        );
+        assert_eq!(
+            DataValue::from_bytes(&array),
+            Some(DataValue::Array(vec![]))
+        );
+    }
+
+    #[test]
+    fn test_top_level_trailing_bytes_are_rejected() {
+        let mut boolean = DataValue::BoolTrue
+            .to_bytes()
+            .expect("boolean should encode");
+        boolean.push(0x00);
+        assert!(DataValue::from_bytes(&boolean).is_none());
+
+        let mut number = DataValue::SignedNumber(42)
+            .to_bytes()
+            .expect("number should encode");
+        number.push(0x00);
+        assert!(DataValue::from_bytes(&number).is_none());
+    }
+
     #[test]
     fn test_bool_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataType::Id.to_id(&tm), DataValue::BoolTrue),
-            (DataType::ClientNonce.to_id(&tm), DataValue::BoolFalse),
+            (
+                DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::BoolTrue,
+            ),
+            (
+                DataType::ClientNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::BoolFalse,
+            ),
         ])?;
         Ok(())
     }
@@ -1245,18 +1306,34 @@ mod tests {
     fn test_signed_number_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataType::Version.to_id(&tm), DataValue::SignedNumber(0)),
-            (DataType::Id.to_id(&tm), DataValue::SignedNumber(42)),
             (
-                DataType::ClientNonce.to_id(&tm),
+                DataType::Version
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::SignedNumber(0),
+            ),
+            (
+                DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::SignedNumber(42),
+            ),
+            (
+                DataType::ClientNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::SignedNumber(-42),
             ),
             (
-                DataType::ServerNonce.to_id(&tm),
+                DataType::ServerNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::SignedNumber(i128::MAX),
             ),
             (
-                DataType::PublicKeys.to_id(&tm),
+                DataType::PublicKeys
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::SignedNumber(i128::MIN),
             ),
         ])?;
@@ -1267,10 +1344,22 @@ mod tests {
     fn test_unsigned_number_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataType::Version.to_id(&tm), DataValue::UnsignedNumber(0)),
-            (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(42)),
             (
-                DataType::ClientNonce.to_id(&tm),
+                DataType::Version
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::UnsignedNumber(0),
+            ),
+            (
+                DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::UnsignedNumber(42),
+            ),
+            (
+                DataType::ClientNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::UnsignedNumber(u128::MAX),
             ),
         ])?;
@@ -1281,11 +1370,23 @@ mod tests {
     fn test_float_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataType::Version.to_id(&tm), DataValue::Float(0, 0)),
-            (DataType::Id.to_id(&tm), DataValue::Float(2, 12345)),
             (
-                DataType::ClientNonce.to_id(&tm),
-                DataValue::Float(255, 4294967295),
+                DataType::Version
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::Float(0.0),
+            ),
+            (
+                DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::Float(1_234_500.0),
+            ),
+            (
+                DataType::ClientNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::Float(f64::MAX),
             ),
         ])?;
         Ok(())
@@ -1295,10 +1396,22 @@ mod tests {
     fn test_str_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataType::Version.to_id(&tm), DataValue::Str(String::new())),
-            (DataType::Id.to_id(&tm), DataValue::Str("hello".to_string())),
             (
-                DataType::ClientNonce.to_id(&tm),
+                DataType::Version
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::Str(String::new()),
+            ),
+            (
+                DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::Str("hello".to_string()),
+            ),
+            (
+                DataType::ClientNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::Str("a".repeat(1000)),
             ),
         ])?;
@@ -1309,13 +1422,22 @@ mod tests {
     fn test_bytes_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataType::Version.to_id(&tm), DataValue::Bytes(vec![])),
             (
-                DataType::Id.to_id(&tm),
+                DataType::Version
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::Bytes(vec![]),
+            ),
+            (
+                DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::Bytes(vec![0x00, 0xFF, 0xAB]),
             ),
             (
-                DataType::ClientNonce.to_id(&tm),
+                DataType::ClientNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::Bytes(vec![0x42; 100]),
             ),
         ])?;
@@ -1325,7 +1447,12 @@ mod tests {
     #[test]
     fn test_null_in_container() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
-        container_roundtrip(vec![(DataType::Version.to_id(&tm), DataValue::Null)])?;
+        container_roundtrip(vec![(
+            DataType::Version
+                .try_to_id(&tm)
+                .expect("test type must be mapped"),
+            DataValue::Null,
+        )])?;
         Ok(())
     }
 
@@ -1359,17 +1486,36 @@ mod tests {
     fn test_container_mixed_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
-            (DataType::Version.to_id(&tm), DataValue::BoolTrue),
-            (DataType::Id.to_id(&tm), DataValue::SignedNumber(-100)),
             (
-                DataType::ClientNonce.to_id(&tm),
+                DataType::Version
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::BoolTrue,
+            ),
+            (
+                DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::SignedNumber(-100),
+            ),
+            (
+                DataType::ClientNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::Str("test".to_string()),
             ),
             (
-                DataType::ServerNonce.to_id(&tm),
+                DataType::ServerNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::UnsignedNumber(u128::MAX),
             ),
-            (DataType::PublicKeys.to_id(&tm), DataValue::Null),
+            (
+                DataType::PublicKeys
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::Null,
+            ),
         ])?;
         Ok(())
     }
@@ -1379,11 +1525,20 @@ mod tests {
         let tm = TypeMap::latest();
         container_roundtrip(vec![
             (
-                DataType::Version.to_id(&tm),
-                DataValue::Container(vec![(DataType::Error.to_id(&tm), DataValue::BoolTrue)]),
+                DataType::Version
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::Container(vec![(
+                    DataType::Error
+                        .try_to_id(&tm)
+                        .expect("test type must be mapped"),
+                    DataValue::BoolTrue,
+                )]),
             ),
             (
-                DataType::Id.to_id(&tm),
+                DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::Array(vec![DataValue::SignedNumber(1), DataValue::SignedNumber(2)]),
             ),
         ])?;
@@ -1394,7 +1549,9 @@ mod tests {
     fn test_container_base64_roundtrip() {
         let tm = TypeMap::latest();
         let dv = DataValue::Container(vec![(
-            DataType::Description.to_id(&tm),
+            DataType::Description
+                .try_to_id(&tm)
+                .expect("test type must be mapped"),
             DataValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         )]);
         let b64 = dv.to_base64().expect("encode failed");
@@ -1411,7 +1568,7 @@ mod tests {
             DataValue::UnsignedNumber(0).kind(),
             DataKind::UnsignedNumber
         );
-        assert_eq!(DataValue::Float(0, 0).kind(), DataKind::Float);
+        assert_eq!(DataValue::Float(0.0).kind(), DataKind::Float);
         assert_eq!(DataValue::Str(String::new()).kind(), DataKind::Str);
         assert_eq!(DataValue::Bytes(vec![]).kind(), DataKind::Bytes);
         assert_eq!(
@@ -1427,39 +1584,66 @@ mod tests {
         let tm = TypeMap::latest();
         let dv = DataValue::Container(vec![
             (
-                DataType::Version.to_id(&tm),
+                DataType::Version
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::Str("alice".to_string()),
             ),
-            (DataType::Id.to_id(&tm), DataValue::SignedNumber(42)),
             (
-                DataType::ClientNonce.to_id(&tm),
+                DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::SignedNumber(42),
+            ),
+            (
+                DataType::ClientNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::Bytes(vec![0x01, 0x02]),
             ),
             (
-                DataType::ServerNonce.to_id(&tm),
+                DataType::ServerNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::Array(vec![DataValue::BoolTrue]),
             ),
         ]);
 
         let map = dv.as_map().expect("should be a container");
         assert_eq!(
-            map.get(&DataType::Version.to_id(&tm))
-                .and_then(|v| v.as_str()),
+            map.get(
+                &DataType::Version
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped")
+            )
+            .and_then(|v| v.as_str()),
             Some("alice")
         );
         assert_eq!(
-            map.get(&DataType::Id.to_id(&tm))
-                .and_then(|v| v.as_signed_number()),
+            map.get(
+                &DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped")
+            )
+            .and_then(|v| v.as_signed_number()),
             Some(42)
         );
         assert_eq!(
-            map.get(&DataType::ClientNonce.to_id(&tm))
-                .and_then(|v| v.as_bytes()),
+            map.get(
+                &DataType::ClientNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped")
+            )
+            .and_then(|v| v.as_bytes()),
             Some(vec![0x01, 0x02])
         );
         assert_eq!(
-            map.get(&DataType::ServerNonce.to_id(&tm))
-                .and_then(|v| v.as_array()),
+            map.get(
+                &DataType::ServerNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped")
+            )
+            .and_then(|v| v.as_array()),
             Some(vec![DataValue::BoolTrue])
         );
     }
@@ -1474,7 +1658,7 @@ mod tests {
 
     #[test]
     fn test_as_float() {
-        assert_eq!(DataValue::Float(3, 14).as_float(), Some((3, 14)));
+        assert_eq!(DataValue::Float(-0.125).as_float(), Some(-0.125));
         assert_eq!(DataValue::Null.as_float(), None);
     }
 
@@ -1482,8 +1666,18 @@ mod tests {
     fn test_container_from_map() {
         let tm = TypeMap::latest();
         let mut map = BTreeMap::new();
-        map.insert(DataType::Version.to_id(&tm), DataValue::BoolTrue);
-        map.insert(DataType::Id.to_id(&tm), DataValue::SignedNumber(99));
+        map.insert(
+            DataType::Version
+                .try_to_id(&tm)
+                .expect("test type must be mapped"),
+            DataValue::BoolTrue,
+        );
+        map.insert(
+            DataType::Id
+                .try_to_id(&tm)
+                .expect("test type must be mapped"),
+            DataValue::SignedNumber(99),
+        );
         let dv = DataValue::container_from_map(&map);
         let container = dv.as_container().expect("should be container");
         assert_eq!(container.len(), 2);
@@ -1492,7 +1686,7 @@ mod tests {
     #[test]
     fn test_invalid_short_input() {
         assert!(DataValue::from_bytes(&[]).is_none());
-        assert!(DataValue::from_bytes(&[0x01]).is_none());
+        assert!(DataValue::from_bytes(&[DataValue::KIND_SIGNED_NUMBER]).is_none());
     }
 
     #[test]
@@ -1505,7 +1699,9 @@ mod tests {
     fn test_truncated_container_rejected() {
         let tm = TypeMap::latest();
         let dv = DataValue::Container(vec![(
-            DataType::Version.to_id(&tm),
+            DataType::Version
+                .try_to_id(&tm)
+                .expect("test type must be mapped"),
             DataValue::Str("hello".to_string()),
         )]);
         let bytes = dv.to_bytes().expect("encode failed");
@@ -1521,13 +1717,12 @@ mod tests {
         // capped against remaining bytes, so these decode attempts allocate at
         // most a handful of slots before failing.
         // Container path: count = 0xFFFF, no entries follow.
-        assert!(DataValue::from_bytes(&[0xFF, 0xFF]).is_none());
+        assert!(DataValue::from_bytes(&[DataValue::KIND_CONTAINER, 0xFF, 0xFF]).is_none());
         // Container path with one stray byte after the count.
-        assert!(DataValue::from_bytes(&[0xFF, 0xFF, 0x01]).is_none());
-        // Array path: force the container parse to fail first, then the array
-        // parse also sees the oversized count. A leading kind byte that is not a
-        // valid container entry makes try_read_container bail to the array path.
-        assert!(DataValue::from_bytes(&[0xFF, 0xFF, 0x08, 0xFF, 0xFF]).is_none());
+        assert!(DataValue::from_bytes(&[DataValue::KIND_CONTAINER, 0xFF, 0xFF, 0x01]).is_none());
+        // Array path: the tagged array also declares 65535 entries but carries
+        // only a single entry byte.
+        assert!(DataValue::from_bytes(&[DataValue::KIND_ARRAY, 0xFF, 0xFF, 0x01]).is_none());
     }
 
     #[test]
@@ -1557,8 +1752,8 @@ mod tests {
 
     #[test]
     fn test_float_display() {
-        let s = format!("{}", DataValue::Float(2, 12345));
-        assert_eq!(s, "12345e2");
+        let s = format!("{}", DataValue::Float(1.25));
+        assert_eq!(s, "1.25");
     }
 
     #[test]
@@ -1566,11 +1761,15 @@ mod tests {
         let tm = TypeMap::latest();
         let dv = DataValue::Container(vec![
             (
-                DataType::ServerNonce.to_id(&tm),
+                DataType::ServerNonce
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::Str("v2.0".to_string()),
             ),
             (
-                DataType::PqSignature.to_id(&tm),
+                DataType::PqSignature
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::UnsignedNumber(42),
             ),
         ]);
@@ -1614,7 +1813,10 @@ mod tests {
         assert_eq!(i64::try_from(DataValue::SignedNumber(10))?, 10i64);
         assert_eq!(u128::try_from(DataValue::UnsignedNumber(99))?, 99u128);
         assert_eq!(u64::try_from(DataValue::UnsignedNumber(7))?, 7u64);
-        assert_eq!(Vec::<u8>::try_from(DataValue::Bytes(vec![0xAB]))?, vec![0xABu8]);
+        assert_eq!(
+            Vec::<u8>::try_from(DataValue::Bytes(vec![0xAB]))?,
+            vec![0xABu8]
+        );
         Ok(())
     }
 
@@ -1646,10 +1848,17 @@ mod tests {
 
         let mut dv = DataValue::Container(vec![
             (
-                DataType::Version.to_id(&tm),
+                DataType::Version
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
                 DataValue::Str("secret".to_string()),
             ),
-            (DataType::Id.to_id(&tm), DataValue::UnsignedNumber(42)),
+            (
+                DataType::Id
+                    .try_to_id(&tm)
+                    .expect("test type must be mapped"),
+                DataValue::UnsignedNumber(42),
+            ),
         ]);
 
         assert!(
@@ -1675,7 +1884,9 @@ mod tests {
         let keyring_b = Keyring::generate();
 
         let mut dv = DataValue::Container(vec![(
-            DataType::Version.to_id(&tm),
+            DataType::Version
+                .try_to_id(&tm)
+                .expect("test type must be mapped"),
             DataValue::Str("secret".to_string()),
         )]);
 
@@ -1698,7 +1909,9 @@ mod tests {
         let keyring = Keyring::generate();
 
         let mut dv = DataValue::Container(vec![(
-            DataType::Version.to_id(&tm),
+            DataType::Version
+                .try_to_id(&tm)
+                .expect("test type must be mapped"),
             DataValue::Str("secret".to_string()),
         )]);
 
@@ -1740,7 +1953,9 @@ mod tests {
         let (signer, sk, _pk) = Ed25519Signer::generate();
 
         let mut dv = DataValue::Container(vec![(
-            DataType::Version.to_id(&tm),
+            DataType::Version
+                .try_to_id(&tm)
+                .expect("test type must be mapped"),
             DataValue::Str("signed data".to_string()),
         )]);
 
@@ -1782,7 +1997,9 @@ mod tests {
         let wrong_verifier = Ed25519Signer::new(&sk2)?;
 
         let mut dv = DataValue::Container(vec![(
-            DataType::Version.to_id(&tm),
+            DataType::Version
+                .try_to_id(&tm)
+                .expect("test type must be mapped"),
             DataValue::Str("signed data".to_string()),
         )]);
 

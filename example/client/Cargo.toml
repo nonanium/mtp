@@ -1,6 +1,6 @@
 [package]
 name = "client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [[bin]]
@@ -8,6 +8,6 @@ name = "client"
 path = "src/main.rs"
 
 [dependencies]
-mtp = { version = "0.1.0", path = "../../", features = ["client", "crypto", "files", "pipes"] }
+mtp = { version = "0.2.0", path = "../../", features = ["client", "crypto", "files", "pipes"] }
 tokio = { version = "1", features = ["full"] }
-rand = "0.8"
+rand = "0.10.1"

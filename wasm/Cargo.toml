@@ -1,10 +1,10 @@
 [package]
 name = "mtp-wasm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [package.metadata.cargo-machete]
-ignored = ["getrandom-v02"]
+ignored = ["getrandom"]
 
 [lib]
 crate-type = ["cdylib"]
@@ -13,22 +13,26 @@ crate-type = ["cdylib"]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["console"] }
 futures-channel = "0.3"
+futures-util = "0.3"
 console_error_panic_hook = "0.1"
+tracing = "0.1"
+wasm-tracing = "2.1"
 
 hex = "0.4"
 
-getrandom = { version = "0.4", features = ["wasm_js"] }
-getrandom-v02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom = { version = "0.2.17", features = ["js"] }
+getrandom-v04 = { package = "getrandom", version = "0.4.3", features = ["wasm_js"] }
 
-mtp-common = { version = "0.1.0", path = "../common" }
-mtp-type-map = { version = "0.1.0", path = "../type-map" }
-mtp-codec = { version = "0.1.0", path = "../codec", features = ["crypto", "pipes"] }
-mtp-crypto = { version = "0.1.0", path = "../crypto", features = ["wasm"] }
+mtp-common = { version = "0.2.0", path = "../common" }
+mtp-type-map = { version = "0.2.0", path = "../type-map" }
+mtp-codec = { version = "0.2.0", path = "../codec", features = ["crypto", "pipes"] }
+mtp-crypto = { version = "0.2.0", path = "../crypto", features = ["wasm"] }
+zeroize = "1.9"
+wasm-bindgen-test = "0.3.76"
+
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3"
 hex = "0.4"
 
 [features]

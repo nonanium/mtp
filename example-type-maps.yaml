@@ -46,7 +46,7 @@ protocol_version: "0.0"
 #   ErrorMessage: 12
 #   Accepted: 13,
 #
-# If a Type can't be used it will be mapped to 0
+# Types absent from a protocol version cannot be encoded for that version.
 
 type_maps:
   "0.0": # Protocol version 0.0

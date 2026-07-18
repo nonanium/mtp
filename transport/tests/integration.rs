@@ -1,7 +1,10 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap};
-use mtp_transport::{Host, Policy, Receiver, Sender, connect, host};
+use mtp_transport::{
+    ClientConfig as TransportClientConfig, Host, HostConfig as TransportHostConfig, Policy,
+    Receiver, Sender, connect, connect_with_config, host, host_with_config,
+};
 
 fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
     let key_pair = rcgen::KeyPair::generate().expect("failed to generate self-signed key pair");
@@ -15,7 +18,10 @@ fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
     (cert_pem.into_bytes(), key_pem.into_bytes())
 }
 
-async fn start_test_host(cert_pem: Vec<u8>, key_pem: Vec<u8>) -> Result<Host, Box<dyn std::error::Error>> {
+async fn start_test_host(
+    cert_pem: Vec<u8>,
+    key_pem: Vec<u8>,
+) -> Result<Host, Box<dyn std::error::Error>> {
     Ok(host(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         0,
@@ -26,12 +32,16 @@ async fn start_test_host(cert_pem: Vec<u8>, key_pem: Vec<u8>) -> Result<Host, Bo
     .await?)
 }
 
-async fn connect_to_host(h: &Host, cert_pem: Vec<u8>) -> Result<(Sender, Receiver), Box<dyn std::error::Error>> {
+async fn connect_to_host(
+    h: &Host,
+    cert_pem: Vec<u8>,
+) -> Result<(Sender, Receiver), Box<dyn std::error::Error>> {
     let url = format!("https://127.0.0.1:{}", h.local_addr().port());
     Ok(connect(&url, Some(cert_pem), Policy::default()).await?)
 }
 
-async fn connected_pair() -> Result<(Host, Sender, Receiver, Sender, Receiver), Box<dyn std::error::Error>> {
+async fn connected_pair()
+-> Result<(Host, Sender, Receiver, Sender, Receiver), Box<dyn std::error::Error>> {
     let (cert_pem, key_pem) = generate_self_signed_cert();
     let mut h = start_test_host(cert_pem.clone(), key_pem).await?;
     let (client_tx, client_rx) = connect_to_host(&h, cert_pem).await?;
@@ -41,7 +51,9 @@ async fn connected_pair() -> Result<(Host, Sender, Receiver, Sender, Receiver), 
 
 fn numbered_message(comm_type: CommunicationType, value: u128, tm: &TypeMap) -> CommunicationValue {
     CommunicationValue::new(comm_type).add_data(
-        DataType::PqSignature.to_id(tm),
+        DataType::PqSignature
+            .try_to_id(tm)
+            .expect("test type must be mapped"),
         DataValue::UnsignedNumber(value),
     )
 }
@@ -52,7 +64,10 @@ fn assert_numbered_message(
     value: u128,
     tm: &TypeMap,
 ) {
-    assert_eq!(message.get_type(), comm_type.to_id(tm));
+    assert_eq!(
+        message.get_type(),
+        comm_type.try_to_id(tm).expect("test type must be mapped")
+    );
     assert_eq!(
         message.get_data(DataType::PqSignature).clone(),
         DataValue::UnsignedNumber(value)
@@ -66,6 +81,32 @@ async fn test_host_start_and_stop() -> Result<(), Box<dyn std::error::Error>> {
     let addr = h.local_addr();
     // Port should be non-zero (OS-assigned)
     assert!(addr.port() > 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_explicit_development_tls() -> Result<(), Box<dyn std::error::Error>> {
+    // The insecure-tls feature requires MTP_INSECURE_TLS=1 at runtime.
+    // SAFETY: test is single-threaded; no concurrent readers of this env var.
+    unsafe {
+        std::env::set_var("MTP_INSECURE_TLS", "1");
+    }
+
+    let mut h = host_with_config(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+        TransportHostConfig::self_signed(Policy::default()),
+    )
+    .await?;
+    let url = format!("https://127.0.0.1:{}", h.local_addr().port());
+    let client_config =
+        TransportClientConfig::new(Policy::default()).with_insecure_certificate_verification();
+
+    let (client_tx, _client_rx) = connect_with_config(&url, client_config).await?;
+    let (_host_tx, _host_rx) = h.next().await.ok_or("host did not accept connection")?;
+
+    client_tx.close();
+    h.shutdown();
     Ok(())
 }
 
@@ -142,7 +183,12 @@ async fn test_close_detection() -> Result<(), Box<dyn std::error::Error>> {
     // Host should still receive the message
     let tm = TypeMap::latest();
     let received = host_rx.receive().await?;
-    assert_eq!(received.get_type(), CommunicationType::Ping.to_id(&tm));
+    assert_eq!(
+        received.get_type(),
+        CommunicationType::Ping
+            .try_to_id(&tm)
+            .expect("test type must be mapped")
+    );
 
     // Host should get an error or closed signal on next receive
     let result = host_rx.receive().await;
@@ -204,7 +250,8 @@ async fn test_drop_receiver_keeps_sender_alive() -> Result<(), Box<dyn std::erro
 }
 
 #[tokio::test]
-async fn test_persistent_stream_reopens_after_local_finish() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_persistent_stream_reopens_after_local_finish()
+-> Result<(), Box<dyn std::error::Error>> {
     let (_h, client_tx, client_rx, host_tx, host_rx) = connected_pair().await?;
 
     let tm = TypeMap::latest();
@@ -239,14 +286,12 @@ async fn test_receiver_backpressure_with_small_queue() -> Result<(), Box<dyn std
     for i in 0..8u128 {
         client_tx
             .send(&numbered_message(CommunicationType::Ping, i, &tm))
-            .await
-            ?;
+            .await?;
     }
 
     for i in 0..8u128 {
-        let received = tokio::time::timeout(std::time::Duration::from_secs(5), host_rx.receive())
-            .await?
-            ?;
+        let received =
+            tokio::time::timeout(std::time::Duration::from_secs(5), host_rx.receive()).await??;
         assert_numbered_message(&received, CommunicationType::Ping, i, &tm);
     }
 
@@ -269,9 +314,7 @@ async fn test_max_frames_per_stream_enforced() -> Result<(), Box<dyn std::error:
     )
     .await?;
     let url = format!("https://127.0.0.1:{}", h.local_addr().port());
-    let (client_tx, _client_rx) = connect(&url, Some(cert_pem), Policy::default())
-        .await
-        ?;
+    let (client_tx, _client_rx) = connect(&url, Some(cert_pem), Policy::default()).await?;
     let (_host_tx, host_rx) = h.next().await.ok_or("host did not accept connection")?;
 
     let tm = TypeMap::latest();
@@ -293,7 +336,8 @@ async fn test_max_frames_per_stream_enforced() -> Result<(), Box<dyn std::error:
 }
 
 #[tokio::test]
-async fn test_semaphore_saturation_with_concurrent_streams() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_semaphore_saturation_with_concurrent_streams()
+-> Result<(), Box<dyn std::error::Error>> {
     let (cert_pem, key_pem) = generate_self_signed_cert();
     let policy = Policy::default()
         .with_send_mode(mtp_transport::SendMode::SingleStreamPerMessage)
@@ -308,8 +352,7 @@ async fn test_semaphore_saturation_with_concurrent_streams() -> Result<(), Box<d
     )
     .await?;
     let url = format!("https://127.0.0.1:{}", h.local_addr().port());
-    let (client_tx, _client_rx) = connect(&url, Some(cert_pem), Policy::default())
-        .await?;
+    let (client_tx, _client_rx) = connect(&url, Some(cert_pem), Policy::default()).await?;
     let (_host_tx, host_rx) = h.next().await.ok_or("host did not accept connection")?;
 
     let tm = TypeMap::latest();
@@ -327,9 +370,8 @@ async fn test_semaphore_saturation_with_concurrent_streams() -> Result<(), Box<d
     }
 
     for i in 0..6u128 {
-        let received = tokio::time::timeout(std::time::Duration::from_secs(5), host_rx.receive())
-            .await?
-            ?;
+        let received =
+            tokio::time::timeout(std::time::Duration::from_secs(5), host_rx.receive()).await??;
         assert_numbered_message(&received, CommunicationType::Ping, i, &tm);
     }
 

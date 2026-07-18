@@ -1,167 +1,96 @@
 # Methanium Transport Protocol
 
-MTP is a modular transport protocol built on QUIC. It provides version-negotiable type maps, a binary codec, cryptographic primitives (classical and post-quantum), and host/client connection management with mutual authentication.
+MTP is a modular transport protocol built on QUIC. It provides versioned type maps, a binary codec, native and browser clients, host and WebTransport server implementations, and optional cryptographic authentication and end-to-end encryption.
 
-See the area-specific docs for [Native Client](./docs/NATIVE-CLIENT.md), [WASM Client](./docs/WASM-CLIENT.md), [Host](./docs/NATIVE-HOST.md), and [Type Maps](./docs/TYPE-MAP.md).
+Security assumptions, certificate handling, authentication, cryptographic primitives, key storage, and known limitations: [Security](./docs/SECURITY.md).
+
+Area-specific guides:
+
+- [Architecture](./docs/ARCHITECTURE.md)
+- [Connection lifecycle](./docs/CONNECTIONS.md)
+- [Native client](./docs/NATIVE-CLIENT.md)
+- [WASM client](./docs/WASM-CLIENT.md)
+- [Native host](./docs/NATIVE-HOST.md)
+- [Web server](./docs/NATIVE-HOST-WEB-SERVER.md)
+- [Connector and version negotiation](./docs/CONNECTOR.md)
+- [Protocol reference](./docs/PROTOCOL-REFERENCE.md)
+- [Type maps](./docs/TYPE-MAP.md)
+- [Error reference](./docs/ERRORS.md)
+- [Troubleshooting](./docs/TROUBLESHOOTING.md)
+- [Operations](./docs/OPERATIONS.md)
+
+`MTPWebServer` owns its UDP endpoint and must not bind to the same address and port as `MTPHost`.
 
 ## Browser SDK
 
-The JavaScript package is `mtp`:
+The JavaScript package is `mtp`.
 
-```typescript
-import { MTPClient } from "mtp";
-import { mtp } from "mtp/vite";
-```
+- `mtp` exports the SDK-first `MTPClient` API and codec helpers.
+- `mtp/raw` exports generated WASM bindings for lower-level integrations.
+- `mtp/vite` exports the Vite integration that builds app-specific bindings.
+- `mtp/type-map` exports generated TypeScript type-name unions.
 
-Use `mtp` for the SDK-first API, `mtp/raw` for generated WASM bindings, and `mtp/vite` for the Vite integration.
+Use the [WASM client guide](./docs/WASM-CLIENT.md) for installation, type-map configuration, credentials, certificate pins, requests, subscriptions, pipes, and protocol pings. Use the SDK methods before raw bindings because the raw API does not provide the wrapper's validation, persistence, timeout, logging, or lifecycle handling.
 
-```typescript
-// vite.config.ts
-import { defineConfig } from "vite";
-import { mtp } from "mtp/vite";
-
-export default defineConfig({
-  plugins: [mtp({ typeMaps: "./type-maps.yaml" })],
-});
-```
-
-```typescript
-import { MTPClient, type MTPCredentials } from "mtp";
-
-const credentialsStorageKey = "mtpCredentialsForMyApp";
-
-function loadCredentials(): MTPCredentials {
-  const saved = localStorage.getItem(credentialsStorageKey);
-  if (saved) {
-    return JSON.parse(saved) as MTPCredentials;
-  }
-
-  return {
-    clientId: null,
-    keyring: MTPClient.crypto.generateKeyring(),
-  };
-}
-
-await MTPClient.init();
-
-// Example-looking host public key bundle bytes. Replace this with the public
-// key bundle published by your MTP host before connecting to a real service.
-const hostPublicKey = Uint8Array.from({ length: 128 }, (_, index) => (
-  [0xb6, 0x4f, 0x7d, 0x9a, 0x3c, 0x21, 0xe8, 0x05][index % 8] ^ index
-));
-
-const client = await MTPClient.create({
-  url: "https://localhost:4433",
-  hostPublicKey,
-  credentials: loadCredentials(),
-  storage: window.localStorage, // Same API as localStorage for convenience
-  credentialsStorageKey,
-  pings: true,
-  logger: (event) => console.log("[MTP]: " + event),
-});
-
-client.subscribe("SomeType", (message) => console.log(message));
-
-const clientId = await client.auth();
-
-await client.send("SomeType", { value: "hello" });
-console.log("Connected MTP client", clientId, client.state);
-```
-
-`client.raw` exposes the lower-level WASM client and generated binding module for advanced integrations. Prefer the SDK methods unless you specifically need an API the wrapper does not expose; raw calls bypass SDK validation, credential persistence, logging, timeout handling, frame helpers, and lifecycle safeguards.
-
-Use `MTPClient.crypto` for SDK-level crypto helpers such as `generateKeyring()`, `generateEd25519()`, `keyringFromEd25519()`, `verifyEd25519()`, `sha256()`, `sha256Double()`, `hkdfExpand()`, and `deriveEncryptionKey()`.
-
-Use `codec` to encode and decode MTP frames from the main SDK export:
-
-```typescript
-import { codec } from "mtp";
-
-const frame = codec.encode("SomeType", { value: "hello" });
-const parsed = codec.decode(frame);
-```
+The SDK exposes crypto helpers and frame codec helpers from the main `mtp` export. The security guide describes the available algorithms and their limitations.
 
 ## Getting Started
 
-Add the `mtp` crate with your desired features:
+Add the umbrella crate with the features required by the application:
 
 ```toml
 [dependencies]
 mtp = { path = "..", features = ["client", "crypto"] }
 ```
 
-The `mtp` umbrella crate re-exports all sub-crates behind feature flags:
+Feature summary:
 
-| Feature  | Pulls in                    | Enables                                   |
-| -------- | --------------------------- | ----------------------------------------- |
-| `crypto` | `mtp::crypto`               | AEAD, signatures, KEM, KDF, hashing       |
-| `host`   | `mtp::host`, `mtp::codec::registry` | QUIC server, version negotiation  |
-| `client` | `mtp::client`               | QUIC client connections                   |
+| Feature | Pulls in | Enables |
+| --- | --- | --- |
+| `crypto` | `mtp::crypto` | AEAD, signatures, KEM, KDF, hashing |
+| `host` | `mtp::host`, codec registry | QUIC host and version negotiation |
+| `client` | `mtp::client` | QUIC client connections |
 
-Core crates (`codec`, `transport`, `common`, `type_map`) are always available.
-
-```rust
-use mtp::codec::{CommunicationValue, DataValue};
-use mtp::type_map::{CommunicationType, DataType, TypeMap};
-use mtp::transport::{Sender, Receiver};
-
-#[cfg(feature = "crypto")]
-use mtp::crypto::ChaCha20Poly1305;
-```
+The core crates are always available: `codec`, `transport`, `common`, and `type_map`. See the [native client](./docs/NATIVE-CLIENT.md) and [native host](./docs/NATIVE-HOST.md)
+guides for configuration and usage. See [Security](./docs/SECURITY.md) for security boundaries.
 
 ## Sub-crates
 
-All sub-crates are re-exported through the `mtp` facade and can be referenced as `mtp::codec`, `mtp::transport`, `mtp::common`, `mtp::type_map`, `mtp::crypto`, `mtp::host`, `mtp::client`.
+The `mtp` facade re-exports the following modules:
+`mtp::codec`, `mtp::transport`, `mtp::common`, `mtp::type_map`, `mtp::crypto`, `mtp::host`, and `mtp::client`.
 
 ### Codec
 
-The codec crate handles binary encoding and decoding of MTP packets using Communication Types and Data Types resolved through the type-map registry.
-
-**Data Value types:**
-- Container (key-value map of typed entries)
-- Encrypted Container (requires `crypto`)
-- Signed Container (requires `crypto`)
-- SignedEncrypted Container (requires `crypto`)
-- Signed Integer (i128)
-- Unsigned Integer (u128)
-- Boolean
-- Float (exponent + mantissa)
-- String
-- Array
-- Bytes
-- Null
-
-Encoding and decoding use a `TypeMap` to resolve type names to wire IDs. The `CommunicationValue` struct provides the frame format (type, flags, optional id/sender/receiver, data payload, optional signature).
+The codec encodes and decodes MTP frames using Communication Types and Data Types resolved through a version-specific type map. It supports containers, integers, booleans, floats, strings, arrays, bytes, null values, and optional signed or encrypted containers. See [Type Map](./docs/TYPE-MAP.md) for mapping configuration and [Connector](./docs/CONNECTOR.md) for negotiated codecs.
 
 ### Transport
 
-The transport crate wraps QUIC using `wtransport`. It provides `Sender`/`Receiver` for bidirectional message passing over uni-directional QUIC streams. Supports two send modes: persistent stream and single-stream-per-message.
+The transport crate wraps QUIC with `wtransport`. `Sender` and `Receiver` exchange framed messages over unidirectional streams. The transport supports a persistent stream and a single-stream-per-message mode, with configurable message limits, timeouts, queues, and stream concurrency.
+
+Certificate verification is controlled by client configuration. Use system roots or explicit certificate and SPKI pinning for production. Development self-signed and insecure modes: [Security](./docs/SECURITY.md).
 
 ### Host
 
-The host crate provides `MTPHost` with built-in version negotiation and optional authenticated login/registration (requires `crypto`). Accepts connections, negotiates protocol version, and returns `MTPConnection` handles.
+The host crate provides `MTPHost`, registry-backed version negotiation, optional authentication, and `MTPConnection` handles. Authentication policies and the challenge-response protocol: [Native Host](./docs/NATIVE-HOST.md) and [Security](./docs/SECURITY.md).
 
 ### Client
 
-The client crate provides `MTPClient` that connects to an MTP host. Supports `connect` (unauthenticated), `auth_connect` (login), and `auth_register` (registration) when built with `crypto`.
+The native client provides unauthenticated connections, authenticated login, and registration when the `crypto` feature is enabled. See [Native Client](./docs/NATIVE-CLIENT.md).
+
+The browser client uses the `mtp` SDK over WebTransport. See [WASM Client](./docs/WASM-CLIENT.md).
 
 ### Common
 
-Common defines shared error types (`CodecError`, `CommunicationError`) used across all crates.
+Common defines shared errors such as `CodecError` and `CommunicationError`, as well as protocol-level types used by the other crates.
 
 ### Type Map
 
-The type-map build script reads a YAML configuration to generate `CommunicationType` and `DataType` enums at compile time. The runtime crate provides `TypeMap`, `Version`, `CommunicationTypeId`, `DataTypeId`, and the multi-version `Registry` (requires `registry` feature).
+The type-map build script reads YAML and generates `CommunicationType` and `DataType` enums at compile time. The runtime crate provides `TypeMap`, `Version`, ID types, and the multi-version `Registry` when the registry feature is enabled. See [Type Map](./docs/TYPE-MAP.md).
 
-### Crypto Stack
+### Crypto
 
-| Crate            | Audited? | Notes                                            |
-| ---------------- | -------- | ------------------------------------------------ |
-| ml-dsa           | No       | NIST vectors pass; regression bug fixed Jan 2026 |
-| ed25519-dalek    | Yes      | Used by Signal, Diem                             |
-| chacha20poly1305 | Yes      | NCC Group audit, Dec 2019                        |
-| aes-gcm          | Yes      | NCC Group audit, Dec 2019                        |
-| hkdf             | No       | Simple construction; well-reviewed               |
-| sha2             | No       | Standard construction; widely reviewed           |
-| zeroize          | No       | Simple; widely used                              |
-| mlkem-tls        | No       | mlkem-rs backend unaudited                       |
+`mtp-crypto` provides AEAD encryption, Ed25519 and ML-DSA-65 signatures, X25519 plus ML-KEM-768 hybrid KEM support, HKDF, SHA-256, keyrings, encrypted containers, and certificate generation for development. Feature flags and security boundaries: [Security](./docs/SECURITY.md).
+
+## Examples
+
+The [`example/`](./example/) workspace contains native client, native server, key-generation, WebTransport server, and browser client examples. The example server stores its generated development certificate and host keys locally; use the certificate pin it prints when connecting the example client.

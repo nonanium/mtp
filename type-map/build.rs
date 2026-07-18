@@ -1,6 +1,10 @@
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::path::{Path, PathBuf};
+
+const DEFAULT_TYPE_MAPS_PATH: &str = "./type-maps.yaml";
+const FIRST_USER_TYPE_ID: u16 = 32;
 
 #[derive(Deserialize)]
 struct Config {
@@ -187,46 +191,209 @@ const RESERVED_DATA_TYPES: &[ReservedEntry] = &[
         name: "Accepted",
         id: 13,
     },
+    ReservedEntry {
+        name: "RequirePq",
+        id: 14,
+    },
 ];
 
 fn main() {
-    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let multi_version = std::env::var("CARGO_FEATURE_REGISTRY").is_ok();
 
     println!("cargo:rerun-if-env-changed=MTP_TYPE_MAPS");
 
-    let config = match std::env::var("MTP_TYPE_MAPS") {
-        Ok(config_path) => {
-            println!("cargo:rerun-if-changed={}", config_path);
-
-            let content =
-                std::fs::read_to_string(&config_path).expect("Failed to read type-maps.yaml");
-            serde_yaml::from_str(&content).expect("Failed to parse type-maps.yaml")
-        }
-        Err(_) => {
-            let manifest_dir =
-                std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-            let default_path = manifest_dir.join("../example/type-maps.yaml");
+    let loaded = match std::env::var_os("MTP_TYPE_MAPS") {
+        Some(config_path) => load_config(&PathBuf::from(config_path)),
+        None => {
+            let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+            let default_path = manifest_dir.join(DEFAULT_TYPE_MAPS_PATH);
             if default_path.exists() {
-                println!("cargo:rerun-if-changed={}", default_path.display());
-                let content = std::fs::read_to_string(&default_path)
-                    .expect("Failed to read default example/type-maps.yaml");
-                serde_yaml::from_str(&content)
-                    .expect("Failed to parse default example/type-maps.yaml")
+                load_config(&default_path)
             } else {
-                eprint!(
-                    "warning: MTP_TYPE_MAPS not set; generating types with reserved entries only"
+                println!(
+                    "cargo:warning=MTP_TYPE_MAPS not set; generating types with reserved entries only"
                 );
-                Config {
-                    protocol_version: String::new(),
-                    type_maps: BTreeMap::new(),
+                LoadedConfig {
+                    config: Config {
+                        protocol_version: String::new(),
+                        type_maps: BTreeMap::new(),
+                    },
+                    path: None,
+                    content: String::new(),
                 }
             }
         }
     };
 
-    let code = generate(&config, multi_version);
+    validate_config(&loaded);
+    let code = generate(&loaded.config, multi_version);
     std::fs::write(out.join("types.rs"), code).unwrap();
+}
+
+struct LoadedConfig {
+    config: Config,
+    path: Option<PathBuf>,
+    content: String,
+}
+
+fn load_config(path: &Path) -> LoadedConfig {
+    let path = path.canonicalize().unwrap_or_else(|error| {
+        panic!(
+            "failed to resolve type-map file {}: {error}",
+            path.display()
+        )
+    });
+    println!("cargo:rerun-if-changed={}", path.display());
+
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read type-map file {}: {error}", path.display()));
+    let config = serde_yaml::from_str(&content).unwrap_or_else(|error| {
+        if let Some(location) = error.location() {
+            panic!(
+                "{}:{}:{}: failed to parse type-map YAML: {error}",
+                path.display(),
+                location.line(),
+                location.column()
+            );
+        }
+        panic!("{}: failed to parse type-map YAML: {error}", path.display());
+    });
+
+    LoadedConfig {
+        config,
+        path: Some(path),
+        content,
+    }
+}
+
+fn validate_config(loaded: &LoadedConfig) {
+    if loaded.path.is_none() {
+        return;
+    }
+
+    validate_version(
+        loaded,
+        "protocol_version",
+        &loaded.config.protocol_version,
+        &[],
+        "protocol_version",
+    );
+    for (version, type_map) in &loaded.config.type_maps {
+        validate_version(
+            loaded,
+            "type_maps version",
+            version,
+            &["type_maps"],
+            version,
+        );
+        validate_ids(
+            loaded,
+            version,
+            "CommunicationTypes",
+            &type_map.communication_types,
+        );
+        validate_ids(loaded, version, "DataTypes", &type_map.data_types);
+    }
+}
+
+fn validate_version(
+    loaded: &LoadedConfig,
+    kind: &str,
+    version: &str,
+    parents: &[&str],
+    yaml_key: &str,
+) {
+    if parse_version(version).is_none() {
+        validation_error(
+            loaded,
+            parents,
+            yaml_key,
+            format!("invalid {kind} {version:?}; expected '<u16>.<u16>'"),
+        );
+    }
+}
+
+fn validate_ids(
+    loaded: &LoadedConfig,
+    version: &str,
+    category: &str,
+    entries: &BTreeMap<String, u16>,
+) {
+    let mut names_by_id = BTreeMap::new();
+    for (name, id) in entries {
+        if *id < FIRST_USER_TYPE_ID {
+            validation_error(
+                loaded,
+                &["type_maps", version, category],
+                name,
+                format!(
+                    "{category}.{name} in type-map version {version} uses reserved id {id}; user ids must be {FIRST_USER_TYPE_ID} or greater"
+                ),
+            );
+        }
+
+        if let Some(previous_name) = names_by_id.insert(*id, name) {
+            validation_error(
+                loaded,
+                &["type_maps", version, category],
+                name,
+                format!(
+                    "duplicate id {id} in {category} for type-map version {version}: {previous_name} and {name}"
+                ),
+            );
+        }
+    }
+}
+
+fn validation_error(loaded: &LoadedConfig, parents: &[&str], yaml_key: &str, message: String) -> ! {
+    let path = loaded
+        .path
+        .as_deref()
+        .expect("validated configs have a path");
+    let line = yaml_key_line(&loaded.content, parents, yaml_key).unwrap_or(1);
+    panic!("{}:{line}: {message}", path.display());
+}
+
+fn yaml_key_line(content: &str, parents: &[&str], key: &str) -> Option<usize> {
+    let mut stack: Vec<(usize, &str)> = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        let Some((indent, candidate)) = yaml_line_key(line) else {
+            continue;
+        };
+        while stack.last().is_some_and(|(level, _)| *level >= indent) {
+            stack.pop();
+        }
+        if candidate == key
+            && stack.len() == parents.len()
+            && stack
+                .iter()
+                .map(|(_, parent)| *parent)
+                .eq(parents.iter().copied())
+        {
+            return Some(index + 1);
+        }
+        stack.push((indent, candidate));
+    }
+    None
+}
+
+fn yaml_line_key(line: &str) -> Option<(usize, &str)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let line = line.get(indent..)?.split('#').next()?.trim_end();
+    if line.is_empty() {
+        return None;
+    }
+    let (key, _) = line.split_once(':')?;
+    Some((indent, key.trim().trim_matches(['\'', '"'])))
+}
+
+fn parse_version(version: &str) -> Option<(u16, u16)> {
+    let (major, minor) = version.split_once('.')?;
+    if major.is_empty() || minor.is_empty() || minor.contains('.') {
+        return None;
+    }
+    Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
 fn sorted_versions(config: &Config) -> Vec<(String, u16, u16)> {
@@ -300,7 +467,6 @@ fn generate(config: &Config, multi_version: bool) -> String {
     }
 
     generate_enum_conversion_methods(&mut out);
-    generate_reverse_lookups(&mut out, config, &sorted, multi_version);
     generate_id_display_impls(&mut out);
 
     out
@@ -327,6 +493,28 @@ fn generate_latest_method(out: &mut String, config: &Config) {
         major, minor
     )
     .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "impl TypeMap {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn communication_type_name(&self, id: u16) -> Option<&'static str> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        self.comm_enum_id(id).map(CommunicationType::name)"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(
+        out,
+        "    pub fn data_type_name(&self, id: u16) -> Option<&'static str> {{"
+    )
+    .unwrap();
+    writeln!(out, "        self.data_enum_id(id).map(DataType::name)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -816,79 +1004,24 @@ fn generate_builtin_type_maps(out: &mut String, sorted_versions: &[(String, u16,
     writeln!(out).unwrap();
 }
 
-fn generate_reverse_lookups(
-    out: &mut String,
-    config: &Config,
-    sorted_versions: &[(String, u16, u16)],
-    multi_version: bool,
-) {
-    let mut id_to_comm: BTreeMap<u16, String> = BTreeMap::new();
-    for entry in RESERVED_COMM_TYPES {
-        id_to_comm.insert(entry.id, entry.name.to_string());
-    }
-    if multi_version {
-        for (version_key, _major, _minor) in sorted_versions {
-            if let Some(tm_cfg) = config.type_maps.get(version_key) {
-                for (name, id) in &tm_cfg.communication_types {
-                    id_to_comm.insert(*id, name.clone());
-                }
-            }
-        }
-    } else if let Some(tm_cfg) = config.type_maps.get(&config.protocol_version) {
-        for (name, id) in &tm_cfg.communication_types {
-            id_to_comm.insert(*id, name.clone());
-        }
-    }
-
-    writeln!(
-        out,
-        "pub fn communication_type_name(id: u16) -> Option<&'static str> {{"
-    )
-    .unwrap();
-    writeln!(out, "    match id {{").unwrap();
-    for (id, name) in &id_to_comm {
-        writeln!(out, "        {} => Some(\"{}\"),", id, name).unwrap();
-    }
-    writeln!(out, "        _ => None,").unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out, "}}").unwrap();
-    writeln!(out).unwrap();
-
-    let mut id_to_data: BTreeMap<u16, String> = BTreeMap::new();
-    for entry in RESERVED_DATA_TYPES {
-        id_to_data.insert(entry.id, entry.name.to_string());
-    }
-    if multi_version {
-        for (version_key, _major, _minor) in sorted_versions {
-            if let Some(tm_cfg) = config.type_maps.get(version_key) {
-                for (name, id) in &tm_cfg.data_types {
-                    id_to_data.insert(*id, name.clone());
-                }
-            }
-        }
-    } else if let Some(tm_cfg) = config.type_maps.get(&config.protocol_version) {
-        for (name, id) in &tm_cfg.data_types {
-            id_to_data.insert(*id, name.clone());
-        }
-    }
-
-    writeln!(
-        out,
-        "pub fn data_type_name(id: u16) -> Option<&'static str> {{"
-    )
-    .unwrap();
-    writeln!(out, "    match id {{").unwrap();
-    for (id, name) in &id_to_data {
-        writeln!(out, "        {} => Some(\"{}\"),", id, name).unwrap();
-    }
-    writeln!(out, "        _ => None,").unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out, "}}").unwrap();
-    writeln!(out).unwrap();
-}
-
 fn generate_enum_conversion_methods(out: &mut String) {
     writeln!(out, "impl CommunicationType {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn try_to_id(self, tm: &TypeMap) -> Option<CommunicationTypeId> {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        tm.comm_id_enum(self).map(CommunicationTypeId)"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(
+        out,
+        "    #[deprecated(since = \"0.2.0\", note = \"use try_to_id to handle types absent from a TypeMap version\")]"
+    )
+    .unwrap();
     writeln!(
         out,
         "    pub fn to_id(self, tm: &TypeMap) -> CommunicationTypeId {{"
@@ -904,6 +1037,18 @@ fn generate_enum_conversion_methods(out: &mut String) {
     writeln!(out).unwrap();
 
     writeln!(out, "impl DataType {{").unwrap();
+    writeln!(
+        out,
+        "    pub fn try_to_id(self, tm: &TypeMap) -> Option<DataTypeId> {{"
+    )
+    .unwrap();
+    writeln!(out, "        tm.data_id_enum(self).map(DataTypeId)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(
+        out,
+        "    #[deprecated(since = \"0.2.0\", note = \"use try_to_id to handle types absent from a TypeMap version\")]"
+    )
+    .unwrap();
     writeln!(out, "    pub fn to_id(self, tm: &TypeMap) -> DataTypeId {{").unwrap();
     writeln!(
         out,
@@ -1060,14 +1205,7 @@ fn generate_id_display_impls(out: &mut String) {
         "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
     )
     .unwrap();
-    writeln!(out, "        match communication_type_name(self.0) {{").unwrap();
-    writeln!(out, "            Some(name) => f.write_str(name),").unwrap();
-    writeln!(
-        out,
-        "            None => write!(f, \"CommTypeId({{}})\", self.0),"
-    )
-    .unwrap();
-    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        write!(f, \"CommTypeId({{}})\", self.0)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -1078,14 +1216,7 @@ fn generate_id_display_impls(out: &mut String) {
         "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
     )
     .unwrap();
-    writeln!(out, "        match data_type_name(self.0) {{").unwrap();
-    writeln!(out, "            Some(name) => f.write_str(name),").unwrap();
-    writeln!(
-        out,
-        "            None => write!(f, \"DataTypeId({{}})\", self.0),"
-    )
-    .unwrap();
-    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        write!(f, \"DataTypeId({{}})\", self.0)").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();

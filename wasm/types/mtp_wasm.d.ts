@@ -23,8 +23,8 @@ export interface Ed25519GenerateResult {
 export interface AuthResponse {
   connected: boolean;
   clientNonce?: Uint8Array;
-  assignedId?: number;
-  timestamp?: number;
+  assignedId?: bigint;
+  timestamp?: bigint;
   signature?: Uint8Array;
 }
 
@@ -50,6 +50,7 @@ export class ConnectionConfig implements DisposableWasmObject {
   client_id: bigint;
   description: string | undefined;
   max_message_size: number;
+  require_pq: boolean;
   server_certificate_hashes: string[];
   readonly url: string;
 }
@@ -109,7 +110,11 @@ export class WasmClient implements DisposableWasmObject {
   ): Promise<bigint>;
   connect(config: ConnectionConfig): Promise<void>;
   disconnect(): void;
-  request(frame: Uint8Array, response_type?: string | null): Promise<ParsedFrame>;
+  request(
+    frame: Uint8Array,
+    response_type?: string | null,
+    timeout_ms?: number | null,
+  ): Promise<ParsedFrame>;
   send(frame: Uint8Array): Promise<void>;
   start_protocol_pings(interval_ms: number, client_id: bigint): void;
   stop_protocol_pings(): void;

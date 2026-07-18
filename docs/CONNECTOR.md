@@ -60,34 +60,10 @@ while let Some(conn) = host.accept().await? {
 }
 ```
 
-The host's `accept()` method:
-1. Accepts a QUIC connection
-2. If authentication is required (crypto feature): performs login/register handshake
-3. Reads the first `CommunicationValue` (always encoded with reserved type IDs)
-4. Extracts the client's protocol version from `DataType::Version` (reserved data type ID 0)
-5. Calls `registry.negotiate(&[client_version])`
-6. Returns an `AcceptError` if the version is unsupported
-7. Returns `Ok(Some(MTPConnection))` with the negotiated version otherwise
+The host reads the reserved opening frame, extracts `DataType::Version`, calls `registry.negotiate`, and returns `AcceptError::UnsupportedVersion` when no registered version matches.
 
-### Login/Register Handshake
-
-When `authentication_policy` is `ForceAuthentication` or `AllowAuthentication`,
-the parties run a mutually-authenticated
-**challenge-response**. The client speaks first with an *unsigned* hello:
-
-- **Login** (`CommunicationType::Identification`, reserved ID 0): version, client ID
-- **Register** (`CommunicationType::Register`, reserved ID 2): version, public keys
-
-The host then issues a fresh random `server_challenge` in a signed `Challenge`
-(`CommunicationType::Challenge`, reserved ID 4, carrying `ServerNonce`). The client signs
-that challenge, binding its id (login) or public keys (register), and returns a
-`ChallengeResponse` (reserved ID 5). The host verifies the proof against the challenge it
-issued and sends a signed final response, which the client verifies.
-
-Because the client's proof covers the host-issued `server_challenge` (a one-time
-value held only on the accepting task's stack), a captured proof cannot be
-replayed on another connection. All signed payloads are domain-separated; see
-`mtp::crypto::auth`.
+Authentication follows the version-bearing hello when the host enables it.
+The sequence is defined in [Protocol Reference](PROTOCOL-REFERENCE.md).
 
 ---
 
@@ -111,7 +87,7 @@ let conn = MTPClient::auth_connect(pinned.with_client_id(8765), &keys, &host_pk)
 let conn = MTPClient::auth_register(config, &keys, &host_pk).await?;
 ```
 
-The client's `PROTOCOL_VERSION` constant is set by `protocol_version` in `type-maps.yaml` and baked in at compile time. The client never imports the `registry` crate; it only uses `mtp::type_map` for enum types and `mtp::codec` for encoding.
+The client's `PROTOCOL_VERSION` constant is set by `protocol_version` in `type-maps.yaml` and baked in at compile time. The client uses one version and does not import the registry.
 
 ---
 
@@ -132,13 +108,22 @@ Client (v2.0)         Host (v0.0, v1.0, v2.0)
     |                        |  registry.negotiate(&[Version(2,0)])
     |                        |  -> Some(Version(2,0))
     |                        |
-    |  Response              |
-    |<-----------------------|  (uses v2.0 TypeMap for encoding)
-    |    Status, Nonces,     |
-    |    Signature           |
+    |  Response              |  selected v2.0 TypeMap
+    |<-----------------------|
+    |  Status, version       |
     |                        |
-    |  (subsequent messages  |
-    |   use v2.0 TypeMap)    |
+    |  subsequent messages   |
+    |  use v2.0 TypeMap      |
 ```
 
 If the client sends an unsupported version (e.g. v3.0 when the host only knows up to v2.0), `negotiate` returns `None` and the connection is closed.
+
+## Protocol Ping and Pong
+
+See [Protocol Reference](PROTOCOL-REFERENCE.md#protocol-keepalive).
+
+## Protocol Version Changes
+
+Add a protocol version by adding its type-map entry and `protocol_version` to the YAML configuration, then rebuild both peers. The type-map build script generates a version-specific `TypeMap` and keeps the enum as the union of all configured type names.
+
+For a backward-compatible change, keep existing communication and data IDs stable and add new types with the new version. For a breaking change, add a new version and register both versions on the host while clients migrate. A client compiles one protocol version; it can connect only when that version is present in the host registry. Remove an old version only after its clients no longer connect, because the host closes connections whose version is unsupported.

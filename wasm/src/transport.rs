@@ -46,12 +46,11 @@ pub(crate) fn log_stream_error_code(error: &JsValue, context: &str) {
         None => format!("[WasmTransport] {context}: stream error ({message})"),
     };
 
-    if let Ok(console) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("console")) {
-        if let Ok(warn) = js_sys::Reflect::get(&console, &JsValue::from_str("warn"))
+    if let Ok(console) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("console"))
+        && let Ok(warn) = js_sys::Reflect::get(&console, &JsValue::from_str("warn"))
             .and_then(|f| f.dyn_into::<js_sys::Function>())
-        {
-            let _ = warn.call1(&console, &JsValue::from_str(&formatted));
-        }
+    {
+        let _ = warn.call1(&console, &JsValue::from_str(&formatted));
     }
 }
 
@@ -78,7 +77,7 @@ fn resolve_stream_readable(recv_stream: &JsValue) -> Result<JsValue, JsValue> {
 /// Releases a writer's lock so an abandoned writer isn't treated as an abort (which sends STOP_SENDING).
 pub(crate) fn release_writer_lock(writer: &JsValue) {
     if let Ok(release) = js_sys::Reflect::get(writer, &JsValue::from_str("releaseLock"))
-        .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
+        .and_then(|f| f.dyn_into::<js_sys::Function>())
     {
         let _ = release.call0(writer);
     }
@@ -87,7 +86,7 @@ pub(crate) fn release_writer_lock(writer: &JsValue) {
 /// Releases a reader's lock so an abandoned reader isn't treated as a cancel (which sends STOP_SENDING).
 pub(crate) fn release_reader_lock(reader: &JsValue) {
     if let Ok(release) = js_sys::Reflect::get(reader, &JsValue::from_str("releaseLock"))
-        .and_then(|f| f.dyn_into::<js_sys::Function>().map_err(Into::into))
+        .and_then(|f| f.dyn_into::<js_sys::Function>())
     {
         let _ = release.call0(reader);
     }
@@ -181,7 +180,7 @@ impl WasmTransport {
             .map_err(|_| js_error("WebTransport.ready is not a Promise"))?;
         JsFuture::from(ready)
             .await
-            .map_err(|e| js_error(&format!("WebTransport ready failed: {:?}", e)))?;
+            .map_err(|e| js_error(format!("WebTransport ready failed: {:?}", e)))?;
         Ok(Self {
             inner: transport,
             max_message_size,
@@ -237,7 +236,7 @@ impl WasmTransport {
             .map_err(|_| js_error("write not a function"))?;
         let write_promise = write_fn
             .call1(&writer_val, &chunk)
-            .map_err(|e| js_error(&format!("write failed: {:?}", e)))?;
+            .map_err(|e| js_error(format!("write failed: {:?}", e)))?;
         if let Err(e) = JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await {
             log_stream_error_code(&e, "send_frame write");
             release_writer_lock(&writer_val);
@@ -250,7 +249,7 @@ impl WasmTransport {
             .map_err(|_| js_error("close not a function"))?;
         let close_promise = close_fn
             .call0(&writer_val)
-            .map_err(|e| js_error(&format!("close failed: {:?}", e)))?;
+            .map_err(|e| js_error(format!("close failed: {:?}", e)))?;
         if let Err(e) = JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await {
             // Write succeeded; STOP_SENDING on close just means peer stopped reading before FIN.
             log_stream_error_code(&e, "send_frame close");
@@ -298,7 +297,7 @@ impl WasmTransport {
             Ok(r) => r,
             Err(e) => {
                 log_stream_error_code(&e, "open_next_stream accept");
-                return Err(js_error(&format!("accept stream failed: {:?}", e)));
+                return Err(js_error(format!("accept stream failed: {:?}", e)));
             }
         };
 
@@ -344,7 +343,7 @@ impl WasmTransport {
             Ok(r) => r,
             Err(e) => {
                 log_stream_error_code(&e, "read_chunk");
-                return Err(js_error(&format!("read failed: {:?}", e)));
+                return Err(js_error(format!("read failed: {:?}", e)));
             }
         };
 
@@ -362,7 +361,7 @@ impl WasmTransport {
     }
 
     /// Try to pull one complete frame out of the buffer without reading more.
-    fn parse_buffer(&self) -> Result<Option<FrameOutcome>, JsValue> {
+    fn parse_buffer(&self, max_message_size: u32) -> Result<Option<FrameOutcome>, JsValue> {
         let buf = self.buffer.borrow();
         if buf.len() < 4 {
             return Ok(None);
@@ -371,7 +370,7 @@ impl WasmTransport {
         if frame_len == CLOSE_FRAME_LEN {
             return Ok(Some(FrameOutcome::Closed));
         }
-        if frame_len > self.max_message_size {
+        if frame_len > max_message_size {
             return Err(js_error("message too large"));
         }
         let frame_len = frame_len as usize;
@@ -393,9 +392,9 @@ impl WasmTransport {
      * persistent uni stream) or one-per-stream; both are handled by buffering
      * across reads and advancing to the next stream when the current one ends.
      */
-    async fn next_frame(&self) -> Result<FrameOutcome, JsValue> {
+    async fn next_frame(&self, max_message_size: u32) -> Result<FrameOutcome, JsValue> {
         loop {
-            if let Some(outcome) = self.parse_buffer()? {
+            if let Some(outcome) = self.parse_buffer(max_message_size)? {
                 return Ok(outcome);
             }
 
@@ -407,7 +406,15 @@ impl WasmTransport {
             match self.read_chunk().await? {
                 Some(chunk) => {
                     if !chunk.is_empty() {
-                        self.buffer.borrow_mut().extend_from_slice(&chunk);
+                        let mut buffer = self.buffer.borrow_mut();
+                        let maximum_buffer = max_message_size as usize + 4;
+                        if buffer.len().saturating_add(chunk.len()) > maximum_buffer {
+                            return Err(js_error("message too large"));
+                        }
+                        buffer
+                            .try_reserve(chunk.len())
+                            .map_err(|_| js_error("message allocation failed"))?;
+                        buffer.extend_from_slice(&chunk);
                     }
                 }
                 None => {
@@ -430,7 +437,10 @@ impl WasmTransport {
 
     /// Read exactly one application frame (used during the auth handshake).
     pub async fn read_one_frame(&self) -> Result<Vec<u8>, JsValue> {
-        match self.next_frame().await? {
+        match self
+            .next_frame(self.max_message_size.min(64 * 1024))
+            .await?
+        {
             FrameOutcome::Frame(frame) => Ok(frame),
             FrameOutcome::Closed => Err(js_error("connection closed before frame")),
             FrameOutcome::Ended => Err(js_error("stream ended before frame")),
@@ -445,7 +455,7 @@ impl WasmTransport {
         F: FnMut(JsValue),
     {
         loop {
-            match self.next_frame().await {
+            match self.next_frame(self.max_message_size).await {
                 Ok(FrameOutcome::Frame(frame)) => match parse_frame_value(&frame) {
                     Ok(parsed) => {
                         on_message(parsed);
@@ -477,16 +487,16 @@ impl WasmTransport {
         G: FnMut(crate::pipe::PipeReader),
     {
         let pipe_request_type =
-            mtp_codec::CommunicationType::PipeRequest.to_id(&mtp_codec::TypeMap::latest());
+            mtp_codec::CommunicationType::PipeRequest.try_to_id(&mtp_codec::TypeMap::latest());
 
         loop {
-            match self.next_frame().await {
+            match self.next_frame(self.max_message_size).await {
                 Ok(FrameOutcome::Frame(frame)) => {
                     let is_first = self.new_stream_frame.get();
                     if is_first {
                         self.new_stream_frame.set(false);
                         if let Ok(comm) = mtp_codec::CommunicationValue::from_bytes(&frame)
-                            && comm.get_type() == pipe_request_type
+                            && Some(comm.get_type()) == pipe_request_type
                         {
                             let pipe_id = comm.get_id();
                             let description = comm
@@ -567,7 +577,7 @@ impl WasmTransport {
             );
         let frame_bytes = request
             .to_bytes()
-            .map_err(|e| js_error(&format!("encode failed: {}", e)))?;
+            .map_err(|e| js_error(format!("encode failed: {}", e)))?;
 
         let len = frame_bytes.len() as u32;
         let mut wire = Vec::with_capacity(4 + frame_bytes.len());
@@ -581,7 +591,7 @@ impl WasmTransport {
             .map_err(|_| js_error("write not a function"))?;
         let write_promise = write_fn
             .call1(&writer_val, &chunk)
-            .map_err(|e| js_error(&format!("write failed: {:?}", e)))?;
+            .map_err(|e| js_error(format!("write failed: {:?}", e)))?;
         if let Err(e) = JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await {
             log_stream_error_code(&e, "open_pipe write");
             release_writer_lock(&writer_val);
@@ -601,7 +611,7 @@ impl WasmTransport {
         }
 
         if let Ok(close) = js_sys::Reflect::get(&self.inner, &JsValue::from_str("close"))
-            .and_then(|value| value.dyn_into::<js_sys::Function>().map_err(Into::into))
+            .and_then(|value| value.dyn_into::<js_sys::Function>())
         {
             let _ = close.call1(&self.inner, &js_sys::Object::new());
         }

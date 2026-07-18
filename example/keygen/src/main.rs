@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use mtp::crypto::Keyring;
 use mtp::files::{
-    self, BUNDLE_EXTENSION, KEYRING_EXTENSION, load_keyring, load_public_key_bundle, save_keyring,
-    save_public_key_bundle,
+    self, BUNDLE_EXTENSION, KEYRING_EXTENSION, load_keyring_raw, load_public_key_bundle,
+    save_keyring_raw, save_public_key_bundle,
 };
 
 fn main() -> Result<(), files::FileError> {
@@ -11,11 +11,11 @@ fn main() -> Result<(), files::FileError> {
     let bundle_path = PathBuf::from(format!("bundle.{BUNDLE_EXTENSION}"));
 
     let keyring = Keyring::generate();
-    save_keyring(&keyring, &keyring_path)?;
+    save_keyring_raw(&keyring, &keyring_path)?;
     save_public_key_bundle(&keyring.public_key_bundle(), &bundle_path)?;
 
     /* Read both back to confirm the files round-trip through the on-disk format. */
-    let loaded_keyring = load_keyring(&keyring_path)?;
+    let loaded_keyring = load_keyring_raw(&keyring_path)?;
     let loaded_bundle = load_public_key_bundle(&bundle_path)?;
     assert_eq!(keyring.to_bytes(), loaded_keyring.to_bytes());
     assert_eq!(

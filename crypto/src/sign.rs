@@ -21,9 +21,6 @@ impl SigAlgorithm {
     }
 }
 
-#[cfg(feature = "ed25519-dalek")]
-use rand_core::RngCore;
-
 #[cfg(feature = "ml-dsa")]
 use crate::keypair::{SignaturePqPrivateKey, SignaturePqPublicKey};
 
@@ -50,9 +47,12 @@ impl Ed25519Signer {
         Ok(Self { secret, public })
     }
 
+    #[cfg(feature = "ed25519-dalek")]
     pub fn generate() -> (Self, SignaturePrivateKey, SignaturePublicKey) {
+        use rand::RngExt;
+
         let mut bytes = [0u8; 32];
-        rand_core::OsRng.fill_bytes(&mut bytes);
+        rand::rng().fill(&mut bytes);
         let secret = ed25519_dalek::SigningKey::from_bytes(&bytes);
         let public = secret.verifying_key();
         let priv_key = SignaturePrivateKey::new(secret.to_bytes().to_vec());

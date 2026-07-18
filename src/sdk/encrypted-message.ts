@@ -1,6 +1,7 @@
 import * as bindings from "mtp/raw";
 import { MTPRatchet } from "./ratchet.js";
 import type { MTPSessionState } from "./session";
+import { concatBytes, writeU64BE } from "./utils.js";
 
 export const MTP_E2EE_VERSION = 1;
 export const FLAG_INIT = 0x01;
@@ -37,18 +38,6 @@ export interface SerializedEncryptedMessage {
   aeadPayload: Uint8Array;
 }
 
-function writeU64BE(value: bigint): Uint8Array {
-  if (value < 0n || value > 0xffff_ffff_ffff_ffffn) {
-    throw new Error("u64 value out of range");
-  }
-  const buf = new Uint8Array(8);
-  for (let i = 7; i >= 0; i--) {
-    buf[i] = Number(value & 0xffn);
-    value >>= 8n;
-  }
-  return buf;
-}
-
 function readU64BE(bytes: Uint8Array, offset: number): bigint {
   let value = 0n;
   for (let i = 0; i < 8; i++) {
@@ -67,16 +56,6 @@ function writeU32BE(value: number): Uint8Array {
     (value >>> 8) & 0xff,
     value & 0xff,
   ]);
-}
-
-function concatBytes(parts: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part, offset);
-    offset += part.length;
-  }
-  return out;
 }
 
 function assertSupported(message: ParsedEncryptedMessage): void {
@@ -111,10 +90,10 @@ export function serializeEncryptedMessage(
 ): Uint8Array {
   const normalized: ParsedEncryptedMessage =
     "header" in message
-      ? {
+      ? ({
           ...message.header,
           ciphertext: message.aeadPayload,
-        }
+        } as ParsedEncryptedMessage)
       : message;
 
   assertSupported(normalized);
@@ -293,29 +272,48 @@ export async function decryptPayload(args: {
   if (parsed.senderClientId !== args.session.peerClientId) {
     throw new Error("Encrypted message sender mismatch");
   }
-  if (parsed.messageNumber < args.session.recvCount) {
-    throw new Error("Encrypted message replay or out-of-order message number");
+
+  const existingSkippedMessageKeys = args.session.skippedMessageKeys ?? [];
+  const cachedKeyIndex = existingSkippedMessageKeys.findIndex(
+    (skipped) => skipped.messageNumber === parsed.messageNumber,
+  );
+  if (parsed.messageNumber < args.session.recvCount && cachedKeyIndex < 0) {
+    throw new Error("Encrypted message replay message number");
   }
 
   let chainKey = args.session.recvChainKey;
   let messageKey: Uint8Array | undefined;
-  const gap = parsed.messageNumber - args.session.recvCount;
-  if (gap > MAX_RATCHET_SKIP) {
-    throw new Error(
-      `Encrypted message receive gap exceeds max skip (${MAX_RATCHET_SKIP})`,
-    );
-  }
+  let skippedMessageKeys = existingSkippedMessageKeys.slice();
+  const newlyDerivedKeys: Uint8Array[] = [];
+  let nextRecvCount = args.session.recvCount;
 
-  const steps = gap + 1;
-  for (let i = 0; i < steps; i += 1) {
-    const step = await MTPRatchet.stepRecv(chainKey);
-    if (i === steps - 1) {
-      messageKey = step.key;
-    } else {
-      step.key.fill(0);
+  if (cachedKeyIndex >= 0) {
+    // Work on a copy so an invalid ciphertext cannot consume the cached key.
+    messageKey = skippedMessageKeys[cachedKeyIndex].key.slice();
+  } else {
+    const gap = parsed.messageNumber - args.session.recvCount;
+    if (gap > MAX_RATCHET_SKIP) {
+      throw new Error(
+        `Encrypted message receive gap exceeds max skip (${MAX_RATCHET_SKIP})`,
+      );
     }
-    if (chainKey !== args.session.recvChainKey) chainKey.fill(0);
-    chainKey = step.chainKey;
+
+    const steps = gap + 1;
+    for (let i = 0; i < steps; i += 1) {
+      const step = await MTPRatchet.stepRecv(chainKey);
+      if (i === steps - 1) {
+        messageKey = step.key;
+      } else {
+        skippedMessageKeys.push({
+          messageNumber: args.session.recvCount + i,
+          key: step.key,
+        });
+        newlyDerivedKeys.push(step.key);
+      }
+      if (chainKey !== args.session.recvChainKey) chainKey.fill(0);
+      chainKey = step.chainKey;
+    }
+    nextRecvCount = parsed.messageNumber + 1;
   }
   if (!messageKey) {
     throw new Error("Failed to derive receive message key");
@@ -334,9 +332,22 @@ export async function decryptPayload(args: {
   let plaintext: Uint8Array;
   try {
     plaintext = cipher.decrypt(parsed.ciphertext, aad);
+  } catch (error) {
+    for (const key of newlyDerivedKeys) key.fill(0);
+    if (chainKey !== args.session.recvChainKey) chainKey.fill(0);
+    throw error;
   } finally {
     cipher.free();
     messageKey.fill(0);
+  }
+
+  if (cachedKeyIndex >= 0) {
+    const [consumed] = skippedMessageKeys.splice(cachedKeyIndex, 1);
+    consumed.key.fill(0);
+  }
+  while (skippedMessageKeys.length > MAX_RATCHET_SKIP) {
+    const evicted = skippedMessageKeys.shift();
+    evicted?.key.fill(0);
   }
 
   return {
@@ -344,7 +355,8 @@ export async function decryptPayload(args: {
     session: {
       ...args.session,
       recvChainKey: chainKey,
-      recvCount: parsed.messageNumber + 1,
+      recvCount: nextRecvCount,
+      skippedMessageKeys,
       updatedAt: Date.now(),
     },
   };

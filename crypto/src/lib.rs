@@ -22,6 +22,9 @@ pub mod enc;
 
 pub mod helper;
 
+#[cfg(feature = "tls")]
+pub mod tls;
+
 pub use aead::{AeadCipher, AeadDecrypt, AeadEncrypt};
 pub use error::CryptoError;
 pub use keypair::{
@@ -85,7 +88,9 @@ mod tests {
         use crate::aead::{AeadDecrypt, AeadEncrypt, ChaCha20Poly1305};
         let cipher_a = ChaCha20Poly1305::new([0xAB; 32]);
         let cipher_b = ChaCha20Poly1305::new([0xCD; 32]);
-        let ct = cipher_a.encrypt(b"hello", b"").expect("encryption should succeed");
+        let ct = cipher_a
+            .encrypt(b"hello", b"")
+            .expect("encryption should succeed");
         assert!(cipher_b.decrypt(&ct, b"").is_err());
     }
 
@@ -106,11 +111,15 @@ mod tests {
         let (signer, sk, pk) = Ed25519Signer::generate();
         let msg = b"test message";
         let sig = signer.sign(msg).expect("signing should succeed");
-        signer.verify(msg, &sig).expect("verification should succeed");
+        signer
+            .verify(msg, &sig)
+            .expect("verification should succeed");
         verify_ed25519(&pk, msg, &sig).expect("verification should succeed");
 
         let loaded = Ed25519Signer::new(&sk).expect("signer loading should succeed");
-        loaded.verify(msg, &sig).expect("verification should succeed");
+        loaded
+            .verify(msg, &sig)
+            .expect("verification should succeed");
     }
 
     #[cfg(feature = "ed25519-dalek")]
@@ -128,11 +137,15 @@ mod tests {
         let (signer, sk, pk) = MlDsaSigner::generate();
         let msg = b"test message";
         let sig = signer.sign(msg).expect("signing should succeed");
-        signer.verify(msg, &sig).expect("verification should succeed");
+        signer
+            .verify(msg, &sig)
+            .expect("verification should succeed");
         verify_ml_dsa(&pk, msg, &sig).expect("verification should succeed");
 
         let loaded = MlDsaSigner::new(&sk, &pk).expect("signer loading should succeed");
-        loaded.verify(msg, &sig).expect("verification should succeed");
+        loaded
+            .verify(msg, &sig)
+            .expect("verification should succeed");
     }
 
     #[cfg(feature = "ml-dsa")]
@@ -183,8 +196,8 @@ mod tests {
             .expect("key derivation should succeed");
         assert_eq!(key.len(), 32);
 
-        let expanded = hkdf_expand(b"ikm", b"salt", b"info", 64)
-            .expect("HKDF expansion should succeed");
+        let expanded =
+            hkdf_expand(b"ikm", b"salt", b"info", 64).expect("HKDF expansion should succeed");
         assert_eq!(expanded.len(), 64);
     }
 
@@ -285,8 +298,7 @@ mod tests {
         let kr = Keyring::generate();
         let bundle = kr.public_key_bundle();
         let bytes = bundle.as_bytes();
-        let loaded =
-            PublicKeyBundle::from_bytes(&bytes).expect("bundle roundtrip should succeed");
+        let loaded = PublicKeyBundle::from_bytes(&bytes).expect("bundle roundtrip should succeed");
         assert_eq!(
             bundle.kem_public_key.as_bytes(),
             loaded.kem_public_key.as_bytes()
@@ -306,7 +318,8 @@ mod tests {
     fn hybrid_kem_roundtrip() {
         let (sk, pk) = HybridKem::generate_keypair();
         let enc = HybridKem::encapsulate(&pk).expect("encapsulation should succeed");
-        let ss = HybridKem::decapsulate(&sk, &enc.ciphertext).expect("decapsulation should succeed");
+        let ss =
+            HybridKem::decapsulate(&sk, &enc.ciphertext).expect("decapsulation should succeed");
         assert_eq!(enc.shared_secret, ss);
     }
 

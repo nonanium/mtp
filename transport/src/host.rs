@@ -3,24 +3,53 @@ use mtp_common::CommunicationError;
 use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use tracing::debug;
 use wtransport::{Connection as WTConnection, Endpoint, ServerConfig};
 
-fn generate_self_signed_cert() -> (Vec<u8>, Vec<u8>) {
-    let key_pair = match rcgen::KeyPair::generate() {
-        Ok(key_pair) => key_pair,
-        Err(e) => panic!("failed to generate self-signed key pair: {e}"),
-    };
-    let params = match rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]) {
-        Ok(params) => params,
-        Err(e) => panic!("failed to build self-signed certificate params: {e}"),
-    };
-    let cert = match params.self_signed(&key_pair) {
-        Ok(cert) => cert,
-        Err(e) => panic!("failed to self-sign certificate: {e}"),
-    };
+fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>), CommunicationError> {
+    let key_pair = rcgen::KeyPair::generate().map_err(|e| {
+        CommunicationError::Other(format!("failed to generate self-signed key pair: {e}"))
+    })?;
+    let params = rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])
+        .map_err(|e| {
+            CommunicationError::Other(format!(
+                "failed to build self-signed certificate params: {e}"
+            ))
+        })?;
+    let cert = params
+        .self_signed(&key_pair)
+        .map_err(|e| CommunicationError::Other(format!("failed to self-sign certificate: {e}")))?;
     let cert_pem = cert.pem();
     let key_pem = key_pair.serialize_pem();
-    (cert_pem.into_bytes(), key_pem.into_bytes())
+    Ok((cert_pem.into_bytes(), key_pem.into_bytes()))
+}
+
+enum HostCredentials {
+    Pem { cert_pem: Vec<u8>, key_pem: Vec<u8> },
+    SelfSigned,
+}
+
+/// TLS and transport settings for a native host.
+pub struct HostConfig {
+    credentials: HostCredentials,
+    policy: Policy,
+}
+
+impl HostConfig {
+    pub fn new(cert_pem: Vec<u8>, key_pem: Vec<u8>, policy: Policy) -> Self {
+        Self {
+            credentials: HostCredentials::Pem { cert_pem, key_pem },
+            policy,
+        }
+    }
+
+    /// Generate a self-signed certificate for local development.
+    pub fn self_signed(policy: Policy) -> Self {
+        Self {
+            credentials: HostCredentials::SelfSigned,
+            policy,
+        }
+    }
 }
 
 pub struct Host {
@@ -62,18 +91,23 @@ pub async fn host(
     key_pem: Vec<u8>,
     policy: Policy,
 ) -> Result<Host, CommunicationError> {
+    host_with_config(ip, port, HostConfig::new(cert_pem, key_pem, policy)).await
+}
+
+/// Start a host using explicit TLS and transport configuration.
+pub async fn host_with_config(
+    ip: IpAddr,
+    port: u16,
+    config: HostConfig,
+) -> Result<Host, CommunicationError> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    // When MTP_INSECURE is set, generate a self-signed cert so the host can
-    // run without externally-provided TLS credentials.
-    let is_insecure = std::env::var("MTP_INSECURE").is_ok();
-    let (use_cert_pem, use_key_pem) = if is_insecure {
-        generate_self_signed_cert()
-    } else {
-        (cert_pem, key_pem)
+    let (cert_pem, key_pem) = match config.credentials {
+        HostCredentials::Pem { cert_pem, key_pem } => (cert_pem, key_pem),
+        HostCredentials::SelfSigned => generate_self_signed_cert()?,
     };
 
-    let server_config = configure_server(ip, port, use_cert_pem, use_key_pem, &policy).await?;
+    let server_config = configure_server(ip, port, cert_pem, key_pem, &config.policy).await?;
     let endpoint = Endpoint::server(server_config)
         .map_err(|e| CommunicationError::Other(format!("Endpoint creation failed: {}", e)))?;
 
@@ -83,7 +117,7 @@ pub async fn host(
 
     let (incoming_tx, incoming_rx) = tokio::sync::mpsc::channel(16);
 
-    let policy = Arc::new(policy);
+    let policy = Arc::new(config.policy);
 
     let task = tokio::spawn(async move {
         loop {
@@ -92,7 +126,7 @@ pub async fn host(
             let request = match incoming_session.await {
                 Ok(req) => req,
                 Err(e) => {
-                    log::debug!("incoming WebTransport session failed: {e}");
+                    debug!("incoming WebTransport session failed: {e}");
                     continue;
                 }
             };
@@ -103,7 +137,7 @@ pub async fn host(
             {
                 Ok(conn) => conn,
                 Err(e) => {
-                    log::debug!("WebTransport request accept failed: {e}");
+                    debug!("WebTransport request accept failed: {e}");
                     continue;
                 }
             };
@@ -128,7 +162,7 @@ async fn handle_connection(
     let handle = Arc::new(ConnectionHandle::new());
 
     let sender = Sender::new(connection.clone(), handle.clone(), policy.clone());
-    let receiver = Receiver::new(connection, handle, policy);
+    let receiver = Receiver::new_for_handshake(connection, handle, policy);
     let _ = tx.send((sender, receiver)).await;
 }
 

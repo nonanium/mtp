@@ -30,4 +30,6 @@ pub enum CryptoError {
     InvalidHex,
     #[error("invalid base64 encoding")]
     InvalidBase64,
+    #[error("TLS error: {0}")]
+    Tls(String),
 }

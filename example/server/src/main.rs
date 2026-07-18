@@ -86,13 +86,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_host_id, host_keyring) = keys::load_or_generate_host_keys("host.mk")?;
     keys::export_host_public_keys(&host_keyring)?;
 
-    let decrypt_keyring = Arc::new(match mtp::crypto::Keyring::from_bytes(&host_keyring.to_bytes())
-    {
-        Ok(keyring) => keyring,
-        Err(e) => {
-            return Err(format!("failed to re-load host keyring for decryption: {e}").into());
-        }
-    });
+    let decrypt_keyring = Arc::new(
+        match mtp::crypto::Keyring::from_bytes(&host_keyring.to_bytes()) {
+            Ok(keyring) => keyring,
+            Err(e) => {
+                return Err(format!("failed to re-load host keyring for decryption: {e}").into());
+            }
+        },
+    );
 
     let (clients, next_id) = clients::load_client_db("clients.json")?;
 
@@ -100,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let get_existing_user = move |id: u64, _description: Option<String>| {
         let clients = clients_for_get.clone();
         Box::pin(async move {
-            let result = clients.lock()?.get(&id).cloned();
+            let result = clients.lock().unwrap().get(&id).cloned();
             if result.is_some() {
                 println!("Auth lookup: client ID {id} found");
             } else {
@@ -119,8 +120,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let nid_arc = next_id_for_register.clone();
         let path = clients_path.clone();
         Box::pin(async move {
-            let mut db = db_arc.lock()?;
-            let mut nid = nid_arc.lock()?;
+            let mut db = db_arc.lock().unwrap();
+            let mut nid = nid_arc.lock().unwrap();
             let id = *nid;
             *nid += 1;
             db.insert(id, bundle);
@@ -166,7 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("Client ID: {}", conn.client_id);
 
-            let tm: &TypeMap = conn.codec.registry().get(&conn.version)?;
+            let tm: &TypeMap = conn.codec.registry().get(&conn.version).unwrap();
 
             println!("Waiting for messages / pipe requests ...");
             loop {
