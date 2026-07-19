@@ -323,6 +323,7 @@ impl HandshakeContext {
         codec: VersionedCodec,
         description: Option<String>,
     ) -> MTPConnection {
+        let remote_addr = sender.handle().remote_addr();
         receiver.set_max_message_size(self.config.policy.max_message_size);
         #[cfg(feature = "pipes")]
         {
@@ -357,6 +358,7 @@ impl HandshakeContext {
                 sender,
                 receiver,
                 path: "/".to_string(),
+                remote_addr,
                 app_rx: tokio::sync::Mutex::new(app_rx),
                 pipe_req_rx: tokio::sync::Mutex::new(pipe_req_rx),
                 pipe_dispatcher: dispatcher,
@@ -379,6 +381,7 @@ impl HandshakeContext {
                 sender,
                 receiver,
                 path: "/".to_string(),
+                remote_addr,
                 _pipe_stream: std::marker::PhantomData,
                 description,
                 _dispatcher_task: task,
@@ -399,6 +402,7 @@ impl HandshakeContext {
         client_id: u64,
         client_public_key: Option<mtp_crypto::PublicKeyBundle>,
     ) -> MTPConnection {
+        let remote_addr = sender.handle().remote_addr();
         receiver.set_max_message_size(self.config.policy.max_message_size);
         #[cfg(feature = "pipes")]
         {
@@ -433,6 +437,7 @@ impl HandshakeContext {
                 sender,
                 receiver,
                 path: "/".to_string(),
+                remote_addr,
                 app_rx: tokio::sync::Mutex::new(app_rx),
                 pipe_req_rx: tokio::sync::Mutex::new(pipe_req_rx),
                 pipe_dispatcher: dispatcher,
@@ -458,6 +463,7 @@ impl HandshakeContext {
                 sender,
                 receiver,
                 path: "/".to_string(),
+                remote_addr,
                 _pipe_stream: std::marker::PhantomData,
                 description,
                 _dispatcher_task: task,

@@ -185,7 +185,9 @@ pub async fn connect_with_config(
         .map_err(|e| CommunicationError::ConnectingError(e.to_string()))?;
     tracing::debug!(elapsed = ?transport_connect_started.elapsed(), "client connect: establish WebTransport session");
 
-    let handle = Arc::new(ConnectionHandle::new());
+    let handle = Arc::new(ConnectionHandle::with_remote_addr(
+        connection.quic_connection().remote_address(),
+    ));
     let policy = Arc::new(config.policy);
 
     let sender = Sender::new(connection.clone(), handle.clone(), policy.clone());

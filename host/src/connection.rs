@@ -2,6 +2,7 @@
 use mtp_codec::{CommunicationType, DataType, DataValue};
 use mtp_codec::{CommunicationValue, Version, registry::VersionedCodec};
 use mtp_common::CommunicationError;
+use std::net::SocketAddr;
 #[cfg(feature = "pipes")]
 use std::sync::Arc;
 #[cfg(feature = "pipes")]
@@ -63,6 +64,9 @@ pub struct MTPConnection<
     /// them, so they always use the root path.  Alternative hosts can retain
     /// the CONNECT request path when constructing an MTP connection.
     pub path: String,
+    /// The address of the peer that established this connection, when exposed
+    /// by the underlying transport.
+    pub remote_addr: Option<SocketAddr>,
     #[cfg(feature = "pipes")]
     pub(crate) app_rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
     #[cfg(feature = "pipes")]
@@ -102,6 +106,26 @@ where
         path: String,
         description: Option<String>,
     ) -> Self {
+        Self::from_transport_parts_with_remote_addr(
+            version,
+            codec,
+            sender,
+            receiver,
+            path,
+            description,
+            None,
+        )
+    }
+
+    pub fn from_transport_parts_with_remote_addr(
+        version: Version,
+        codec: VersionedCodec,
+        sender: S,
+        receiver: R,
+        path: String,
+        description: Option<String>,
+        remote_addr: Option<SocketAddr>,
+    ) -> Self {
         let policy = Arc::new(Policy::default());
         let (app_tx, app_rx) = mpsc::channel(policy.receiver_queue_capacity);
         let (pipe_req_tx, pipe_req_rx) = mpsc::channel(policy.receiver_queue_capacity);
@@ -123,6 +147,7 @@ where
             sender,
             receiver,
             path,
+            remote_addr,
             app_rx: Mutex::new(app_rx),
             pipe_req_rx: Mutex::new(pipe_req_rx),
             pipe_dispatcher: dispatcher,
@@ -148,12 +173,33 @@ impl<S, R, P> MTPConnection<S, R, P> {
         path: String,
         description: Option<String>,
     ) -> Self {
+        Self::from_transport_parts_with_remote_addr(
+            version,
+            codec,
+            sender,
+            receiver,
+            path,
+            description,
+            None,
+        )
+    }
+
+    pub fn from_transport_parts_with_remote_addr(
+        version: Version,
+        codec: VersionedCodec,
+        sender: S,
+        receiver: R,
+        path: String,
+        description: Option<String>,
+        remote_addr: Option<SocketAddr>,
+    ) -> Self {
         Self {
             version,
             codec,
             sender,
             receiver,
             path,
+            remote_addr,
             description,
             _pipe_stream: std::marker::PhantomData,
             _dispatcher_task: tokio::spawn(async {}),

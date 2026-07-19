@@ -167,7 +167,9 @@ async fn handle_connection(
     policy: Arc<Policy>,
 ) {
     let setup_started = Instant::now();
-    let handle = Arc::new(ConnectionHandle::new());
+    let handle = Arc::new(ConnectionHandle::with_remote_addr(
+        connection.quic_connection().remote_address(),
+    ));
 
     let sender = Sender::new(connection.clone(), handle.clone(), policy.clone());
     let receiver = Receiver::new_for_handshake(connection, handle, policy);

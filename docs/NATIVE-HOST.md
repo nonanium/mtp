@@ -78,6 +78,8 @@ while let Some(conn) = host.accept().await? {
 
 `accept()` returns the shared connection shape in [MTP Connections](CONNECTIONS.md)
 after version negotiation and authentication, when enabled. The host-specific `codec` is scoped to the negotiated version, and `client_public_key` is set for authenticated clients.
+The connection's `remote_addr` is the peer `SocketAddr` observed by QUIC. It is
+network metadata, not an authenticated client identity.
 
 ## Version Negotiation
 

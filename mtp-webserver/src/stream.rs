@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
 /// An owned HTTP/3 request passed to a route handler.
@@ -9,6 +10,7 @@ pub struct Http3Request {
     pub uri: Uri,
     pub headers: HeaderMap,
     pub body: Option<Bytes>,
+    pub remote_addr: SocketAddr,
 }
 
 /// A buffered HTTP/3 response returned from a route handler.

@@ -2,6 +2,7 @@ use mtp_codec::{CommunicationValue, Version};
 #[cfg(feature = "pipes")]
 use mtp_codec::{DataType, DataValue};
 use mtp_common::CommunicationError;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::Duration;
@@ -19,6 +20,8 @@ pub struct MTPConnection {
     pub sender: mtp_transport::Sender,
     pub receiver: mtp_transport::Receiver,
     pub description: Option<String>,
+    /// The peer address observed by the underlying QUIC connection.
+    pub remote_addr: Option<SocketAddr>,
     pub(crate) ping: Option<PingSession>,
     pub(crate) app_rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
     #[cfg(feature = "pipes")]
@@ -164,6 +167,7 @@ pub(crate) fn connection_from_parts(
     #[cfg(feature = "crypto")] auth_state: AuthState,
     #[cfg(feature = "crypto")] client_id: u64,
 ) -> MTPConnection {
+    let remote_addr = sender.handle().remote_addr();
     let ping = start_ping_session(&config, sender.clone(), &receiver);
 
     #[cfg(feature = "pipes")]
@@ -200,6 +204,7 @@ pub(crate) fn connection_from_parts(
             pipe_dispatcher: dispatcher,
             request_timeout: config.request_timeout,
             description: config.description,
+            remote_addr,
             ping,
             _dispatcher_task: dispatcher_task,
             #[cfg(feature = "crypto")]
@@ -227,6 +232,7 @@ pub(crate) fn connection_from_parts(
             pipe_dispatcher: dispatcher,
             request_timeout: config.request_timeout,
             description: config.description,
+            remote_addr,
             ping,
             _dispatcher_task: task,
             #[cfg(feature = "crypto")]

@@ -312,6 +312,7 @@ mod tests {
             uri: Uri::from_static("/health"),
             headers: Default::default(),
             body: Some(Bytes::new()),
+            remote_addr: "127.0.0.1:4433".parse().unwrap(),
         };
         let response =
             router.handler(&Method::GET, "/health").unwrap()(request, Http3Response::default())
@@ -339,6 +340,7 @@ mod tests {
             uri: Uri::from_static("/api/get/user%2D123/profile.json"),
             headers: Default::default(),
             body: Some(Bytes::new()),
+            remote_addr: "127.0.0.1:4433".parse().unwrap(),
         };
         let response = handler(request, Http3Response::default(), params).await;
         assert_eq!(response.body, vec![Bytes::from("user-123")]);
@@ -383,6 +385,7 @@ mod tests {
             uri: Uri::from_static("/api/users/profile.json"),
             headers: Default::default(),
             body: None,
+            remote_addr: "127.0.0.1:4433".parse().unwrap(),
         };
         let response = handler(request, Http3Response::default(), params).await;
         assert_eq!(response.status, StatusCode::CREATED);

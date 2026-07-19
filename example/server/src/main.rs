@@ -150,8 +150,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             let desc = conn.description.as_deref().unwrap_or("(no description)");
             println!(
-                "\n--- New connection (version {}, description: {desc}) ---",
-                conn.version
+                "\n--- New connection (version {}, remote: {}, description: {desc}) ---",
+                conn.version,
+                conn.remote_addr
+                    .map(|addr| addr.to_string())
+                    .unwrap_or_else(|| "unknown".into())
             );
             println!("Client ID: {}", conn.client_id);
 

@@ -43,6 +43,10 @@ impl H3TransportConnection {
     pub(crate) fn new(session: Arc<Session>, quinn: quinn::Connection) -> Self {
         Self { session, quinn }
     }
+
+    pub(crate) fn remote_addr(&self) -> std::net::SocketAddr {
+        self.quinn.remote_address()
+    }
 }
 
 #[async_trait::async_trait]
@@ -255,6 +259,7 @@ async fn accept_web_connection_inner(
     let auth_handshake_started = Instant::now();
     let max_message_size = policy.max_message_size;
     let transport = H3TransportConnection::new(session, quinn);
+    let remote_addr = transport.remote_addr();
     let policy = Arc::new(policy);
     let receiver = WebMtpReceiver::new(transport.clone(), policy.clone());
 
@@ -277,14 +282,16 @@ async fn accept_web_connection_inner(
     if send_pongs {
         receiver.respond_to_pings(sender.clone()).await;
     }
-    let connection: WebMTPConnection = mtp_host::MTPConnection::from_transport_parts(
-        negotiated,
-        codec,
-        sender,
-        receiver,
-        path,
-        description.clone(),
-    );
+    let connection: WebMTPConnection =
+        mtp_host::MTPConnection::from_transport_parts_with_remote_addr(
+            negotiated,
+            codec,
+            sender,
+            receiver,
+            path,
+            description.clone(),
+            Some(remote_addr),
+        );
     #[cfg(feature = "crypto")]
     let mut connection = connection;
     #[cfg(feature = "crypto")]

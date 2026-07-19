@@ -66,7 +66,7 @@ not match the route. Query strings remain available through
 
 ## HTTP/3 Requests and Responses
 
-`Http3Request` contains `method`, `uri`, `headers`, and an optional buffered `body` represented by `bytes::Bytes`. `Http3Response::status`, `header`, and `body` build a buffered response. `try_header` returns an error for invalid header names or values. `stream` takes a `tokio::sync::mpsc::Receiver<Bytes>` for incremental response chunks.
+`Http3Request` contains `method`, `uri`, `headers`, the connecting `remote_addr`, and an optional buffered `body` represented by `bytes::Bytes`. `Http3Response::status`, `header`, and `body` build a buffered response. `try_header` returns an error for invalid header names or values. `stream` takes a `tokio::sync::mpsc::Receiver<Bytes>` for incremental response chunks.
 
 ```rust
 use bytes::Bytes;
@@ -76,6 +76,10 @@ use mtp::webserver::{Http3Request, Http3Response, WebServerConfig};
 
 async fn health(_request: Http3Request, response: Http3Response) -> Http3Response {
     response.status(StatusCode::OK).body("ok")
+}
+
+async fn whoami(request: Http3Request, response: Http3Response) -> Http3Response {
+    response.body(format!("client: {}", request.remote_addr))
 }
 
 async fn stream_numbers(_request: Http3Request, response: Http3Response) -> Http3Response {
@@ -95,6 +99,7 @@ async fn stream_numbers(_request: Http3Request, response: Http3Response) -> Http
 
 let web = WebServerConfig::new()
     .route("/health", health)?
+    .route("/whoami", whoami)?
     .route_method(Method::GET, "/numbers", stream_numbers)?
     .fallback(|_request, response| async move {
         response.status(StatusCode::NOT_FOUND).body("not found")
@@ -124,7 +129,7 @@ while let Some(connection) = server.accept().await? {
 ```
 > `MTPWebServer::new` consumes a `HostConfig` (not an `MTPHost` instance). It creates its own QUIC endpoint and does not share a port with a running `MTPHost`.
 
-`server.accept()` returns `Option<WebMTPConnection>` for each WebTransport session. HTTP/3 routes do not surface through `accept()` because the server dispatches them internally. `WebMTPConnection` retains the negotiated version, codec, request path, description, sender, and receiver used by native MTP connections.
+`server.accept()` returns `Option<WebMTPConnection>` for each WebTransport session. HTTP/3 routes do not surface through `accept()` because the server dispatches them internally. `WebMTPConnection` retains the negotiated version, codec, request path, remote address, description, sender, and receiver used by native MTP connections.
 
 ### Authentication
 

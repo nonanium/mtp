@@ -353,6 +353,7 @@ async fn run_driver(
                     if let Some(ref m) = metrics {
                         m.connection_accepted();
                     }
+                    let remote_addr = connection.remote_address();
 
                     let mut tasks = tokio::task::JoinSet::new();
                     loop {
@@ -407,6 +408,7 @@ async fn run_driver(
                                 max_request_body,
                                 request_timeout,
                                 metrics.clone(),
+                                remote_addr,
                             ));
                             let result =
                                 accept_web_connection(session, mtp_path, connection, send_pongs, policy, host_config.clone())
@@ -440,7 +442,7 @@ async fn run_driver(
                             let req_start = std::time::Instant::now();
                             let (response, status) = match tokio::time::timeout(
                                 request_timeout,
-                                handle_http_request(request, &mut stream, &router, max_request_body),
+                                handle_http_request(request, &mut stream, &router, max_request_body, remote_addr),
                             )
                             .await
                             {
@@ -499,11 +501,12 @@ async fn handle_http_request<S>(
     stream: &mut h3::server::RequestStream<S, Bytes>,
     router: &Router,
     max_request_body: usize,
+    remote_addr: SocketAddr,
 ) -> Result<(Http3Response, StatusCode), WebServerError>
 where
     S: h3::quic::BidiStream<Bytes>,
 {
-    let (request, too_large) = read_request(request, stream, max_request_body)
+    let (request, too_large) = read_request(request, stream, max_request_body, remote_addr)
         .await
         .map_err(|e| WebServerError::Http(format!("request body read failed: {e}")))?;
     if too_large {
@@ -546,6 +549,7 @@ async fn run_session_requests(
     max_request_body: usize,
     request_timeout: Duration,
     metrics: Option<Arc<dyn WebServerMetrics>>,
+    remote_addr: SocketAddr,
 ) {
     loop {
         match session.accept_bi().await {
@@ -560,7 +564,13 @@ async fn run_session_requests(
                     let req_start = std::time::Instant::now();
                     let (response, status) = match tokio::time::timeout(
                         request_timeout,
-                        handle_http_request(request, &mut stream, &router, max_request_body),
+                        handle_http_request(
+                            request,
+                            &mut stream,
+                            &router,
+                            max_request_body,
+                            remote_addr,
+                        ),
                     )
                     .await
                     {
@@ -590,6 +600,7 @@ async fn read_request<S>(
     request: Request<()>,
     stream: &mut h3::server::RequestStream<S, Bytes>,
     max_body: usize,
+    remote_addr: SocketAddr,
 ) -> Result<(Http3Request, bool), h3::error::StreamError>
 where
     S: h3::quic::BidiStream<Bytes>,
@@ -610,6 +621,7 @@ where
             uri: parts.uri,
             headers: parts.headers,
             body: (!body.is_empty()).then(|| Bytes::from(body)),
+            remote_addr,
         },
         too_large,
     ))

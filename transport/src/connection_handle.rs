@@ -1,4 +1,5 @@
 use mtp_common::CommunicationError;
+use std::net::SocketAddr;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -10,6 +11,7 @@ pub struct ConnectionHandle {
     closed: AtomicBool,
     close_tx: watch::Sender<Option<CommunicationError>>,
     close_rx: watch::Receiver<Option<CommunicationError>>,
+    remote_addr: Option<SocketAddr>,
 }
 
 impl ConnectionHandle {
@@ -19,7 +21,18 @@ impl ConnectionHandle {
             closed: AtomicBool::new(false),
             close_tx,
             close_rx,
+            remote_addr: None,
         }
+    }
+
+    pub fn with_remote_addr(remote_addr: SocketAddr) -> Self {
+        let mut handle = Self::new();
+        handle.remote_addr = Some(remote_addr);
+        handle
+    }
+
+    pub fn remote_addr(&self) -> Option<SocketAddr> {
+        self.remote_addr
     }
 
     pub fn is_open(&self) -> bool {

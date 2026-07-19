@@ -13,14 +13,14 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
-async fn ok(_request: Http3Request, response: Http3Response) -> Http3Response {
+async fn ok(request: Http3Request, response: Http3Response) -> Http3Response {
     response
         .header("content-type", "text/plain; charset=utf-8")
-        .body("OK")
+        .body(format!("OK\nclient: {}\n", request.remote_addr))
 }
 
 async fn profile(
-    _request: Http3Request,
+    request: Http3Request,
     response: Http3Response,
     params: RouteParams,
 ) -> Http3Response {
@@ -30,6 +30,7 @@ async fn profile(
 
     let body = serde_json::json!({
         "user": user,
+        "remote_addr": request.remote_addr.to_string(),
         "profile": {
             "display_name": format!("Example user {user}"),
             "status": "active"
