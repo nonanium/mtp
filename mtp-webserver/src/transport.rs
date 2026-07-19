@@ -277,7 +277,7 @@ async fn accept_web_connection_inner(
     if send_pongs {
         receiver.respond_to_pings(sender.clone()).await;
     }
-    let connection = mtp_host::MTPConnection::from_transport_parts(
+    let connection: WebMTPConnection = mtp_host::MTPConnection::from_transport_parts(
         negotiated,
         codec,
         sender,
@@ -401,7 +401,22 @@ async fn accept_web_connection_inner(
             .map_err(AcceptError::Send)?;
         tracing::debug!(elapsed = ?send_challenge_started.elapsed(), "web authentication handshake: send challenge");
         let receive_proof_started = Instant::now();
-        let proof = connection.receive().await.map_err(AcceptError::Receive)?;
+        let proof = {
+            #[cfg(feature = "pipes")]
+            {
+                connection.receive().await.map_err(AcceptError::Receive)?
+            }
+            #[cfg(not(feature = "pipes"))]
+            {
+                let mut proof = connection
+                    .receiver
+                    .receive()
+                    .await
+                    .map_err(AcceptError::Receive)?;
+                proof.set_type_map(connection.codec.type_map());
+                proof
+            }
+        };
         tracing::debug!(elapsed = ?receive_proof_started.elapsed(), "web authentication handshake: receive client proof");
         if Some(proof.get_type()) != mtp_codec::CommunicationType::ChallengeResponse.try_to_id(&tm)
         {
@@ -410,7 +425,7 @@ async fn accept_web_connection_inner(
             ));
         }
         let nonce = match proof.get_data(DataType::ClientNonce) {
-            DataValue::UnsignedNumber(n) => *n,
+            DataValue::UnsignedNumber(n) => n.to_owned(),
             _ => {
                 return Err(AcceptError::AuthenticationFailed(
                     "missing client nonce".into(),

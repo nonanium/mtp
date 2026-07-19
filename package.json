@@ -44,6 +44,7 @@
     "wasm/.cargo/",
     "wasm/Cargo.toml",
     "wasm/src/",
+    "wasm/pkg/",
     "tsconfig.json"
   ],
   "scripts": {

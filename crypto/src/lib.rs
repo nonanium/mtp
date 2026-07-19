@@ -3,8 +3,10 @@ pub mod auth;
 pub mod error;
 pub mod keypair;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Once;
 
+#[cfg(not(target_arch = "wasm32"))]
 static CRYPTO_INIT: Once = Once::new();
 
 #[cfg(feature = "sha2")]
@@ -70,6 +72,7 @@ pub use enc::EncryptionType;
 ///
 /// Rustls only accepts one process-wide default provider. Calling this helper
 /// from every TLS entry point makes that initialization idempotent.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn ensure_crypto_provider() {
     CRYPTO_INIT.call_once(|| {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
