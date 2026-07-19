@@ -1,4 +1,4 @@
-use mtp::webserver::{Http3Request, Http3Response, WebServerConfig};
+use mtp::webserver::{Http3Request, Http3Response, RouteParams, WebServerConfig};
 use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
 use std::{
     io,
@@ -19,8 +19,32 @@ async fn ok(_request: Http3Request, response: Http3Response) -> Http3Response {
         .body("OK")
 }
 
+async fn profile(
+    _request: Http3Request,
+    response: Http3Response,
+    params: RouteParams,
+) -> Http3Response {
+    let Some(user) = params.get("user") else {
+        return response.body("missing user");
+    };
+
+    let body = serde_json::json!({
+        "user": user,
+        "profile": {
+            "display_name": format!("Example user {user}"),
+            "status": "active"
+        }
+    });
+
+    response
+        .header("content-type", "application/json; charset=utf-8")
+        .body(body.to_string())
+}
+
 pub fn config() -> Result<WebServerConfig, mtp::webserver::RouterError> {
-    WebServerConfig::new().route("/", ok)
+    WebServerConfig::new()
+        .route("/", ok)?
+        .route_pattern("/api/get/{user}/profile", profile)
 }
 
 /// Starts the conventional HTTPS side of the example host. WebTransport uses

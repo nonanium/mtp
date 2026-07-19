@@ -81,6 +81,36 @@ impl WebServerConfig {
         Ok(self)
     }
 
+    /// Register a route containing named single-segment parameters, such as
+    /// `/api/get/{userid}/profile.json`.
+    pub fn route_pattern<F, Fut>(
+        mut self,
+        pattern: impl Into<String>,
+        handler: F,
+    ) -> Result<Self, RouterError>
+    where
+        F: Fn(Http3Request, Http3Response, crate::RouteParams) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Http3Response> + Send + 'static,
+    {
+        self.router = self.router.route_pattern(pattern, handler)?;
+        Ok(self)
+    }
+
+    /// Register a method-specific parameterized route.
+    pub fn route_pattern_method<F, Fut>(
+        mut self,
+        method: Method,
+        pattern: impl Into<String>,
+        handler: F,
+    ) -> Result<Self, RouterError>
+    where
+        F: Fn(Http3Request, Http3Response, crate::RouteParams) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Http3Response> + Send + 'static,
+    {
+        self.router = self.router.route_pattern_method(method, pattern, handler)?;
+        Ok(self)
+    }
+
     pub fn fallback<F, Fut>(mut self, handler: F) -> Result<Self, RouterError>
     where
         F: Fn(Http3Request, Http3Response) -> Fut + Send + Sync + 'static,
@@ -483,19 +513,30 @@ where
         ));
     }
     let path = request.uri.path().to_string();
-    let handler = router
-        .handler(&request.method, &path)
-        .or_else(|| router.fallback_handler());
-    match handler {
+    match router.handler(&request.method, &path) {
         Some(handler) => {
             let response = handler(request, Http3Response::default()).await;
             let status = response.status;
             Ok((response, status))
         }
-        None => Ok((
-            Http3Response::new(StatusCode::NOT_FOUND),
-            StatusCode::NOT_FOUND,
-        )),
+        None => match router.pattern_handler(&request.method, &path) {
+            Some((handler, params)) => {
+                let response = handler(request, Http3Response::default(), params).await;
+                let status = response.status;
+                Ok((response, status))
+            }
+            None => match router.fallback_handler() {
+                Some(handler) => {
+                    let response = handler(request, Http3Response::default()).await;
+                    let status = response.status;
+                    Ok((response, status))
+                }
+                None => Ok((
+                    Http3Response::new(StatusCode::NOT_FOUND),
+                    StatusCode::NOT_FOUND,
+                )),
+            },
+        },
     }
 }
 

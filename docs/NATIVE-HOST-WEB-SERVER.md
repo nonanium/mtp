@@ -14,6 +14,8 @@ returns `OK` while the process is running. The route is served over HTTP/3 at
 | --- | --- | --- |
 | `route(path, handler)` | None | Register an exact-path HTTP/3 handler. |
 | `route_method(method, path, handler)` | None | Register a method-specific handler. |
+| `route_pattern(pattern, handler)` | None | Register a route with `{name}` single-segment parameters. |
+| `route_pattern_method(method, pattern, handler)` | None | Register a method-specific parameterized route. |
 | `fallback(handler)` | None | Handle requests that match no route. |
 | `mtp_path(path)` | `/` | Path for WebTransport extended CONNECT. |
 | `max_request_body(bytes)` | 4 MiB | Maximum buffered HTTP/3 request body. |
@@ -23,6 +25,44 @@ returns `OK` while the process is running. The route is served over HTTP/3 at
 | `with_metrics(metrics)` | None | Receive connection, request, and error callbacks. |
 
 The route and fallback builders return `Result` because duplicate routes and duplicate fallback handlers are rejected.
+
+Parameterized routes use braces around a name and pass extracted values to the
+handler as `RouteParams`. Each parameter matches exactly one path segment. Exact
+routes take precedence over parameterized routes; among parameterized routes,
+method-specific and more-specific routes take precedence.
+
+```rust
+use http::{Method, StatusCode};
+use mtp::webserver::{Http3Request, Http3Response, RouteParams, WebServerConfig};
+
+async fn profile(
+    _request: Http3Request,
+    response: Http3Response,
+    params: RouteParams,
+) -> Http3Response {
+    let Some(userid) = params.get("userid") else {
+        return response.status(StatusCode::BAD_REQUEST);
+    };
+
+    response
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(format!(r#"{{"userid":"{}"}}"#, userid))
+}
+
+let web = WebServerConfig::new()
+    .route_pattern_method(
+        Method::GET,
+        "/api/get/{userid}/profile.json",
+        profile,
+    )?;
+```
+
+`GET /api/get/user-123/profile.json` invokes `profile` with
+`params["userid"] == "user-123"`. Percent-encoded parameter values are
+UTF-8 decoded before being passed to the handler. Malformed encoded values do
+not match the route. Query strings remain available through
+`request.uri.query()` and are not part of route matching.
 
 ## HTTP/3 Requests and Responses
 

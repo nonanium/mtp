@@ -141,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     let mut host = mtp::webserver::MTPWebServer::new(config, web_server::config()?).await?;
     println!(
-        "Server listening on https://{} (TCP HTTPS + UDP WebTransport)",
+        "Server listening on https://{} (HTTPS + UDP WebTransport)",
         host.local_addr()
     );
 
