@@ -3,9 +3,9 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
-/// An owned HTTP/3 request passed to a route handler.
+/// An owned HTTP request passed to a route handler.
 #[derive(Clone, Debug)]
-pub struct Http3Request {
+pub struct HttpRequest {
     pub method: Method,
     pub uri: Uri,
     pub headers: HeaderMap,
@@ -13,15 +13,15 @@ pub struct Http3Request {
     pub remote_addr: SocketAddr,
 }
 
-/// A buffered HTTP/3 response returned from a route handler.
-pub struct Http3Response {
+/// An HTTP response returned from a route handler.
+pub struct HttpResponse {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub body: Vec<Bytes>,
     pub(crate) stream: Option<mpsc::Receiver<Bytes>>,
 }
 
-impl Http3Response {
+impl HttpResponse {
     pub fn new(status: StatusCode) -> Self {
         Self {
             status,
@@ -68,11 +68,17 @@ impl Http3Response {
     }
 }
 
-impl Default for Http3Response {
+impl Default for HttpResponse {
     fn default() -> Self {
         Self::new(StatusCode::OK)
     }
 }
+
+#[deprecated(note = "use HttpRequest")]
+pub type Http3Request = HttpRequest;
+
+#[deprecated(note = "use HttpResponse")]
+pub type Http3Response = HttpResponse;
 
 #[cfg(test)]
 mod tests {
@@ -80,7 +86,7 @@ mod tests {
 
     #[test]
     fn response_collects_headers_and_body_chunks() {
-        let response = Http3Response::new(StatusCode::CREATED)
+        let response = HttpResponse::new(StatusCode::CREATED)
             .header("content-type", "text/plain")
             .body("hello")
             .body(" world");

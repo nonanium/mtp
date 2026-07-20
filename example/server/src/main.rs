@@ -133,17 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(complete_register),
     );
 
-    let _https = web_server::spawn_https(
-        std::net::SocketAddr::new(config.ip, config.port),
-        &config.tls_fullchain,
-        &config.tls_key,
-    )
-    .await?;
     let mut host = mtp::webserver::MTPWebServer::new(config, web_server::config()?).await?;
-    println!(
-        "Server listening on https://{} (HTTPS + UDP WebTransport)",
-        host.local_addr()
-    );
+    println!("Server listening on https://{}", host.local_addr());
+    println!("TCP: HTTP/1.1 and HTTP/2");
+    println!("UDP: HTTP/3 and WebTransport");
 
     while let Some(conn) = host.accept().await? {
         let decrypt_keyring = Arc::clone(&decrypt_keyring);

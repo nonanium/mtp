@@ -15,7 +15,7 @@ Expose counters and gauges around the host and transport callbacks:
 | Ping round-trip time and missed pings | Peer reachability and path latency. |
 | Pipe accept, reject, EOF, and reset counts | Application admission and stream completion behavior. |
 
-Implement `WebServerMetrics` for HTTP/3 request and error callbacks. Record the request path, status, duration, and `WebServerError` category without logging credentials, private keys, or message contents. Export host callback results through the application's metrics system for native deployments.
+Implement `WebServerMetrics` for HTTP/1.1, HTTP/2, HTTP/3, TLS, and WebTransport callbacks. Record the request path, status, duration, and `WebServerError` category without logging credentials, private keys, or message contents. Export host callback results through the application's metrics system for native deployments.
 
 ## Tuning
 
@@ -39,4 +39,4 @@ Back up host keyrings and client keyrings as protected secrets. Test restoring a
 
 ### Graceful Shutdown
 
-Stop accepting new connections, reject new work at the application layer, and allow active requests and pipe writers to finish. Send a normal connection close, wait for the configured drain period, then force-close remaining QUIC sessions. For `MTPWebServer`, call `shutdown()` after the accept loop stops; Headits `drain_timeout` controls the drain period.
+Stop accepting new connections, reject new work at the application layer, and allow active requests and pipe writers to finish. For `MTPWebServer`, call `shutdown()`; its `drain_timeout` controls graceful TCP HTTP completion and the QUIC drain period before remaining connection tasks are terminated.

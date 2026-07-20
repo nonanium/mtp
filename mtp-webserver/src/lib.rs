@@ -1,13 +1,16 @@
-//! HTTP/3 routing primitives and the combined MTP web-server API.
+//! HTTP routing primitives and the combined MTP web-server API.
 //!
 //! The public routing API is transport-independent.  The HTTP/3 driver is
 //! intentionally kept behind the crate's implementation boundary so callers
 //! do not need to depend on a particular QUIC implementation.
 
 mod error;
+mod h3;
+mod http;
 mod router;
 mod server;
 mod stream;
+mod tcp;
 mod transport;
 
 pub use error::WebServerError;
@@ -15,7 +18,8 @@ pub use error::WebServerError;
 pub use mtp_transport::TransportEvent;
 pub use router::{DynamicHttpHandler, HttpHandler, RouteParams, Router, RouterError};
 pub use server::{MTPWebServer, WebServerConfig, WebServerMetrics};
-pub use stream::{Http3Request, Http3Response};
+#[allow(deprecated)]
+pub use stream::{Http3Request, Http3Response, HttpRequest, HttpResponse};
 pub use transport::{
     H3TransportConnection, H3TransportReceiver, H3TransportSender, WebMTPConnection,
     WebMtpReceiver, WebMtpSender,

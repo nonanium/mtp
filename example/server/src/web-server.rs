@@ -1,98 +1,47 @@
-use mtp::webserver::{Http3Request, Http3Response, RouteParams, WebServerConfig};
-use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
+use mtp::webserver::{HttpRequest, HttpResponse, RouteParams, WebServerConfig};
 use std::{
-    io,
-    net::SocketAddr,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpListener,
-    task::JoinHandle,
-};
-use tokio_rustls::TlsAcceptor;
 
-async fn ok(request: Http3Request, response: Http3Response) -> Http3Response {
+async fn health(request: HttpRequest, response: HttpResponse) -> HttpResponse {
     response
         .header("content-type", "text/plain; charset=utf-8")
         .body(format!("OK\nclient: {}\n", request.remote_addr))
 }
 
 async fn profile(
-    request: Http3Request,
-    response: Http3Response,
+    request: HttpRequest,
+    response: HttpResponse,
     params: RouteParams,
-) -> Http3Response {
+) -> HttpResponse {
     let Some(user) = params.get("user") else {
         return response.body("missing user");
     };
-
     let body = serde_json::json!({
         "user": user,
         "remote_addr": request.remote_addr.to_string(),
-        "profile": {
-            "display_name": format!("Example user {user}"),
-            "status": "active"
-        }
+        "profile": { "display_name": format!("Example user {user}"), "status": "active" }
     });
-
     response
         .header("content-type", "application/json; charset=utf-8")
         .body(body.to_string())
 }
 
 pub fn config() -> Result<WebServerConfig, mtp::webserver::RouterError> {
-    WebServerConfig::new()
-        .route("/", ok)?
-        .route_pattern("/api/get/{user}/profile", profile)
-}
-
-/// Starts the conventional HTTPS side of the example host. WebTransport uses
-/// UDP/QUIC on the same port; browsers still need TCP/TLS to navigate to a URL.
-pub async fn spawn_https(
-    address: SocketAddr,
-    certificate_pem: &[u8],
-    key_pem: &[u8],
-) -> io::Result<JoinHandle<()>> {
-    // The TCP listener is created before the QUIC endpoint, so it must select
-    // rustls' process-wide provider itself.
-    mtp::crypto::ensure_crypto_provider();
-    let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(certificate_pem)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(io::Error::other)?;
-    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(io::Error::other)?;
-    let tls = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certificates, key)
-        .map_err(io::Error::other)?;
-    let listener = TcpListener::bind(address).await?;
-    let acceptor = TlsAcceptor::from(Arc::new(tls));
-    let asset_root = web_client_dist();
-    match &asset_root {
-        Some(_) => println!(
-            "HTTPS web client available at https://localhost:{}",
-            address.port()
-        ),
-        None => eprintln!(
-            "Web client build not found; HTTPS will show setup instructions. Run `pnpm --dir example/web-client build`."
-        ),
+    let root = Arc::new(web_client_dist());
+    if root.is_none() {
+        eprintln!(
+            "Web client build not found; requests will show setup instructions. Run `pnpm --dir example/web-client build`."
+        );
     }
-    Ok(tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let acceptor = acceptor.clone();
-            let asset_root = asset_root.clone();
-            tokio::spawn(async move {
-                let Ok(mut stream) = acceptor.accept(stream).await else {
-                    return;
-                };
-                let _ = serve_https_request(&mut stream, &asset_root).await;
-            });
-        }
-    }))
+    WebServerConfig::new()
+        .route("/health", health)?
+        .route_pattern("/api/get/{user}/profile", profile)?
+        .fallback(move |request, response| {
+            let root = Arc::clone(&root);
+            async move { static_assets(request, response, root).await }
+        })
 }
 
 fn web_client_dist() -> Option<PathBuf> {
@@ -104,60 +53,78 @@ fn web_client_dist() -> Option<PathBuf> {
     .find(|path| path.join("index.html").is_file())
 }
 
-async fn serve_https_request<S>(stream: &mut S, asset_root: &Option<PathBuf>) -> io::Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut request = [0; 16 * 1024];
-    let size = stream.read(&mut request).await?;
-    let request = std::str::from_utf8(&request[..size]).unwrap_or_default();
-    let path = request
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .unwrap_or("/")
-        .split('?')
-        .next()
-        .unwrap_or("/");
-    let (status, content_type, body) = match asset_root {
-        Some(asset_root) => {
-            let relative = path.trim_start_matches('/');
-            let candidate = asset_root.join(relative);
-            let file = if relative.is_empty() || !candidate.is_file() || relative.contains("..") {
-                asset_root.join("index.html")
+async fn static_assets(
+    request: HttpRequest,
+    response: HttpResponse,
+    root: Arc<Option<PathBuf>>,
+) -> HttpResponse {
+    if request.method != http::Method::GET && request.method != http::Method::HEAD {
+        return response.status(http::StatusCode::METHOD_NOT_ALLOWED);
+    }
+    let Some(root) = root.as_ref() else {
+        return response
+            .status(http::StatusCode::SERVICE_UNAVAILABLE)
+            .header("content-type", "text/html; charset=utf-8")
+            .body("<!doctype html><title>MTP web client not built</title><p>Run <code>pnpm --dir example/web-client build</code>.</p>");
+    };
+    let relative = request.uri.path().trim_start_matches('/');
+    let path = Path::new(relative);
+    if relative.contains('\\')
+        || path.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return response
+            .status(http::StatusCode::BAD_REQUEST)
+            .body("Invalid path");
+    }
+    let requested = if relative.is_empty() {
+        root.join("index.html")
+    } else {
+        root.join(path)
+    };
+    let file = if requested.is_file() {
+        requested
+    } else if path.extension().is_none() {
+        root.join("index.html")
+    } else {
+        return response
+            .status(http::StatusCode::NOT_FOUND)
+            .body("Not found");
+    };
+    match tokio::fs::read(&file).await {
+        Ok(body) => {
+            let response = response.header("content-type", content_type(&file));
+            if request.method == http::Method::HEAD {
+                response.header("content-length", &body.len().to_string())
             } else {
-                candidate
-            };
-            let content_type = content_type(&file);
-            match tokio::fs::read(&file).await {
-                Ok(body) => ("200 OK", content_type, body),
-                Err(_) => ("404 Not Found", "text/plain; charset=utf-8", b"Not found".to_vec()),
+                response.body(body)
             }
         }
-        None => (
-            "503 Service Unavailable",
-            "text/html; charset=utf-8",
-            b"<!doctype html><title>MTP web client not built</title><p>Run <code>pnpm --dir example/web-client build</code>.</p>".to_vec(),
-        ),
-    };
-
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(response.as_bytes()).await?;
-    stream.write_all(&body).await?;
-    stream.shutdown().await
+        Err(_) => response
+            .status(http::StatusCode::NOT_FOUND)
+            .body("Not found"),
+    }
 }
 
 fn content_type(file: &Path) -> &'static str {
     match file.extension().and_then(|extension| extension.to_str()) {
         Some("html") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("wasm") => "application/wasm",
         Some("svg") => "image/svg+xml",
-        Some("json") => "application/json",
+        Some("json" | "map") => "application/json",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     }
 }

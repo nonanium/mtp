@@ -1,27 +1,28 @@
 # MTP Web Server
 
-`MTPWebServer` serves ordinary HTTP/3 routes and WebTransport MTP sessions through one QUIC endpoint. HTTP/3 requests are handled inside the server;
-WebTransport sessions are returned by `accept()` for application messages.
-`MTPWebServer` and `MTPHost` cannot bind the same IP and port.
+`MTPWebServer` is a complete browser-facing HTTPS server. TCP TLS serves HTTP/1.1 and HTTP/2, while UDP QUIC serves HTTP/3 and WebTransport. Both listeners use the same certificate, router, IP address, and numeric port. Ordinary HTTP requests are handled inside the server; WebTransport MTP sessions are returned by `accept()` for application messages.
 
-The repository's combined server example registers `/` on `MTPWebServer` and
-returns `OK` while the process is running. The route is served over HTTP/3 at
-`https://localhost:8080/` on the same QUIC endpoint as WebTransport MTP sessions.
+`MTPWebServer` and the native `MTPHost` cannot bind the same IP and port. The TCP integration does not add the native MTP QUIC ALPN protocol to `MTPWebServer`.
+
+The repository's server example serves the compiled web client at `/`, exposes status at `/health`, and accepts WebTransport sessions at the same origin. No second TCP server is required.
 
 ## WebServerConfig
 
 | Builder | Default | Purpose |
 | --- | --- | --- |
-| `route(path, handler)` | None | Register an exact-path HTTP/3 handler. |
+| `route(path, handler)` | None | Register an exact-path HTTP handler. |
 | `route_method(method, path, handler)` | None | Register a method-specific handler. |
 | `route_pattern(pattern, handler)` | None | Register a route with `{name}` single-segment parameters. |
 | `route_pattern_method(method, pattern, handler)` | None | Register a method-specific parameterized route. |
 | `fallback(handler)` | None | Handle requests that match no route. |
 | `mtp_path(path)` | `/` | Path for WebTransport extended CONNECT. |
-| `max_request_body(bytes)` | 4 MiB | Maximum buffered HTTP/3 request body. |
-| `max_connections(count)` | 256 | Maximum concurrent HTTP/3 connections. |
-| `request_timeout(duration)` | 30 seconds | HTTP/3 request handling timeout. |
-| `drain_timeout(duration)` | 10 seconds | Shutdown drain period. |
+| `serve_tcp_https(enabled)` | `true` | Enable the TCP TLS listener for HTTP/1.1 and HTTP/2. |
+| `max_tcp_connections(count)` | 256 | Maximum concurrent TCP TLS connections. |
+| `tls_handshake_timeout(duration)` | 10 seconds | Maximum TCP TLS handshake duration. |
+| `max_request_body(bytes)` | 4 MiB | Maximum request body across all HTTP versions. |
+| `max_connections(count)` | 256 | Maximum concurrent QUIC/HTTP/3 connections. |
+| `request_timeout(duration)` | 30 seconds | Handler timeout across all HTTP versions. |
+| `drain_timeout(duration)` | 5 seconds | Graceful shutdown period across both transports. |
 | `with_metrics(metrics)` | None | Receive connection, request, and error callbacks. |
 
 The route and fallback builders return `Result` because duplicate routes and duplicate fallback handlers are rejected.
@@ -33,13 +34,13 @@ method-specific and more-specific routes take precedence.
 
 ```rust
 use http::{Method, StatusCode};
-use mtp::webserver::{Http3Request, Http3Response, RouteParams, WebServerConfig};
+use mtp::webserver::{HttpRequest, HttpResponse, RouteParams, WebServerConfig};
 
 async fn profile(
-    _request: Http3Request,
-    response: Http3Response,
+    _request: HttpRequest,
+    response: HttpResponse,
     params: RouteParams,
-) -> Http3Response {
+) -> HttpResponse {
     let Some(userid) = params.get("userid") else {
         return response.status(StatusCode::BAD_REQUEST);
     };
@@ -64,25 +65,25 @@ UTF-8 decoded before being passed to the handler. Malformed encoded values do
 not match the route. Query strings remain available through
 `request.uri.query()` and are not part of route matching.
 
-## HTTP/3 Requests and Responses
+## HTTP Requests and Responses
 
-`Http3Request` contains `method`, `uri`, `headers`, the connecting `remote_addr`, and an optional buffered `body` represented by `bytes::Bytes`. `Http3Response::status`, `header`, and `body` build a buffered response. `try_header` returns an error for invalid header names or values. `stream` takes a `tokio::sync::mpsc::Receiver<Bytes>` for incremental response chunks.
+`HttpRequest` contains `method`, `uri`, `headers`, the connecting `remote_addr`, and an optional buffered `body` represented by `bytes::Bytes`. `HttpResponse::status`, `header`, and `body` build a buffered response. `try_header` returns an error for invalid header names or values. `stream` takes a `tokio::sync::mpsc::Receiver<Bytes>` for incremental response chunks. The deprecated `Http3Request` and `Http3Response` aliases remain available for source compatibility.
 
 ```rust
 use bytes::Bytes;
 use http::{Method, StatusCode};
 use tokio::sync::mpsc;
-use mtp::webserver::{Http3Request, Http3Response, WebServerConfig};
+use mtp::webserver::{HttpRequest, HttpResponse, WebServerConfig};
 
-async fn health(_request: Http3Request, response: Http3Response) -> Http3Response {
+async fn health(_request: HttpRequest, response: HttpResponse) -> HttpResponse {
     response.status(StatusCode::OK).body("ok")
 }
 
-async fn whoami(request: Http3Request, response: Http3Response) -> Http3Response {
+async fn whoami(request: HttpRequest, response: HttpResponse) -> HttpResponse {
     response.body(format!("client: {}", request.remote_addr))
 }
 
-async fn stream_numbers(_request: Http3Request, response: Http3Response) -> Http3Response {
+async fn stream_numbers(_request: HttpRequest, response: HttpResponse) -> HttpResponse {
     let (tx, rx) = mpsc::channel::<Bytes>(10);
     tokio::spawn(async move {
         for number in 0..10 {
@@ -129,7 +130,15 @@ while let Some(connection) = server.accept().await? {
 ```
 > `MTPWebServer::new` consumes a `HostConfig` (not an `MTPHost` instance). It creates its own QUIC endpoint and does not share a port with a running `MTPHost`.
 
-`server.accept()` returns `Option<WebMTPConnection>` for each WebTransport session. HTTP/3 routes do not surface through `accept()` because the server dispatches them internally. `WebMTPConnection` retains the negotiated version, codec, request path, remote address, description, sender, and receiver used by native MTP connections.
+`server.accept()` returns `Option<WebMTPConnection>` for each WebTransport session. Ordinary HTTP routes do not surface through `accept()` because the server dispatches them internally. `WebMTPConnection` retains the negotiated version, codec, request path, remote address, description, sender, and receiver used by native MTP connections.
+
+## Deployment
+
+For direct browser access, leave `serve_tcp_https(true)` enabled. The server advertises `h2` and `http/1.1` on TCP TLS and `h3` on UDP QUIC; WebTransport extended CONNECT is available only over HTTP/3. Both transports must present the certificate supplied by the same `HostConfig` and use the same origin port.
+
+When a reverse proxy or another process owns TCP, use `WebServerConfig::new().serve_tcp_https(false)`. This retains the UDP HTTP/3/WebTransport endpoint and its shared router without claiming the TCP port.
+
+With port `0` and TCP enabled, construction binds TCP first and binds UDP to the selected TCP port, so `local_addr()` reports the common address. With TCP disabled, Quinn selects the UDP port as before. `shutdown()` stops both accept loops, gracefully finishes active HTTP requests until `drain_timeout`, closes Quinn, and then aborts remaining work. `close()` and dropping the server stop both listeners immediately.
 
 ### Authentication
 
@@ -166,4 +175,4 @@ fn request_completed(&self, path: &str, status: u16, duration: Duration)
 fn error_occurred(&self, error: &WebServerError)
 ```
 
-Errors include route misses, invalid requests, body-limit failures, handler timeouts, response construction failures, and transport failures. Supply the metrics object with `WebServerConfig::with_metrics`.
+Errors include invalid requests, body-limit failures, handler timeouts, response write failures, TLS failures, and transport failures. Completion callbacks include the final HTTP status for every supported HTTP version. Supply the metrics object with `WebServerConfig::with_metrics`.

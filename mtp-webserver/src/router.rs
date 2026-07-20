@@ -1,24 +1,24 @@
-use crate::{Http3Request, Http3Response};
+use crate::{HttpRequest, HttpResponse};
 use http::Method;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 /// Values captured from a parameterized route.
 pub type RouteParams = HashMap<String, String>;
 
-/// An asynchronous HTTP/3 route handler.
+/// An asynchronous HTTP route handler.
 pub type HttpHandler = Arc<
-    dyn Fn(Http3Request, Http3Response) -> Pin<Box<dyn Future<Output = Http3Response> + Send>>
+    dyn Fn(HttpRequest, HttpResponse) -> Pin<Box<dyn Future<Output = HttpResponse> + Send>>
         + Send
         + Sync,
 >;
 
-/// An asynchronous handler for a parameterized HTTP/3 route.
+/// An asynchronous handler for a parameterized HTTP route.
 pub type DynamicHttpHandler = Arc<
     dyn Fn(
-            Http3Request,
-            Http3Response,
+            HttpRequest,
+            HttpResponse,
             RouteParams,
-        ) -> Pin<Box<dyn Future<Output = Http3Response> + Send>>
+        ) -> Pin<Box<dyn Future<Output = HttpResponse> + Send>>
         + Send
         + Sync,
 >;
@@ -66,8 +66,8 @@ impl Router {
 
     pub fn route<F, Fut>(self, path: impl Into<String>, handler: F) -> Result<Self, RouterError>
     where
-        F: Fn(Http3Request, Http3Response) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Http3Response> + Send + 'static,
+        F: Fn(HttpRequest, HttpResponse) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = HttpResponse> + Send + 'static,
     {
         self.route_inner(
             None,
@@ -83,8 +83,8 @@ impl Router {
         handler: F,
     ) -> Result<Self, RouterError>
     where
-        F: Fn(Http3Request, Http3Response) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Http3Response> + Send + 'static,
+        F: Fn(HttpRequest, HttpResponse) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = HttpResponse> + Send + 'static,
     {
         self.route_inner(
             Some(method),
@@ -101,8 +101,8 @@ impl Router {
         handler: F,
     ) -> Result<Self, RouterError>
     where
-        F: Fn(Http3Request, Http3Response, RouteParams) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Http3Response> + Send + 'static,
+        F: Fn(HttpRequest, HttpResponse, RouteParams) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = HttpResponse> + Send + 'static,
     {
         self.route_pattern_inner(
             None,
@@ -120,8 +120,8 @@ impl Router {
         handler: F,
     ) -> Result<Self, RouterError>
     where
-        F: Fn(Http3Request, Http3Response, RouteParams) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Http3Response> + Send + 'static,
+        F: Fn(HttpRequest, HttpResponse, RouteParams) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = HttpResponse> + Send + 'static,
     {
         self.route_pattern_inner(
             Some(method),
@@ -132,8 +132,8 @@ impl Router {
 
     pub fn fallback<F, Fut>(mut self, handler: F) -> Result<Self, RouterError>
     where
-        F: Fn(Http3Request, Http3Response) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Http3Response> + Send + 'static,
+        F: Fn(HttpRequest, HttpResponse) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = HttpResponse> + Send + 'static,
     {
         if self.fallback.is_some() {
             return Err(RouterError::DuplicateFallback);
@@ -307,7 +307,7 @@ mod tests {
                 response.status(StatusCode::NO_CONTENT)
             })
             .unwrap();
-        let request = Http3Request {
+        let request = HttpRequest {
             method: Method::GET,
             uri: Uri::from_static("/health"),
             headers: Default::default(),
@@ -315,7 +315,7 @@ mod tests {
             remote_addr: "127.0.0.1:4433".parse().unwrap(),
         };
         let response =
-            router.handler(&Method::GET, "/health").unwrap()(request, Http3Response::default())
+            router.handler(&Method::GET, "/health").unwrap()(request, HttpResponse::default())
                 .await;
         assert_eq!(response.status, StatusCode::NO_CONTENT);
         assert!(router.handler(&Method::GET, "/missing").is_none());
@@ -335,14 +335,14 @@ mod tests {
         let (handler, params) = router
             .pattern_handler(&Method::GET, "/api/get/user%2D123/profile.json")
             .unwrap();
-        let request = Http3Request {
+        let request = HttpRequest {
             method: Method::GET,
             uri: Uri::from_static("/api/get/user%2D123/profile.json"),
             headers: Default::default(),
             body: Some(Bytes::new()),
             remote_addr: "127.0.0.1:4433".parse().unwrap(),
         };
-        let response = handler(request, Http3Response::default(), params).await;
+        let response = handler(request, HttpResponse::default(), params).await;
         assert_eq!(response.body, vec![Bytes::from("user-123")]);
     }
 
@@ -380,14 +380,14 @@ mod tests {
         let (handler, params) = router
             .pattern_handler(&Method::GET, "/api/users/profile.json")
             .unwrap();
-        let request = Http3Request {
+        let request = HttpRequest {
             method: Method::GET,
             uri: Uri::from_static("/api/users/profile.json"),
             headers: Default::default(),
             body: None,
             remote_addr: "127.0.0.1:4433".parse().unwrap(),
         };
-        let response = handler(request, Http3Response::default(), params).await;
+        let response = handler(request, HttpResponse::default(), params).await;
         assert_eq!(response.status, StatusCode::CREATED);
     }
 }

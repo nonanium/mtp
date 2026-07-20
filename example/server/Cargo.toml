@@ -10,8 +10,7 @@ path = "src/main.rs"
 [dependencies]
 mtp = { version = "0.2.0", path = "../../", features = ["crypto", "tls", "web-server", "files", "pipes"] }
 tokio = { version = "1", features = ["full"] }
-tokio-rustls = "0.26"
-rustls = "0.23"
+http = "1"
 serde_json = { version = "1" }
 hex = "0.4"
 base64 = "0.22"

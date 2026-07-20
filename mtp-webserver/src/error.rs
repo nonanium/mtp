@@ -6,7 +6,9 @@ use std::fmt;
 pub enum WebServerError {
     Transport(CommunicationError),
     WebTransport(String),
+    Tls(String),
     Http(String),
+    PayloadTooLarge,
     NotFound(String),
 }
 
@@ -15,7 +17,9 @@ impl fmt::Display for WebServerError {
         match self {
             Self::Transport(e) => write!(f, "transport error: {e}"),
             Self::WebTransport(msg) => write!(f, "webtransport error: {msg}"),
+            Self::Tls(msg) => write!(f, "TLS error: {msg}"),
             Self::Http(msg) => write!(f, "HTTP error: {msg}"),
+            Self::PayloadTooLarge => write!(f, "HTTP request body is too large"),
             Self::NotFound(route) => write!(f, "route not found: {route}"),
         }
     }

@@ -19,7 +19,7 @@ Area-specific guides:
 - [Troubleshooting](./docs/TROUBLESHOOTING.md)
 - [Operations](./docs/OPERATIONS.md)
 
-`MTPWebServer` owns its UDP endpoint and must not bind to the same address and port as `MTPHost`. The two structs use incompatible QUIC ALPN protocols (`h3` for the web server, native MTP for the host), so a single socket cannot service both. The `host` and `webserver` Cargo features are not designed to be enabled simultaneously in the same binary; choose the one that matches your client type.
+`MTPWebServer` owns TCP TLS (HTTP/1.1 and HTTP/2) plus UDP QUIC (HTTP/3 and WebTransport) on one numeric port. It must not bind its UDP address and port as `MTPHost`: their QUIC ALPN protocols remain incompatible (`h3` for the web server, native MTP for the host).
 
 ## Browser SDK
 
@@ -50,7 +50,7 @@ Feature summary:
 | `crypto` | `mtp::crypto` | AEAD, signatures, KEM, KDF, hashing |
 | `host` | `mtp::host`, codec registry | QUIC host and version negotiation |
 | `client` | `mtp::client` | QUIC client connections |
-| `webserver` | `mtp::webserver` | HTTP/3 server with WebTransport MTP sessions |
+| `webserver` | `mtp::webserver` | HTTPS server with HTTP/1.1, HTTP/2, HTTP/3, and WebTransport MTP sessions |
 
 The core crates are always available: `codec`, `transport`, `common`, and `type_map`. See the [native client](./docs/NATIVE-CLIENT.md) and [native host](./docs/NATIVE-HOST.md)
 guides for configuration and usage. See [Security](./docs/SECURITY.md) for security boundaries.

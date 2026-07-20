@@ -2,7 +2,7 @@
 
 The native host is a Rust library (`mtp-host`) that runs a QUIC server, accepts MTP client connections, negotiates protocol versions, and optionally performs a mutual-authentication handshake (login/register) using Ed25519 and ML-DSA-65 signatures.
 
-> **Note:** `MTPHost` serves native MTP clients over raw QUIC. If you need to serve HTTP/3 routes on the same endpoint, use [`MTPWebServer`](NATIVE-HOST-WEB-SERVER.md) instead. `MTPWebServer` accepts the same `HostConfig` but binds an HTTP/3 endpoint rather than a native QUIC endpoint.
+> **Note:** `MTPHost` serves native MTP clients over raw QUIC. For browser-facing HTTP/1.1, HTTP/2, HTTP/3, and WebTransport, use [`MTPWebServer`](NATIVE-HOST-WEB-SERVER.md). It accepts the same `HostConfig` but its UDP endpoint uses HTTP/3 rather than the native MTP QUIC ALPN.
 
 ## Cargo Dependency
 

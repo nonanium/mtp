@@ -16,7 +16,7 @@ Native clients and hosts share the same connection shape after the opening hands
 `WebMTPConnection`, returned by `MTPWebServer::accept()`, exposes the same members as the native host connection plus `request_path`, which contains the HTTP/3 path used for the WebTransport extended CONNECT request.
 
 Server-side MTP connections expose `remote_addr`, the peer address observed by
-QUIC. HTTP/3 route handlers receive the same address as `Http3Request::remote_addr`.
+QUIC. HTTP route handlers receive the peer address as `HttpRequest::remote_addr`.
 It is transport metadata and should not be treated as an authenticated identity;
 behind a proxy, use the proxy's trusted forwarding mechanism separately.
 The host connection also exposes a version-scoped `codec` and, for an authenticated client, its `client_public_key`. The native client connection also exposes these methods:
