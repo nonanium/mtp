@@ -150,6 +150,7 @@ impl Router {
         path: String,
         handler: HttpHandler,
     ) -> Result<Self, RouterError> {
+        let path = normalize_path(&path);
         if self
             .routes
             .insert((method, path.clone()), handler)
@@ -166,6 +167,7 @@ impl Router {
         pattern: String,
         handler: DynamicHttpHandler,
     ) -> Result<Self, RouterError> {
+        let pattern = normalize_path(&pattern);
         let segments = parse_pattern(&pattern)?;
         if self
             .pattern_routes
@@ -189,9 +191,10 @@ impl Router {
     }
 
     pub(crate) fn handler(&self, method: &Method, path: &str) -> Option<HttpHandler> {
+        let path = normalize_path(path);
         self.routes
-            .get(&(Some(method.clone()), path.to_string()))
-            .or_else(|| self.routes.get(&(None, path.to_string())))
+            .get(&(Some(method.clone()), path.clone()))
+            .or_else(|| self.routes.get(&(None, path)))
             .cloned()
     }
 
@@ -200,15 +203,35 @@ impl Router {
         method: &Method,
         path: &str,
     ) -> Option<(DynamicHttpHandler, RouteParams)> {
+        let path = normalize_path(path);
         self.pattern_routes
             .iter()
             .filter(|route| route.method.is_none() || route.method.as_ref() == Some(method))
-            .filter_map(|route| match_pattern(&route.segments, path).map(|params| (route, params)))
+            .filter_map(|route| match_pattern(&route.segments, &path).map(|params| (route, params)))
             .max_by_key(|(route, _)| (route.method.is_some(), route.static_segments))
             .map(|(route, params)| (route.handler.clone(), params))
     }
     pub(crate) fn fallback_handler(&self) -> Option<HttpHandler> {
         self.fallback.clone()
+    }
+}
+
+/// Canonicalize a route path for matching.
+///
+/// HTTP request paths are absolute, but accepting an omitted leading slash in
+/// route registration is convenient. A terminal slash (or several terminal
+/// slashes) does not identify a different resource, except for the root path.
+fn normalize_path(path: &str) -> String {
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    let normalized = path.trim_end_matches('/');
+    if normalized.is_empty() {
+        "/".to_string()
+    } else {
+        normalized.to_string()
     }
 }
 

@@ -97,4 +97,36 @@ mod tests {
             StatusCode::CREATED
         );
     }
+
+    #[tokio::test]
+    async fn dispatch_matches_terminal_slashes_for_exact_and_pattern_routes() {
+        let router = Router::new()
+            .route("/api", |_, response| async move {
+                response.status(StatusCode::ACCEPTED)
+            })
+            .unwrap()
+            .route_pattern("/api/test/{id}", |_, response, _| async move {
+                response.status(StatusCode::CREATED)
+            })
+            .unwrap()
+            .fallback(|_, response| async move { response.status(StatusCode::IM_A_TEAPOT) })
+            .unwrap();
+
+        for uri in ["/api/test", "/api/test/"] {
+            assert_eq!(
+                dispatch_request(request(Method::GET, uri), &router)
+                    .await
+                    .status,
+                StatusCode::ACCEPTED
+            );
+        }
+        for uri in ["/api/test/1", "/api/test/1/"] {
+            assert_eq!(
+                dispatch_request(request(Method::GET, uri), &router)
+                    .await
+                    .status,
+                StatusCode::CREATED
+            );
+        }
+    }
 }
