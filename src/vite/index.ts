@@ -450,11 +450,7 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
           rebuildTimer = null;
           void (async () => {
             try {
-              await buildIfNeeded(state, true);
-              server.moduleGraph.invalidateAll();
-              if (server.ws) {
-                server.ws.send({ type: "full-reload" });
-              }
+              await server.restart();
             } catch (error) {
               server.config.logger.error(
                 error instanceof Error ? error.message : String(error),

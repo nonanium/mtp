@@ -289,7 +289,7 @@ impl DataValue {
     pub fn as_number(&self) -> Option<i128> {
         match self {
             DataValue::SignedNumber(n) => Some(*n),
-            DataValue::UnsignedNumber(n) => Some(*n as i128),
+            DataValue::UnsignedNumber(n) => i128::try_from(*n).ok(),
             _ => None,
         }
     }
@@ -1230,6 +1230,18 @@ mod tests {
             value_roundtrip(value)?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn unsigned_number_conversion_rejects_i128_overflow() {
+        assert_eq!(
+            DataValue::UnsignedNumber(i128::MAX as u128).as_number(),
+            Some(i128::MAX)
+        );
+        assert_eq!(
+            DataValue::UnsignedNumber(i128::MAX as u128 + 1).as_number(),
+            None
+        );
     }
 
     #[test]
