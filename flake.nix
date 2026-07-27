@@ -63,7 +63,8 @@
             cargo fmt --all --check
             cargo b
             cargo test --workspace --exclude mtp-wasm --all-features
-            cargo check --manifest-path example/Cargo.toml --workspace --all-targets --all-features
+            MTP_TYPE_MAPS="$PWD/example/type-maps.yaml" \
+              cargo check --manifest-path example/Cargo.toml --workspace --all-targets --all-features
             mtp-clippy
             mtp-machete
             pnpm run dup
