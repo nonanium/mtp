@@ -112,7 +112,7 @@ mod tests {
             .fallback(|_, response| async move { response.status(StatusCode::IM_A_TEAPOT) })
             .unwrap();
 
-        for uri in ["/api/test", "/api/test/"] {
+        for uri in ["/api", "/api/"] {
             assert_eq!(
                 dispatch_request(request(Method::GET, uri), &router)
                     .await
