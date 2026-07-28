@@ -290,12 +290,6 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                 break;
                             }
                             Err(_) => {
-                                tracing::warn!(
-                                    "MTP receive stream timed out while reading frame header"
-                                );
-                                let _ = tx.send(Err(CommunicationError::StreamError)).await;
-                                connection
-                                    .close(policy.application_close_code, b"frame header timeout");
                                 break;
                             }
                         }

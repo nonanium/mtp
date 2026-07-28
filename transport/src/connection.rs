@@ -973,8 +973,7 @@ impl Receiver {
                 return Err(CommunicationError::StreamError);
             }
             Err(_) => {
-                warn!("[Receiver] length-prefix read timed out");
-                return Err(CommunicationError::StreamError);
+                return Ok(ReceivedFrame::Idle);
             }
         }
 
