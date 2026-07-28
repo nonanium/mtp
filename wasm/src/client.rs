@@ -44,8 +44,18 @@ fn route_incoming_frame(
     on_message: &js_sys::Function,
     subscriptions: &Rc<RefCell<HashMap<u32, (String, js_sys::Function)>>>,
     pending_requests: &Rc<RefCell<HashMap<u32, PendingRequest>>>,
+    pending_pings: &Rc<RefCell<HashMap<u32, f64>>>,
+    ping_ms: &Rc<Cell<Option<f64>>>,
 ) {
     let message_type = frame_type(frame);
+
+    if message_type.as_deref() == Some("Pong") {
+        if let Some(sent_at) = frame_id(frame).and_then(|id| pending_pings.borrow_mut().remove(&id))
+        {
+            ping_ms.set(Some(js_sys::Date::now() - sent_at));
+        }
+        return;
+    }
 
     if let Some(request_id) = frame_id(frame) {
         let pending = pending_requests.borrow_mut().remove(&request_id);
@@ -149,6 +159,8 @@ pub struct WasmClient {
     next_subscription_id: Rc<Cell<u32>>,
     pending_requests: Rc<RefCell<HashMap<u32, PendingRequest>>>,
     ping_timer: Rc<RefCell<Option<PingTimer>>>,
+    pending_pings: Rc<RefCell<HashMap<u32, f64>>>,
+    ping_ms: Rc<Cell<Option<f64>>>,
     pending_pipe_creations: Rc<RefCell<HashMap<u32, oneshot::Sender<Result<bool, JsValue>>>>>,
     pending_pipes: Rc<RefCell<HashMap<u32, oneshot::Sender<PipeReader>>>>,
     on_pipe_request: Rc<RefCell<Option<js_sys::Function>>>,
@@ -184,6 +196,8 @@ impl WasmClient {
             next_subscription_id: Rc::new(Cell::new(1)),
             pending_requests: Rc::new(RefCell::new(HashMap::new())),
             ping_timer: Rc::new(RefCell::new(None)),
+            pending_pings: Rc::new(RefCell::new(HashMap::new())),
+            ping_ms: Rc::new(Cell::new(None)),
             pending_pipe_creations: Rc::new(RefCell::new(HashMap::new())),
             pending_pipes: Rc::new(RefCell::new(HashMap::new())),
             on_pipe_request: Rc::new(RefCell::new(None)),
@@ -198,6 +212,11 @@ impl WasmClient {
     #[wasm_bindgen(getter)]
     pub fn state(&self) -> u8 {
         self.state.get() as u8
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn ping_ms(&self) -> Option<f64> {
+        self.ping_ms.get()
     }
 
     #[wasm_bindgen]
@@ -582,11 +601,17 @@ impl WasmClient {
         };
         let interval_ms = interval_ms.max(1_000) as i32;
         let on_error = self.on_error.clone();
+        let pending_pings = self.pending_pings.clone();
         let closure = Closure::wrap(Box::new(move || {
             let transport = transport.clone();
             let on_error = on_error.clone();
+            let pending_pings = pending_pings.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let timestamp = js_sys::Date::now() as u64;
+                let sent_at = js_sys::Date::now();
+                pending_pings
+                    .borrow_mut()
+                    .retain(|_, pending_at| sent_at - *pending_at < interval_ms as f64 * 3.0);
+                let timestamp = sent_at as u64;
                 let frame = CommunicationValue::new(CommunicationType::Ping)
                     .add_typed_default(
                         DataType::Description,
@@ -596,12 +621,16 @@ impl WasmClient {
                         DataType::Timestamp,
                         DataValue::UnsignedNumber(timestamp as u128),
                     )
-                    .with_sender(client_id)
+                    .with_sender(client_id);
+                let ping_id = frame.get_id();
+                let frame = frame
                     .to_bytes()
                     .map_err(|e| js_error(format!("encode ping failed: {}", e)));
                 match frame {
                     Ok(frame) => {
+                        pending_pings.borrow_mut().insert(ping_id, sent_at);
                         if let Err(error) = transport.send_frame(&frame).await {
+                            pending_pings.borrow_mut().remove(&ping_id);
                             let _ = on_error.call1(&JsValue::NULL, &error);
                         }
                     }
@@ -629,6 +658,8 @@ impl WasmClient {
 
     #[wasm_bindgen]
     pub fn stop_protocol_pings(&self) {
+        self.pending_pings.borrow_mut().clear();
+        self.ping_ms.set(None);
         let Some(timer) = self.ping_timer.borrow_mut().take() else {
             return;
         };
@@ -741,6 +772,10 @@ impl WasmClient {
         let pending_requests = self.pending_requests.clone();
         let loop_pending_requests = pending_requests.clone();
         let ping_timer = self.ping_timer.clone();
+        let pending_pings = self.pending_pings.clone();
+        let loop_pending_pings = pending_pings.clone();
+        let ping_ms = self.ping_ms.clone();
+        let loop_ping_ms = ping_ms.clone();
         let pending_pipe_creations = self.pending_pipe_creations.clone();
         let pending_pipes = self.pending_pipes.clone();
         let on_pipe_request = self.on_pipe_request.clone();
@@ -808,6 +843,8 @@ impl WasmClient {
                             &on_msg,
                             &subscriptions,
                             &loop_pending_requests,
+                            &loop_pending_pings,
+                            &loop_ping_ms,
                         );
                     },
                     on_err.clone(),
@@ -822,6 +859,8 @@ impl WasmClient {
                 .await;
             state.set(ConnectionState::Disconnected);
             stop_ping_timer(&ping_timer);
+            pending_pings.borrow_mut().clear();
+            ping_ms.set(None);
             reject_pending_requests(&pending_requests, "disconnected");
             client_pipe::reject_pending_pipe_creations(&pending_pipe_creations, "disconnected");
         });

@@ -121,6 +121,7 @@ export class WasmClient implements DisposableWasmObject {
   subscribe(message_type: string, callback: MessageCallback): number;
   unsubscribe(id: number): boolean;
   static is_supported(): boolean;
+  readonly ping_ms: number | undefined;
   readonly state: ConnectionState;
 }
 

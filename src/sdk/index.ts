@@ -857,6 +857,10 @@ export class MTPClient {
     return this.raw.client.state;
   }
 
+  get pingMs(): number | null {
+    return this.raw.client.ping_ms ?? null;
+  }
+
   async #loadStoredCredentials() {
     if (this.#credentials || !this.#options.storage) {
       return;
