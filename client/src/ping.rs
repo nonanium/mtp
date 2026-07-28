@@ -30,10 +30,10 @@ impl PingTracker {
     }
 
     fn received(&mut self, id: u32) -> Option<Duration> {
-        if !self
+        if self
             .pending
             .as_ref()
-            .is_some_and(|(pending, _)| *pending == id)
+            .is_none_or(|(pending, _)| *pending != id)
         {
             return None;
         }
