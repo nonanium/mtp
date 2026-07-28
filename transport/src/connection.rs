@@ -938,12 +938,8 @@ impl Receiver {
     }
 
     /* Route reserved Pong frames to a connection-level observer. */
-    pub fn observe_pongs(&self, observer: mpsc::UnboundedSender<CommunicationValue>) {
-        if let Ok(mut control) = self.inner.ping_control.try_write() {
-            control.pong_observer = Some(observer);
-        } else {
-            warn!("[Receiver] could not register Pong observer: control lock busy");
-        }
+    pub async fn observe_pongs(&self, observer: mpsc::UnboundedSender<CommunicationValue>) {
+        self.inner.ping_control.write().await.pong_observer = Some(observer);
     }
 
     #[instrument(skip(stream, policy), level = "trace")]

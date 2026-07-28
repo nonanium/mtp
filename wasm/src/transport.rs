@@ -477,14 +477,15 @@ impl WasmTransport {
     /// Pipe-aware receive loop. Identical to `receive_loop` but detects
     /// `PipeRequest` as the first frame on a new incoming stream and routes
     /// the stream to `on_pipe` instead of `on_message`.
-    pub async fn receive_loop_with_pipes<F, G>(
+    pub async fn receive_loop_with_pipes<F, G, H>(
         &self,
         mut on_message: F,
-        on_error: js_sys::Function,
+        mut on_error: H,
         mut on_pipe: G,
     ) where
         F: FnMut(JsValue),
         G: FnMut(crate::pipe::PipeReader),
+        H: FnMut(JsValue),
     {
         let pipe_request_type =
             mtp_codec::CommunicationType::PipeRequest.try_to_id(&mtp_codec::TypeMap::latest());
@@ -528,13 +529,13 @@ impl WasmTransport {
                         }
                         Err(e) => {
                             let message = e.as_string().unwrap_or_else(|| format!("{:?}", e));
-                            let _ = on_error.call1(&JsValue::NULL, &JsValue::from_str(&message));
+                            on_error(JsValue::from_str(&message));
                         }
                     }
                 }
                 Ok(FrameOutcome::Closed) | Ok(FrameOutcome::Ended) => break,
                 Err(e) => {
-                    let _ = on_error.call1(&JsValue::NULL, &e);
+                    on_error(e);
                     break;
                 }
             }

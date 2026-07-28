@@ -142,9 +142,10 @@ impl MTPClient {
             negotiated,
             error::AuthState::Unauthenticated,
             client_id,
-        ));
+        )
+        .await);
         #[cfg(not(feature = "crypto"))]
-        Ok(connection_from_parts(config, sender, receiver, negotiated))
+        Ok(connection_from_parts(config, sender, receiver, negotiated).await)
     }
 }
 
@@ -283,7 +284,8 @@ impl MTPClient {
             crypto::negotiated_version(&response)?,
             error::AuthState::Authenticated,
             client_id,
-        ))
+        )
+        .await)
     }
 
     pub async fn auth_register(
@@ -440,7 +442,8 @@ impl MTPClient {
             crypto::negotiated_version(&response)?,
             error::AuthState::Authenticated,
             assigned_id,
-        ))
+        )
+        .await)
     }
 }
 

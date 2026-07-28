@@ -159,7 +159,7 @@ impl MTPConnection {
     }
 }
 
-pub(crate) fn connection_from_parts(
+pub(crate) async fn connection_from_parts(
     config: ClientConfig,
     sender: mtp_transport::Sender,
     receiver: mtp_transport::Receiver,
@@ -168,7 +168,7 @@ pub(crate) fn connection_from_parts(
     #[cfg(feature = "crypto")] client_id: u64,
 ) -> MTPConnection {
     let remote_addr = sender.handle().remote_addr();
-    let ping = start_ping_session(&config, sender.clone(), &receiver);
+    let ping = start_ping_session(&config, sender.clone(), &receiver).await;
 
     #[cfg(feature = "pipes")]
     {

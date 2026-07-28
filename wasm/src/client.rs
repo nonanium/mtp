@@ -53,8 +53,8 @@ fn route_incoming_frame(
         if let Some(sent_at) = frame_id(frame).and_then(|id| pending_pings.borrow_mut().remove(&id))
         {
             ping_ms.set(Some(js_sys::Date::now() - sent_at));
+            return;
         }
-        return;
     }
 
     if let Some(request_id) = frame_id(frame) {
@@ -138,6 +138,33 @@ async fn wait_for_timeout(timeout_ms: u32) -> Result<(), JsValue> {
     Ok(())
 }
 
+fn set_shared_state(
+    state: &Rc<Cell<ConnectionState>>,
+    pending_state_callbacks: &Rc<RefCell<VecDeque<ConnectionState>>>,
+    state_callback: &JsValue,
+    new_state: ConnectionState,
+) {
+    state.set(new_state);
+    pending_state_callbacks.borrow_mut().push_back(new_state);
+
+    let global = js_sys::global();
+    let qmt = js_sys::Reflect::get(&global, &JsValue::from_str("queueMicrotask"))
+        .and_then(|f| f.dyn_into::<js_sys::Function>());
+    let scheduled = qmt
+        .and_then(|qmt| qmt.call1(&global, state_callback))
+        .is_ok();
+    if !scheduled
+        && js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+            .and_then(|f| f.dyn_into::<js_sys::Function>())
+            .and_then(|set_timeout| {
+                set_timeout.call2(&global, state_callback, &JsValue::from_f64(0.0))
+            })
+            .is_err()
+    {
+        pending_state_callbacks.borrow_mut().pop_back();
+    }
+}
+
 #[wasm_bindgen]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -150,6 +177,7 @@ pub enum ConnectionState {
 #[wasm_bindgen]
 pub struct WasmClient {
     transport: Rc<RefCell<Option<WasmTransport>>>,
+    connection_generation: Rc<Cell<u32>>,
     state: Rc<Cell<ConnectionState>>,
     pending_state_callbacks: Rc<RefCell<VecDeque<ConnectionState>>>,
     state_callback: Closure<dyn FnMut()>,
@@ -187,6 +215,7 @@ impl WasmClient {
         }) as Box<dyn FnMut()>);
         Self {
             transport: Rc::new(RefCell::new(None)),
+            connection_generation: Rc::new(Cell::new(0)),
             state: Rc::new(Cell::new(ConnectionState::Disconnected)),
             pending_state_callbacks,
             state_callback,
@@ -221,7 +250,7 @@ impl WasmClient {
 
     #[wasm_bindgen]
     pub async fn connect(&self, config: &ConnectionConfig) -> Result<(), JsValue> {
-        self.set_state(ConnectionState::Connecting);
+        let generation = self.begin_connection();
         let transport = WasmTransport::connect(
             &config.url,
             config.server_certificate_hashes.clone(),
@@ -249,7 +278,7 @@ impl WasmClient {
             .map_err(|e| js_error(format!("parse handshake outcome: {e}")))?;
         let tm = mtp_codec::TypeMap::latest();
         if Some(outcome.get_type()) == CommunicationType::ErrorBadVersion.try_to_id(&tm) {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(js_error(
                 outcome
                     .get_str(DataType::ErrorMessage)
@@ -262,7 +291,7 @@ impl WasmClient {
         if outcome.get_type() != expected
             || outcome.get_data(DataType::Connected) != &DataValue::BoolTrue
         {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(js_error(
                 outcome
                     .get_str(DataType::ErrorMessage)
@@ -272,12 +301,14 @@ impl WasmClient {
         match outcome.get_data(DataType::Version) {
             DataValue::Str(version) if mtp_codec::Version::parse(version).is_some() => {}
             _ => {
-                self.set_state(ConnectionState::Disconnected);
+                self.set_state_if_current(generation, ConnectionState::Disconnected);
                 return Err(js_error("host omitted a valid negotiated protocol version"));
             }
         }
 
-        self.start_receive_loop(transport);
+        if !self.start_receive_loop(transport, generation) {
+            return Err(js_error("connection attempt superseded"));
+        }
         Ok(())
     }
 
@@ -289,7 +320,7 @@ impl WasmClient {
         keyring_bytes: &[u8],
         client_id: u64,
     ) -> Result<u64, JsValue> {
-        self.set_state(ConnectionState::Connecting);
+        let generation = self.begin_connection();
 
         let host_pk = mtp_crypto::PublicKeyBundle::from_bytes(host_public_key_bytes)
             .map_err(|e| js_error(format!("invalid host public key: {}", e)))?;
@@ -326,6 +357,7 @@ impl WasmClient {
                 "auth_connect challenge",
                 config.require_pq,
                 !keyring.sig_pq_secret_key.as_bytes().is_empty(),
+                generation,
             )
             .await?;
 
@@ -348,7 +380,7 @@ impl WasmClient {
             .try_to_id(&tm)
             .ok_or_else(|| js_error("IdentificationResponse is absent from the type map"))?;
         if resp_type != expected_type {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(auth::unexpected_response_type_error(
                 "auth_connect",
                 expected_type,
@@ -359,7 +391,7 @@ impl WasmClient {
         }
 
         if resp_comm.get_data(DataType::Connected) != &DataValue::BoolTrue {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(js_error(
                 resp_comm
                     .get_str(DataType::ErrorMessage)
@@ -376,19 +408,21 @@ impl WasmClient {
             server_challenge,
             config.require_pq,
         ) {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(e);
         }
 
         let assigned_id = match resp_comm.get_data(DataType::Id) {
             DataValue::UnsignedNumber(n) => *n as u64,
             _ => {
-                self.set_state(ConnectionState::Disconnected);
+                self.set_state_if_current(generation, ConnectionState::Disconnected);
                 return Err(js_error("missing assigned ID"));
             }
         };
 
-        self.start_receive_loop(transport);
+        if !self.start_receive_loop(transport, generation) {
+            return Err(js_error("connection attempt superseded"));
+        }
 
         Ok(assigned_id)
     }
@@ -400,7 +434,7 @@ impl WasmClient {
         host_public_key_bytes: &[u8],
         keyring_bytes: &[u8],
     ) -> Result<u64, JsValue> {
-        self.set_state(ConnectionState::Connecting);
+        let generation = self.begin_connection();
 
         let host_pk = mtp_crypto::PublicKeyBundle::from_bytes(host_public_key_bytes)
             .map_err(|e| js_error(format!("invalid host public key: {}", e)))?;
@@ -438,6 +472,7 @@ impl WasmClient {
                 "auth_register challenge",
                 config.require_pq,
                 !keyring.sig_pq_secret_key.as_bytes().is_empty(),
+                generation,
             )
             .await?;
 
@@ -460,7 +495,7 @@ impl WasmClient {
             .try_to_id(&tm)
             .ok_or_else(|| js_error("RegisterResponse is absent from the type map"))?;
         if resp_type != expected_type {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(auth::unexpected_response_type_error(
                 "auth_register",
                 expected_type,
@@ -471,7 +506,7 @@ impl WasmClient {
         }
 
         if resp_comm.get_data(DataType::Connected) != &DataValue::BoolTrue {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(js_error(
                 resp_comm
                     .get_str(DataType::ErrorMessage)
@@ -482,7 +517,7 @@ impl WasmClient {
         let assigned_id = match resp_comm.get_data(DataType::Id) {
             DataValue::UnsignedNumber(n) => *n as u64,
             _ => {
-                self.set_state(ConnectionState::Disconnected);
+                self.set_state_if_current(generation, ConnectionState::Disconnected);
                 return Err(js_error("missing assigned ID"));
             }
         };
@@ -496,11 +531,13 @@ impl WasmClient {
             server_challenge,
             config.require_pq,
         ) {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(e);
         }
 
-        self.start_receive_loop(transport);
+        if !self.start_receive_loop(transport, generation) {
+            return Err(js_error("connection attempt superseded"));
+        }
 
         Ok(assigned_id)
     }
@@ -674,6 +711,8 @@ impl WasmClient {
 
     #[wasm_bindgen]
     pub fn disconnect(&self) {
+        self.connection_generation
+            .set(self.connection_generation.get().wrapping_add(1));
         self.stop_protocol_pings();
         if let Some(t) = self.transport.borrow_mut().take() {
             t.close();
@@ -733,39 +772,50 @@ impl WasmClient {
     }
 
     fn set_state(&self, new_state: ConnectionState) {
-        self.state.set(new_state);
-        self.pending_state_callbacks
-            .borrow_mut()
-            .push_back(new_state);
+        set_shared_state(
+            &self.state,
+            &self.pending_state_callbacks,
+            self.state_callback.as_ref(),
+            new_state,
+        );
+    }
 
-        let global = js_sys::global();
-        let qmt = js_sys::Reflect::get(&global, &JsValue::from_str("queueMicrotask"))
-            .and_then(|f| f.dyn_into::<js_sys::Function>());
-        let scheduled = qmt
-            .and_then(|qmt| qmt.call1(&global, self.state_callback.as_ref()))
-            .is_ok();
-        if !scheduled
-            && js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
-                .and_then(|f| f.dyn_into::<js_sys::Function>())
-                .and_then(|set_timeout| {
-                    set_timeout.call2(
-                        &global,
-                        self.state_callback.as_ref(),
-                        &JsValue::from_f64(0.0),
-                    )
-                })
-                .is_err()
-        {
-            self.pending_state_callbacks.borrow_mut().pop_back();
+    fn set_state_if_current(&self, generation: u32, new_state: ConnectionState) {
+        if self.connection_generation.get() == generation {
+            self.set_state(new_state);
         }
     }
 
-    fn start_receive_loop(&self, transport: WasmTransport) {
+    fn begin_connection(&self) -> u32 {
+        let generation = self.connection_generation.get().wrapping_add(1);
+        self.connection_generation.set(generation);
+        self.stop_protocol_pings();
+        if let Some(transport) = self.transport.borrow_mut().take() {
+            transport.close();
+        }
+        self.reject_pending_requests("connection replaced");
+        client_pipe::reject_pending_pipe_creations(
+            &self.pending_pipe_creations,
+            "connection replaced",
+        );
+        self.set_state(ConnectionState::Connecting);
+        generation
+    }
+
+    fn start_receive_loop(&self, transport: WasmTransport, generation: u32) -> bool {
+        if self.connection_generation.get() != generation {
+            transport.close();
+            return false;
+        }
         let loop_transport = transport.clone();
         *self.transport.borrow_mut() = Some(transport);
         self.set_state(ConnectionState::Connected);
 
+        let connection_generation = self.connection_generation.clone();
+        let error_generation = connection_generation.clone();
         let state = self.state.clone();
+        let pending_state_callbacks = self.pending_state_callbacks.clone();
+        let state_callback = self.state_callback.as_ref().clone();
         let on_msg = self.on_message.clone();
         let on_err = self.on_error.clone();
         let subscriptions = self.subscriptions.clone();
@@ -847,7 +897,11 @@ impl WasmClient {
                             &loop_ping_ms,
                         );
                     },
-                    on_err.clone(),
+                    move |error| {
+                        if error_generation.get() == generation {
+                            let _ = on_err.call1(&JsValue::NULL, &error);
+                        }
+                    },
                     move |pipe_reader: PipeReader| {
                         let pipe_id = pipe_reader.pipe_id();
                         let mut pending = pending_pipes.borrow_mut();
@@ -857,13 +911,22 @@ impl WasmClient {
                     },
                 )
                 .await;
-            state.set(ConnectionState::Disconnected);
+            if connection_generation.get() != generation {
+                return;
+            }
+            set_shared_state(
+                &state,
+                &pending_state_callbacks,
+                &state_callback,
+                ConnectionState::Disconnected,
+            );
             stop_ping_timer(&ping_timer);
             pending_pings.borrow_mut().clear();
             ping_ms.set(None);
             reject_pending_requests(&pending_requests, "disconnected");
             client_pipe::reject_pending_pipe_creations(&pending_pipe_creations, "disconnected");
         });
+        true
     }
 
     fn reject_pending_requests(&self, message: &str) {
@@ -879,6 +942,7 @@ impl WasmClient {
         context: &str,
         require_pq: bool,
         client_has_pq_key: bool,
+        generation: u32,
     ) -> Result<u128, JsValue> {
         let challenge_bytes = transport.read_one_frame().await?;
         let challenge = CommunicationValue::from_bytes(&challenge_bytes)
@@ -887,7 +951,7 @@ impl WasmClient {
             .try_to_id(tm)
             .ok_or_else(|| js_error("Challenge is absent from the type map"))?;
         if challenge.get_type() != expected {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(auth::unexpected_response_type_error(
                 context,
                 expected,
@@ -900,13 +964,13 @@ impl WasmClient {
         let server_challenge = match challenge.get_data(DataType::ServerNonce) {
             DataValue::UnsignedNumber(n) => *n,
             _ => {
-                self.set_state(ConnectionState::Disconnected);
+                self.set_state_if_current(generation, ConnectionState::Disconnected);
                 return Err(js_error("missing server challenge"));
             }
         };
 
         if challenge.get_data(DataType::RequirePq) == &DataValue::BoolTrue && !client_has_pq_key {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(js_error(
                 "host requires post-quantum authentication but the client PQ key is absent",
             ));
@@ -920,7 +984,7 @@ impl WasmClient {
             server_challenge,
             require_pq,
         ) {
-            self.set_state(ConnectionState::Disconnected);
+            self.set_state_if_current(generation, ConnectionState::Disconnected);
             return Err(e);
         }
 
