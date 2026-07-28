@@ -351,13 +351,17 @@ fn build_endpoint(
         if let Some(keep_alive) = config.policy.keep_alive_interval {
             transport.keep_alive_interval(Some(keep_alive));
         }
-        if let Some(idle_timeout) = config.policy.max_idle_timeout {
-            transport.max_idle_timeout(Some(
-                idle_timeout
-                    .try_into()
-                    .map_err(|error| CommunicationError::Other(format!("{error}")))?,
-            ));
-        }
+        transport.max_idle_timeout(
+            config
+                .policy
+                .max_idle_timeout
+                .map(|idle_timeout| {
+                    idle_timeout
+                        .try_into()
+                        .map_err(|error| CommunicationError::Other(format!("{error}")))
+                })
+                .transpose()?,
+        );
         Arc::new(transport)
     });
     quinn::Endpoint::server(server, SocketAddr::new(config.ip, config.port))
