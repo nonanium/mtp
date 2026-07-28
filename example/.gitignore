@@ -14,3 +14,4 @@ web-client/dist/
 client.id
 *.mk
 *.mpkb
+metrics/

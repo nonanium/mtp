@@ -18,6 +18,7 @@ pub(crate) struct DriverConfig {
     pub(crate) policy: mtp_transport::Policy,
     pub(crate) host_config: Arc<HostConfig>,
     pub(crate) metrics: Option<Arc<dyn WebServerMetrics>>,
+    pub(crate) auth_semaphore: Arc<Semaphore>,
 }
 
 pub(crate) async fn run_driver(
@@ -37,6 +38,7 @@ pub(crate) async fn run_driver(
         policy,
         host_config,
         metrics,
+        auth_semaphore,
     } = config;
     let mut connection_tasks = tokio::task::JoinSet::new();
     loop {
@@ -63,6 +65,7 @@ pub(crate) async fn run_driver(
                 let mtp_tx = mtp_tx.clone();
                 let metrics = metrics.clone();
                 let host_config = host_config.clone();
+                let auth_semaphore = auth_semaphore.clone();
                 connection_tasks.spawn(async move {
                     let _permit = permit;
                     let connect_start = std::time::Instant::now();
@@ -137,10 +140,6 @@ pub(crate) async fn run_driver(
                                     return;
                                 }
                             };
-                            // The WebTransport session request driver must outlive this
-                            // endpoint request task. Keep it detached so handing the MTP
-                            // connection to the application does not wait for the session
-                            // (which is intentionally an open-ended accept loop).
                             tokio::spawn(run_session_requests(
                                 session.clone(),
                                 router.clone(),
@@ -149,26 +148,29 @@ pub(crate) async fn run_driver(
                                 metrics.clone(),
                                 remote_addr,
                             ));
-                            let result =
-                                accept_web_connection(session, mtp_path, connection, send_pongs, policy, host_config.clone())
-                                    .await;
-                            match mtp_tx.try_send(result) {
-                                Ok(()) => {
-                                    // The detached session driver remains active while the
-                                    // delivered MTP connection keeps the session alive.
-                                }
-                                Err(tokio::sync::mpsc::error::TrySendError::Full(result)) => {
-                                    tracing::warn!("MTP connection backlog is full; dropping connection");
-                                    if let Ok(connection) = result {
-                                        connection.sender.close();
+                            let mtp_tx = mtp_tx.clone();
+                            let auth_semaphore = auth_semaphore.clone();
+                            let host_config = host_config.clone();
+                            let connection = connection.clone();
+                            tokio::spawn(async move {
+                                let result =
+                                    accept_web_connection(session, mtp_path, connection, send_pongs, policy, host_config, auth_semaphore)
+                                        .await;
+                                match mtp_tx.try_send(result) {
+                                    Ok(()) => {}
+                                    Err(tokio::sync::mpsc::error::TrySendError::Full(result)) => {
+                                        tracing::warn!("MTP connection backlog is full; dropping connection");
+                                        if let Ok(connection) = result {
+                                            connection.sender.close();
+                                        }
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(result)) => {
+                                        if let Ok(connection) = result {
+                                            connection.sender.close();
+                                        }
                                     }
                                 }
-                                Err(tokio::sync::mpsc::error::TrySendError::Closed(result)) => {
-                                    if let Ok(connection) = result {
-                                        connection.sender.close();
-                                    }
-                                }
-                            }
+                            });
                             return;
                         }
                         let router = router.clone();

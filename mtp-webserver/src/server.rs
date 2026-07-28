@@ -228,6 +228,7 @@ impl MTPWebServer {
         let (mtp_tx, mtp_incoming) = tokio::sync::mpsc::channel(web_config.max_connections.max(1));
         let (shutdown_tx, shutdown_rx) = watch::channel(());
         let connection_semaphore = Arc::new(Semaphore::new(web_config.max_connections));
+        let auth_semaphore = Arc::new(Semaphore::new(web_config.max_connections));
         let router = web_config.router.clone();
         let metrics = web_config.metrics.clone();
         let driver_config = DriverConfig {
@@ -240,6 +241,7 @@ impl MTPWebServer {
             policy: host_config.policy,
             host_config,
             metrics: web_config.metrics.clone(),
+            auth_semaphore,
         };
         let quic_driver = tokio::spawn(run_driver(
             driver_endpoint,
@@ -339,10 +341,23 @@ fn build_endpoint(
         .map_err(|_| CommunicationError::CertificateLoadFailed)?;
     tls.alpn_protocols = vec![b"h3".to_vec()];
 
-    let server = quinn::ServerConfig::with_crypto(Arc::new(
+    let mut server = quinn::ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(tls)
             .map_err(|error| CommunicationError::Other(error.to_string()))?,
     ));
+    // Apply policy keepalive and idle timeout settings to Quinn
+    server.transport_config({
+        let mut transport = quinn::TransportConfig::default();
+        if let Some(keep_alive) = config.policy.keep_alive_interval {
+            transport.keep_alive_interval(Some(keep_alive));
+        }
+        if let Some(idle_timeout) = config.policy.max_idle_timeout {
+            transport.max_idle_timeout(Some(idle_timeout.try_into().map_err(
+                |error| CommunicationError::Other(format!("{error}")),
+            )?));
+        }
+        Arc::new(transport)
+    });
     quinn::Endpoint::server(server, SocketAddr::new(config.ip, config.port))
         .map_err(|error| CommunicationError::Other(error.to_string()))
 }

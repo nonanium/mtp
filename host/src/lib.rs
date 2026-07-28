@@ -1,5 +1,6 @@
 pub mod config;
 pub mod connection;
+pub mod engine;
 pub mod error;
 pub mod handshake;
 #[cfg(feature = "pipes")]
@@ -10,6 +11,7 @@ pub use MTPHost as Host;
 pub use config::HostConfig;
 pub use config::Policy;
 pub use connection::{MTPConnection, MtpReceiverLike, MtpSenderLike};
+pub use engine::{HandshakeEngine, HandshakeResult, HandshakeReceiver, HandshakeSender};
 pub use error::AcceptError;
 pub use handshake::MTPHost;
 pub use mtp_transport::Receiver;

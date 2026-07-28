@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use mtp::client::MTPConnection;
 use mtp::codec::{CommunicationType, CommunicationValue, DataType, DataValue};
 use mtp::crypto::{Ed25519Signer, EncryptionType, Keyring, PublicKeyBundle, SigAlgorithm};
@@ -89,17 +91,22 @@ pub async fn send_and_receive(
     conn: &MTPConnection,
     keyring: &Keyring,
     server_bundle: &PublicKeyBundle,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Duration, Box<dyn std::error::Error>> {
     let msg = build_demo_message(conn.client_id, keyring, server_bundle)?;
     println!("Sending: {msg}");
+    let start = Instant::now();
     conn.sender.send(&msg).await?;
 
     match conn.receive().await {
         Ok(resp) => {
+            let roundtrip = start.elapsed();
             println!("Received: {resp}");
+            println!("Message round-trip: {:.3}ms", roundtrip.as_secs_f64() * 1000.0);
+            Ok(roundtrip)
         }
-        Err(e) => eprintln!("Receive error: {e}"),
+        Err(e) => {
+            eprintln!("Receive error: {e}");
+            Err(e.into())
+        }
     }
-
-    Ok(())
 }

@@ -1,45 +1,16 @@
-use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, Version};
-use mtp_common::{CommunicationError, RejectionReason};
-use mtp_transport::Sender;
+use mtp_codec::Version;
+use mtp_common::CommunicationError;
 use std::{error::Error, fmt};
+
+#[cfg(test)]
+use mtp_codec::{CommunicationValue, DataType, DataValue};
 
 #[cfg(feature = "crypto")]
 pub(crate) fn random_client_id() -> u64 {
     rand::random::<u64>() & mtp_codec::MAX_WIRE_ID
 }
 
-pub(crate) async fn send_rejection(sender: &Sender, reason: RejectionReason) {
-    let response = match &reason {
-        RejectionReason::BadVersion { supported_versions } => {
-            CommunicationValue::new(CommunicationType::ErrorBadVersion)
-                .add_typed_default(
-                    DataType::Version,
-                    DataValue::Str(supported_versions.join(",")),
-                )
-                .add_typed_default(DataType::ErrorMessage, DataValue::Str(reason.to_string()))
-        }
-        _ => CommunicationValue::new(CommunicationType::IdentificationResponse)
-            .add_typed_default(DataType::Connected, DataValue::BoolFalse)
-            .add_typed_default(DataType::ErrorMessage, DataValue::Str(reason.to_string())),
-    };
-    let _ = sender.send(&response).await;
-}
-
-pub(crate) async fn send_accepted(
-    sender: &Sender,
-    version: &Version,
-    assigned_id: Option<u64>,
-) -> Result<(), CommunicationError> {
-    let mut response = CommunicationValue::new(CommunicationType::IdentificationResponse)
-        .add_typed_default(DataType::Connected, DataValue::BoolTrue)
-        .add_typed_default(DataType::Version, DataValue::Str(version.to_string()));
-    if let Some(id) = assigned_id {
-        response = response.add_typed_default(DataType::Id, DataValue::UnsignedNumber(id as u128));
-    }
-    sender.send(&response).await?;
-    sender.finish_stream().await
-}
-
+#[cfg(test)]
 pub(crate) fn extract_version(msg: &CommunicationValue) -> Option<Version> {
     let value = msg.get_data(DataType::Version);
     match value {

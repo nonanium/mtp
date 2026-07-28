@@ -3,7 +3,6 @@ use mtp_codec::{CommunicationType, DataType, DataValue};
 use mtp_codec::{CommunicationValue, Version, registry::VersionedCodec};
 use mtp_common::CommunicationError;
 use std::net::SocketAddr;
-#[cfg(feature = "pipes")]
 use std::sync::Arc;
 #[cfg(feature = "pipes")]
 use tokio::sync::{Mutex, mpsc};
@@ -12,7 +11,6 @@ use tokio::sync::{Mutex, mpsc};
 use crate::error::random_client_id;
 #[cfg(feature = "pipes")]
 use crate::pipe::{PipeDispatcher, PipeReceiver, PipeRequest, PipeSender, run_dispatcher};
-#[cfg(feature = "pipes")]
 use mtp_transport::Policy;
 
 mod connection_capability {
@@ -161,6 +159,52 @@ where
             client_public_key: None,
         }
     }
+
+    /// Construct an MTP connection with an explicit policy for pipe dispatch.
+    pub fn from_transport_parts_with_policy(
+        version: Version,
+        codec: VersionedCodec,
+        sender: S,
+        receiver: R,
+        path: String,
+        description: Option<String>,
+        remote_addr: Option<SocketAddr>,
+        policy: Arc<Policy>,
+    ) -> Self {
+        let (app_tx, app_rx) = mpsc::channel(policy.receiver_queue_capacity);
+        let (pipe_req_tx, pipe_req_rx) = mpsc::channel(policy.receiver_queue_capacity);
+        let dispatcher = Arc::new(PipeDispatcher {
+            pending_creations: Mutex::new(std::collections::HashMap::new()),
+            pending_pipes: Mutex::new(std::collections::HashMap::new()),
+            policy,
+        });
+        let task = tokio::spawn(run_dispatcher(
+            receiver.clone(),
+            sender.clone(),
+            app_tx,
+            pipe_req_tx,
+            dispatcher.clone(),
+        ));
+        Self {
+            version,
+            codec,
+            sender,
+            receiver,
+            path,
+            remote_addr,
+            app_rx: Mutex::new(app_rx),
+            pipe_req_rx: Mutex::new(pipe_req_rx),
+            pipe_dispatcher: dispatcher,
+            description,
+            _dispatcher_task: task,
+            #[cfg(feature = "crypto")]
+            auth_state: crate::error::AuthState::Unauthenticated,
+            #[cfg(feature = "crypto")]
+            client_id: random_client_id(),
+            #[cfg(feature = "crypto")]
+            client_public_key: None,
+        }
+    }
 }
 
 #[cfg(not(feature = "pipes"))]
@@ -192,6 +236,35 @@ impl<S, R, P> MTPConnection<S, R, P> {
         path: String,
         description: Option<String>,
         remote_addr: Option<SocketAddr>,
+    ) -> Self {
+        Self {
+            version,
+            codec,
+            sender,
+            receiver,
+            path,
+            remote_addr,
+            description,
+            _pipe_stream: std::marker::PhantomData,
+            _dispatcher_task: tokio::spawn(async {}),
+            #[cfg(feature = "crypto")]
+            auth_state: crate::error::AuthState::Unauthenticated,
+            #[cfg(feature = "crypto")]
+            client_id: random_client_id(),
+            #[cfg(feature = "crypto")]
+            client_public_key: None,
+        }
+    }
+
+    pub fn from_transport_parts_with_policy(
+        version: Version,
+        codec: VersionedCodec,
+        sender: S,
+        receiver: R,
+        path: String,
+        description: Option<String>,
+        remote_addr: Option<SocketAddr>,
+        _policy: Arc<Policy>,
     ) -> Self {
         Self {
             version,

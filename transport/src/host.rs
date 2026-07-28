@@ -126,31 +126,34 @@ pub async fn host_with_config(
             let incoming_session = endpoint.accept().await;
             tracing::debug!(elapsed = ?accept_started.elapsed(), "host accept loop: received QUIC connection");
 
-            let session_started = Instant::now();
-            let request = match incoming_session.await {
-                Ok(req) => req,
-                Err(e) => {
-                    debug!("incoming WebTransport session failed: {e}");
-                    continue;
-                }
-            };
-            tracing::debug!(elapsed = ?session_started.elapsed(), "host accept loop: complete WebTransport handshake");
-
-            let request_accept_started = Instant::now();
-            let connection = match request
-                .accept_with_headers([("sec-webtransport-http3-draft02", "1")])
-                .await
-            {
-                Ok(conn) => conn,
-                Err(e) => {
-                    debug!("WebTransport request accept failed: {e}");
-                    continue;
-                }
-            };
-            tracing::debug!(elapsed = ?request_accept_started.elapsed(), "host accept loop: accept WebTransport request");
-
             let incoming_tx = incoming_tx.clone();
-            tokio::spawn(handle_connection(connection, incoming_tx, policy.clone()));
+            let policy = Arc::clone(&policy);
+            tokio::spawn(async move {
+                let session_started = Instant::now();
+                let request = match incoming_session.await {
+                    Ok(req) => req,
+                    Err(e) => {
+                        debug!("incoming WebTransport session failed: {e}");
+                        return;
+                    }
+                };
+                tracing::debug!(elapsed = ?session_started.elapsed(), "host accept loop: complete WebTransport handshake");
+
+                let request_accept_started = Instant::now();
+                let connection = match request
+                    .accept_with_headers([("sec-webtransport-http3-draft02", "1")])
+                    .await
+                {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        debug!("WebTransport request accept failed: {e}");
+                        return;
+                    }
+                };
+                tracing::debug!(elapsed = ?request_accept_started.elapsed(), "host accept loop: accept WebTransport request");
+
+                handle_connection(connection, incoming_tx, policy).await;
+            });
         }
     });
 

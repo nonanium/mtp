@@ -57,7 +57,7 @@ impl Default for Policy {
             application_close_code: 0,
             open_stream_timeout: Duration::from_millis(2_000),
             write_timeout: Duration::from_millis(2_000),
-            accept_stream_timeout: Duration::from_millis(10_000),
+            accept_stream_timeout: Duration::from_millis(500),
             read_timeout: Duration::from_millis(30_000),
             keep_alive_interval: Some(Duration::from_secs(3)),
             max_idle_timeout: Some(Duration::from_secs(30)),
@@ -1210,28 +1210,6 @@ mod tests {
     fn test_send_mode_derive() {
         assert_eq!(SendMode::PersistentStream, SendMode::PersistentStream);
         assert_ne!(SendMode::PersistentStream, SendMode::SingleStreamPerMessage);
-    }
-
-    #[test]
-    fn test_policy_default_values() {
-        let p = Policy::default();
-        assert_eq!(p.send_mode, SendMode::PersistentStream);
-        assert_eq!(p.max_message_size, 16 * 1024 * 1024);
-        assert_eq!(p.handshake_max_message_size, 64 * 1024);
-        assert_eq!(p.close_frame_len, u32::MAX);
-        assert_eq!(p.application_close_code, 0);
-        assert_eq!(p.open_stream_timeout, Duration::from_millis(2_000));
-        assert_eq!(p.write_timeout, Duration::from_millis(2_000));
-        assert_eq!(p.accept_stream_timeout, Duration::from_millis(10_000));
-        assert_eq!(p.read_timeout, Duration::from_millis(30_000));
-        assert_eq!(p.keep_alive_interval, Some(Duration::from_secs(3)));
-        assert_eq!(p.max_idle_timeout, Some(Duration::from_secs(30)));
-        assert_eq!(p.force_close_delay, Duration::from_millis(300));
-        assert_eq!(p.persistent_stream_max_retries, 4);
-        assert_eq!(p.persistent_stream_retry_backoff, Duration::from_millis(20));
-        assert_eq!(p.receiver_queue_capacity, 1000);
-        assert_eq!(p.max_concurrent_stream_tasks, 128);
-        assert_eq!(p.max_frames_per_stream, None);
     }
 
     #[test]

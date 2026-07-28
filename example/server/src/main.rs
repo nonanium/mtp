@@ -1,6 +1,7 @@
 mod clients;
 mod handlers;
 mod keys;
+mod metrics;
 mod tls;
 #[path = "web-server.rs"]
 mod web_server;
@@ -39,7 +40,7 @@ async fn handle_pipe_loopback(
         mtp::webserver::WebMtpSender,
         mtp::webserver::H3TransportReceiver,
     >,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<u64, Box<dyn std::error::Error>> {
     let pipe_id = request.id();
     println!("  [loopback] Accepting pipe {pipe_id} ...");
     let mut reader = request.accept().await?;
@@ -56,7 +57,7 @@ async fn handle_pipe_loopback(
     let copied = tokio::io::copy(&mut reader, &mut writer).await?;
     writer.finish_async().await?;
     println!("  [loopback] Pipe {pipe_id} complete ({copied} bytes)");
-    Ok(())
+    Ok(copied)
 }
 
 #[tokio::main]
@@ -119,6 +120,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
+    let metrics = std::sync::Arc::new(metrics::ServerMetrics::load(
+        "metrics/server_sessions.json",
+    ));
+
     println!("Starting integrated MTP web server on port 8080 ...");
 
     let config = HostConfig::new(
@@ -138,8 +143,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("TCP: HTTP/1.1 and HTTP/2");
     println!("UDP: HTTP/3 and WebTransport");
 
-    while let Some(conn) = host.accept().await? {
+    loop {
+        let conn = match host.accept().await {
+            Ok(Some(conn)) => conn,
+            Ok(None) => break,
+            Err(e) => {
+                let msg = e.to_string();
+                eprintln!("Accept error: {msg}");
+                metrics.record_accept_error();
+                metrics.save("metrics/server_sessions.json");
+                metrics.build_overview("metrics/server_overview.json");
+                continue;
+            }
+        };
         let decrypt_keyring = Arc::clone(&decrypt_keyring);
+        let metrics = Arc::clone(&metrics);
+        metrics.record_connection_version(&conn.version.to_string());
         tokio::spawn(async move {
             let desc = conn.description.as_deref().unwrap_or("(no description)");
             println!(
@@ -151,12 +170,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("Client ID: {}", conn.client_id);
 
+            let mut session = metrics.start_session(conn.client_id, desc.to_string());
+
             let tm: &TypeMap = conn.codec.registry().get(&conn.version).unwrap();
 
             println!("Waiting for messages / pipe requests ...");
             let mut pipe_open = true;
             let mut message_open = true;
-            let mut messages_received = 0_u64;
+            let mut exit_reason = "normal".to_string();
 
             while pipe_open || message_open {
                 let activity = tokio::time::timeout(CONNECTION_IDLE_TIMEOUT, async {
@@ -165,8 +186,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pipe_request = conn.receive_pipe(), if pipe_open => {
                             match pipe_request {
                                 Ok(request) => {
-                                    if let Err(error) = handle_pipe_loopback(&conn, request).await {
-                                        eprintln!("  [loopback] Pipe error: {error}");
+                                    match handle_pipe_loopback(&conn, request).await {
+                                        Ok(bytes) => {
+                                            session.record_pipe(bytes);
+                                        }
+                                        Err(error) => {
+                                            let msg = error.to_string();
+                                            if msg.contains("denied") {
+                                                session.record_pipe_denial();
+                                            }
+                                            eprintln!("  [loopback] Pipe error: {msg}");
+                                        }
                                     }
                                 }
                                 Err(mtp::common::CommunicationError::StreamClosed)
@@ -183,18 +213,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         message = conn.receive(), if message_open => {
                             match message {
                                 Ok(message) => {
-                                    messages_received += 1;
                                     println!("Received: {message}");
-                                    match handlers::process_and_respond(
+                                    let msg_start = std::time::Instant::now();
+                                    let result = handlers::process_and_respond(
                                         &message,
                                         tm,
                                         conn.client_public_key.as_ref(),
                                         &decrypt_keyring,
-                                    ) {
+                                    );
+                                    let latency = msg_start.elapsed();
+                                    let ok = result.is_ok();
+                                    session.record_message(latency, ok);
+
+                                    match result {
                                         Ok(response) => {
                                             println!("Sending: {response}");
                                             if let Err(error) = conn.sender.send(&response).await {
                                                 eprintln!("Send error: {error}");
+                                                session.record_send_error();
                                                 pipe_open = false;
                                                 message_open = false;
                                             }
@@ -220,16 +256,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await;
 
                 if activity.is_err() {
+                    exit_reason = "idle timeout".to_string();
                     println!("Connection idle timeout reached");
                     break;
                 }
-                if messages_received >= MAX_MESSAGES_PER_CONNECTION {
+                if session.messages_received() >= MAX_MESSAGES_PER_CONNECTION {
+                    exit_reason = "message limit".to_string();
                     println!("Connection message limit reached");
                     break;
                 }
             }
 
-            println!("Connection closed\n");
+            let record = session.finish(exit_reason);
+            println!(
+                "Connection closed (messages: {}, pipes: {}, duration: {:.1}s)\n",
+                record.messages_received,
+                record.pipes_handled,
+                record.duration_secs
+            );
+
+            metrics.save("metrics/server_sessions.json");
+            metrics.build_overview("metrics/server_overview.json");
         });
     }
 

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::fs;
 
@@ -12,7 +12,7 @@ pub async fn connect_or_register(
     mut config: ClientConfig,
     host_public_key: PublicKeyBundle,
     key_prefix: &str,
-) -> Result<(MTPConnection, Keyring), Box<dyn std::error::Error>> {
+) -> Result<(MTPConnection, Keyring, String, Duration), Box<dyn std::error::Error>> {
     let keyring_path = format!("{key_prefix}.mk");
     let id_path = format!("{key_prefix}.id");
 
@@ -30,12 +30,12 @@ pub async fn connect_or_register(
         config.client_id = client_id;
         let auth_started = Instant::now();
         let conn = MTPClient::auth_connect(config, &keyring, &host_public_key).await?;
+        let auth_duration = auth_started.elapsed();
         println!(
             "Authenticated (version {}) in {:?}",
-            conn.version,
-            auth_started.elapsed()
+            conn.version, auth_duration
         );
-        return Ok((conn, keyring));
+        return Ok((conn, keyring, "connect".into(), auth_duration));
     }
 
     println!("No existing keys found: registering new client");
@@ -52,12 +52,14 @@ pub async fn connect_or_register(
         sig_sk,
     );
 
+    let reg_started = Instant::now();
     let conn = MTPClient::auth_register(config, &keyring, &host_public_key).await?;
-    println!("Registered with ID: {}", conn.client_id);
+    let reg_duration = reg_started.elapsed();
+    println!("Registered with ID: {} in {:?}", conn.client_id, reg_duration);
 
     save_keyring_raw(&keyring, &keyring_path)?;
     fs::write(&id_path, conn.client_id.to_string()).await?;
     println!("Saved client keys -> {keyring_path}");
 
-    Ok((conn, keyring))
+    Ok((conn, keyring, "register".into(), reg_duration))
 }

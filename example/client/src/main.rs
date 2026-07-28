@@ -1,9 +1,11 @@
 mod auth;
+mod metrics;
 mod messages;
 mod pipes;
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use mtp::client::ClientConfig;
 use mtp::files::load_public_key_bundle;
@@ -36,6 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let mut client_metrics = metrics::ClientMetrics::load("metrics/client_sessions.json");
+
     println!("Connecting to 127.0.0.1:8080 ...");
 
     let config = ClientConfig::new("https://127.0.0.1:8080")
@@ -43,11 +47,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_description("MTP example client");
 
     let server_bundle = host_public_key.clone();
-    let (conn, keyring) = auth::connect_or_register(config, host_public_key, "client").await?;
-    messages::send_and_receive(&conn, &keyring, &server_bundle).await?;
+    let (conn, keyring, auth_method, auth_duration) =
+        match auth::connect_or_register(config, host_public_key, "client").await {
+            Ok(result) => result,
+            Err(e) => {
+                let mut builder = metrics::SessionBuilder::new("failed", Duration::from_secs(0));
+                builder.set_error(e.to_string());
+                client_metrics.record_session(builder.build());
+                client_metrics.save("metrics/client_sessions.json");
+                client_metrics.build_overview("metrics/client_overview.json");
+                return Err(e);
+            }
+        };
+
+    let mut builder = metrics::SessionBuilder::new(&auth_method, auth_duration);
+
+    let roundtrip = messages::send_and_receive(&conn, &keyring, &server_bundle).await?;
+    builder.set_message_roundtrip(roundtrip);
 
     println!("\n--- Pipe demo ---");
-    pipes::run_pipe_demo(&conn, 1).await?;
+    let pipe_results = pipes::run_pipe_demo(&conn, 1).await?;
+    for result in &pipe_results {
+        builder.add_pipe_result(result.clone());
+    }
+
+    let session_record = builder.build();
+    println!(
+        "\nSession {} complete: auth={}ms, msg_roundtrip={}ms, pipes={} results, pipe_bytes={}",
+        session_record.session_id,
+        session_record.auth_duration_ms,
+        session_record.message_roundtrip_ms,
+        session_record.pipe_results.len(),
+        session_record.total_pipe_bytes,
+    );
+
+    client_metrics.record_session(session_record);
+    client_metrics.save("metrics/client_sessions.json");
+    client_metrics.build_overview("metrics/client_overview.json");
 
     conn.sender.close().await;
     println!("\nDone");

@@ -3,13 +3,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, Instant};
 
+use crate::metrics::PipeResult;
+
 pub async fn run_pipe_demo(
     conn: &MTPConnection,
     iterations: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<PipeResult>, Box<dyn std::error::Error>> {
     let sizes = [64, 256, 1024, 4096];
     let mut all_elapsed = Vec::with_capacity(sizes.len() * iterations);
     let mut all_data_only = Vec::with_capacity(sizes.len() * iterations);
+    let mut pipe_results = Vec::with_capacity(sizes.len() * iterations);
 
     for (i, &size) in sizes.iter().enumerate() {
         let mut size_elapsed = Vec::with_capacity(iterations);
@@ -97,6 +100,14 @@ pub async fn run_pipe_demo(
                 data_only_elapsed.as_secs_f64() * 1000.0,
             );
 
+            pipe_results.push(PipeResult {
+                size,
+                iteration: run,
+                total_ms: overall_elapsed.as_secs_f64() * 1000.0,
+                data_only_ms: data_only_elapsed.as_secs_f64() * 1000.0,
+                bytes_matched: matches,
+            });
+
             size_elapsed.push(overall_elapsed);
             size_data_only.push(data_only_elapsed);
             all_elapsed.push(overall_elapsed);
@@ -123,7 +134,7 @@ pub async fn run_pipe_demo(
         all_elapsed.len()
     );
 
-    Ok(())
+    Ok(pipe_results)
 }
 
 /// Helper: average a slice of Durations without overflowing.
