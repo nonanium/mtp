@@ -1,7 +1,10 @@
-#[cfg(not(feature = "crypto"))]
-use mtp_codec::{Version, registry::{Registry, VersionedCodec}};
 #[cfg(feature = "crypto")]
 use mtp_codec::registry::Registry;
+#[cfg(not(feature = "crypto"))]
+use mtp_codec::{
+    Version,
+    registry::{Registry, VersionedCodec},
+};
 use mtp_transport::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
@@ -136,9 +139,7 @@ impl HandshakeContext {
         #[cfg(feature = "crypto")]
         {
             Ok(Some(self.connection_from_handshake_result(
-                sender,
-                receiver,
-                result,
+                sender, receiver, result,
             )))
         }
         #[cfg(not(feature = "crypto"))]

@@ -3,6 +3,7 @@ use mtp_codec::{CommunicationType, DataType, DataValue};
 use mtp_codec::{CommunicationValue, Version, registry::VersionedCodec};
 use mtp_common::CommunicationError;
 use std::net::SocketAddr;
+#[cfg(feature = "pipes")]
 use std::sync::Arc;
 #[cfg(feature = "pipes")]
 use tokio::sync::{Mutex, mpsc};
@@ -11,6 +12,7 @@ use tokio::sync::{Mutex, mpsc};
 use crate::error::random_client_id;
 #[cfg(feature = "pipes")]
 use crate::pipe::{PipeDispatcher, PipeReceiver, PipeRequest, PipeSender, run_dispatcher};
+#[cfg(feature = "pipes")]
 use mtp_transport::Policy;
 
 mod connection_capability {
@@ -161,6 +163,9 @@ where
     }
 
     /// Construct an MTP connection with an explicit policy for pipe dispatch.
+    // The shared transport constructor keeps its argument order aligned with
+    // `from_transport_parts_with_remote_addr`; policy is required only here.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_transport_parts_with_policy(
         version: Version,
         codec: VersionedCodec,
@@ -236,35 +241,6 @@ impl<S, R, P> MTPConnection<S, R, P> {
         path: String,
         description: Option<String>,
         remote_addr: Option<SocketAddr>,
-    ) -> Self {
-        Self {
-            version,
-            codec,
-            sender,
-            receiver,
-            path,
-            remote_addr,
-            description,
-            _pipe_stream: std::marker::PhantomData,
-            _dispatcher_task: tokio::spawn(async {}),
-            #[cfg(feature = "crypto")]
-            auth_state: crate::error::AuthState::Unauthenticated,
-            #[cfg(feature = "crypto")]
-            client_id: random_client_id(),
-            #[cfg(feature = "crypto")]
-            client_public_key: None,
-        }
-    }
-
-    pub fn from_transport_parts_with_policy(
-        version: Version,
-        codec: VersionedCodec,
-        sender: S,
-        receiver: R,
-        path: String,
-        description: Option<String>,
-        remote_addr: Option<SocketAddr>,
-        _policy: Arc<Policy>,
     ) -> Self {
         Self {
             version,

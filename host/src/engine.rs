@@ -33,8 +33,7 @@ pub trait HandshakeSender: Send + Sync {
 pub trait HandshakeReceiver: Send + Sync {
     fn receive(
         &self,
-    ) -> impl std::future::Future<Output = Result<CommunicationValue, CommunicationError>>
-           + Send;
+    ) -> impl std::future::Future<Output = Result<CommunicationValue, CommunicationError>> + Send;
 }
 
 /// The result of a successful handshake, containing everything needed to
@@ -136,7 +135,10 @@ impl HandshakeEngine {
             }
         };
 
-        let negotiated = match self.registry.negotiate(std::slice::from_ref(&client_version)) {
+        let negotiated = match self
+            .registry
+            .negotiate(std::slice::from_ref(&client_version))
+        {
             Some(v) => v,
             None => {
                 send_rejection_generic(
@@ -300,24 +302,23 @@ impl HandshakeEngine {
                 _ => 0,
             };
 
-            if cid > 0 {
-                if let Some(bundle) =
+            if cid > 0
+                && let Some(bundle) =
                     (self.config.get_existing_client)(cid, description.clone()).await
-                {
-                    return self
-                        .complete_auth_handshake(
-                            sender,
-                            receiver,
-                            Flow::Login { id: cid, bundle },
-                            CommunicationType::IdentificationResponse,
-                            &negotiated,
-                            &codec,
-                            description,
-                            version_str,
-                            client_version,
-                        )
-                        .await;
-                }
+            {
+                return self
+                    .complete_auth_handshake(
+                        sender,
+                        receiver,
+                        Flow::Login { id: cid, bundle },
+                        CommunicationType::IdentificationResponse,
+                        &negotiated,
+                        &codec,
+                        description,
+                        version_str,
+                        client_version,
+                    )
+                    .await;
             }
 
             // Unknown or zero ID: fall back to guest
@@ -634,8 +635,8 @@ impl HandshakeEngine {
                 DataValue::UnsignedNumber(client_nonce),
             )
             .add_typed_default(DataType::Signature, DataValue::Bytes(host_sig));
-        response = response
-            .add_typed_default(DataType::Version, DataValue::Str(negotiated.to_string()));
+        response =
+            response.add_typed_default(DataType::Version, DataValue::Str(negotiated.to_string()));
         if pq_enabled {
             response =
                 response.add_typed_default(DataType::PqSignature, DataValue::Bytes(host_pq_sig));
@@ -722,19 +723,15 @@ fn extract_register_bundle(
     msg: &CommunicationValue,
 ) -> Result<mtp_crypto::PublicKeyBundle, AcceptError> {
     match msg.get_data(DataType::PublicKeys) {
-        DataValue::Bytes(b) => mtp_crypto::PublicKeyBundle::from_bytes(b).map_err(|_| {
-            AcceptError::AuthenticationFailed("invalid public key bundle".into())
-        }),
+        DataValue::Bytes(b) => mtp_crypto::PublicKeyBundle::from_bytes(b)
+            .map_err(|_| AcceptError::AuthenticationFailed("invalid public key bundle".into())),
         _ => Err(AcceptError::AuthenticationFailed(
             "missing public keys".into(),
         )),
     }
 }
 
-async fn send_rejection_generic<S: HandshakeSender>(
-    sender: &S,
-    reason: RejectionReason,
-) {
+async fn send_rejection_generic<S: HandshakeSender>(sender: &S, reason: RejectionReason) {
     let response = match &reason {
         RejectionReason::BadVersion { supported_versions } => {
             CommunicationValue::new(CommunicationType::ErrorBadVersion)
@@ -815,7 +812,9 @@ impl<C: mtp_transport::TransportConnection> HandshakeSender for mtp_transport::G
     }
 }
 
-impl<C: mtp_transport::TransportConnection> HandshakeReceiver for mtp_transport::GenericReceiver<C> {
+impl<C: mtp_transport::TransportConnection> HandshakeReceiver
+    for mtp_transport::GenericReceiver<C>
+{
     fn receive(
         &self,
     ) -> impl std::future::Future<Output = Result<CommunicationValue, CommunicationError>> + Send

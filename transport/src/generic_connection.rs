@@ -198,7 +198,9 @@ impl<C: TransportConnection> GenericReceiver<C> {
         let (pipe_tx, pipe_rx) = mpsc::channel(policy.receiver_queue_capacity);
         let ping_sender: Arc<RwLock<Option<GenericSender<C>>>> = Arc::new(RwLock::new(None));
         let max_message_size = Arc::new(AtomicU64::new(
-            policy.handshake_max_message_size.min(policy.max_message_size),
+            policy
+                .handshake_max_message_size
+                .min(policy.max_message_size),
         ));
         let task_ping_sender = ping_sender.clone();
         let task_connection = connection.clone();
@@ -214,8 +216,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
             loop {
                 // Backpressure: stop accepting new streams if the output queue is full.
                 #[cfg(feature = "pipes")]
-                let cap_full = task_accept_task_tx.capacity() == 0
-                    || task_accept_task_pipe_tx.capacity() == 0;
+                let cap_full =
+                    task_accept_task_tx.capacity() == 0 || task_accept_task_pipe_tx.capacity() == 0;
                 #[cfg(not(feature = "pipes"))]
                 let cap_full = task_accept_task_tx.capacity() == 0;
 
@@ -269,10 +271,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                         {
                             let close_error = CommunicationError::StreamError;
                             let _ = tx.send(Err(close_error.clone())).await;
-                            connection.close(
-                                policy.application_close_code,
-                                b"max frames exceeded",
-                            );
+                            connection.close(policy.application_close_code, b"max frames exceeded");
                             break;
                         }
                         let mut len = [0; 4];
@@ -291,12 +290,12 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                 break;
                             }
                             Err(_) => {
-                                tracing::warn!("MTP receive stream timed out while reading frame header");
-                                let _ = tx.send(Err(CommunicationError::StreamError)).await;
-                                connection.close(
-                                    policy.application_close_code,
-                                    b"frame header timeout",
+                                tracing::warn!(
+                                    "MTP receive stream timed out while reading frame header"
                                 );
+                                let _ = tx.send(Err(CommunicationError::StreamError)).await;
+                                connection
+                                    .close(policy.application_close_code, b"frame header timeout");
                                 break;
                             }
                         }
@@ -308,10 +307,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                         if len as u64 > frame_limit {
                             tracing::warn!(len, "MTP receive stream frame is too large");
                             let _ = tx.send(Err(CommunicationError::MessageTooLarge)).await;
-                            connection.close(
-                                policy.application_close_code,
-                                b"frame too large",
-                            );
+                            connection.close(policy.application_close_code, b"frame too large");
                             break;
                         }
                         let target_len = len as usize;
@@ -322,10 +318,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                 "MTP receive stream could not reserve frame body"
                             );
                             let _ = tx.send(Err(CommunicationError::MessageTooLarge)).await;
-                            connection.close(
-                                policy.application_close_code,
-                                b"frame allocation failed",
-                            );
+                            connection
+                                .close(policy.application_close_code, b"frame allocation failed");
                             break;
                         }
                         while body.len() < target_len {
@@ -345,10 +339,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                     "MTP receive stream failed while reading frame body"
                                 );
                                 let _ = tx.send(Err(CommunicationError::StreamError)).await;
-                                connection.close(
-                                    policy.application_close_code,
-                                    b"frame body read error",
-                                );
+                                connection
+                                    .close(policy.application_close_code, b"frame body read error");
                                 break;
                             }
                             body.extend_from_slice(&chunk[..chunk_len]);
@@ -361,12 +353,10 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             Ok(message) => message,
                             Err(_) => {
                                 tracing::warn!("MTP receive stream contained an invalid frame");
-                                let _ = tx.send(Err(CommunicationError::ParseCommunicationValue))
+                                let _ = tx
+                                    .send(Err(CommunicationError::ParseCommunicationValue))
                                     .await;
-                                connection.close(
-                                    policy.application_close_code,
-                                    b"invalid frame",
-                                );
+                                connection.close(policy.application_close_code, b"invalid frame");
                                 break;
                             }
                         };

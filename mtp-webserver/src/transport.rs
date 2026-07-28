@@ -267,17 +267,13 @@ pub(crate) async fn accept_web_connection(
     send_pongs: bool,
     policy: Policy,
     host_config: Arc<HostConfig>,
-    auth_semaphore: Arc<tokio::sync::Semaphore>,
+    _auth_semaphore: Arc<tokio::sync::Semaphore>,
 ) -> Result<WebMTPConnection, AcceptError> {
     #[cfg(feature = "crypto")]
     {
-        let permit = auth_semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| {
-                AcceptError::AuthenticationFailed("authentication service stopped".into())
-            })?;
+        let permit = _auth_semaphore.clone().acquire_owned().await.map_err(|_| {
+            AcceptError::AuthenticationFailed("authentication service stopped".into())
+        })?;
         let result = tokio::time::timeout(
             host_config.auth_timeout,
             accept_web_connection_inner(session, path, quinn, send_pongs, policy, host_config),
@@ -327,8 +323,20 @@ async fn accept_web_connection_inner(
     if send_pongs {
         receiver.respond_to_pings(sender.clone()).await;
     }
+    #[cfg(feature = "pipes")]
+    let connection: WebMTPConnection = mtp_host::MTPConnection::from_transport_parts_with_policy(
+        negotiated,
+        codec,
+        sender,
+        receiver,
+        path,
+        description.clone(),
+        Some(remote_addr),
+        policy,
+    );
+    #[cfg(not(feature = "pipes"))]
     let connection: WebMTPConnection =
-        mtp_host::MTPConnection::from_transport_parts_with_policy(
+        mtp_host::MTPConnection::from_transport_parts_with_remote_addr(
             negotiated,
             codec,
             sender,
@@ -336,12 +344,11 @@ async fn accept_web_connection_inner(
             path,
             description.clone(),
             Some(remote_addr),
-            policy,
         );
     #[cfg(not(feature = "crypto"))]
     {
         connection.receiver.set_max_message_size(max_message_size);
-        return Ok(connection);
+        Ok(connection)
     }
     #[cfg(feature = "crypto")]
     let mut connection = connection;
@@ -364,13 +371,14 @@ async fn accept_web_connection_inner(
 
         // Unauthenticated: send accepted response with guest ID (or ID 0)
         if !is_allow_auth && !is_force_auth {
-            let response = mtp_codec::CommunicationValue::new(CommunicationType::IdentificationResponse)
-                .add_typed_default(DataType::Connected, DataValue::BoolTrue)
-                .add_typed_default(
-                    DataType::Version,
-                    DataValue::Str(connection.version.to_string()),
-                )
-                .add_typed_default(DataType::Id, DataValue::UnsignedNumber(0));
+            let response =
+                mtp_codec::CommunicationValue::new(CommunicationType::IdentificationResponse)
+                    .add_typed_default(DataType::Connected, DataValue::BoolTrue)
+                    .add_typed_default(
+                        DataType::Version,
+                        DataValue::Str(connection.version.to_string()),
+                    )
+                    .add_typed_default(DataType::Id, DataValue::UnsignedNumber(0));
             connection
                 .sender
                 .send(&response)
@@ -405,16 +413,31 @@ async fn accept_web_connection_inner(
                 if let Some(bundle) =
                     (_host_config.get_existing_client)(id, description.clone()).await
                 {
-                    (id, Some(bundle), CommunicationType::IdentificationResponse, false)
+                    (
+                        id,
+                        Some(bundle),
+                        CommunicationType::IdentificationResponse,
+                        false,
+                    )
                 } else {
                     // Unknown client: fall back to guest
                     let guest_id = H3TransportConnection::assign_guest_id(&_host_config).await?;
-                    (guest_id, None, CommunicationType::IdentificationResponse, true)
+                    (
+                        guest_id,
+                        None,
+                        CommunicationType::IdentificationResponse,
+                        true,
+                    )
                 }
             } else {
                 // ID zero or missing: fall back to guest
                 let guest_id = H3TransportConnection::assign_guest_id(&_host_config).await?;
-                (guest_id, None, CommunicationType::IdentificationResponse, true)
+                (
+                    guest_id,
+                    None,
+                    CommunicationType::IdentificationResponse,
+                    true,
+                )
             }
         } else if first_type_opt == reg_type {
             // Registration: always authenticate (both AllowAuth and ForceAuth)
@@ -442,7 +465,12 @@ async fn accept_web_connection_inner(
             let bundle = (_host_config.get_existing_client)(id, description.clone())
                 .await
                 .ok_or_else(|| AcceptError::AuthenticationFailed("unknown client id".into()))?;
-            (id, Some(bundle), CommunicationType::IdentificationResponse, false)
+            (
+                id,
+                Some(bundle),
+                CommunicationType::IdentificationResponse,
+                false,
+            )
         } else {
             return Err(AcceptError::AuthenticationFailed(
                 "unexpected authentication message".into(),
@@ -453,10 +481,14 @@ async fn accept_web_connection_inner(
         // Guest path: skip challenge/response, send accepted with guest ID
         if is_guest {
             let guest_id = client_id;
-            let response = mtp_codec::CommunicationValue::new(CommunicationType::IdentificationResponse)
-                .add_typed_default(DataType::Connected, DataValue::BoolTrue)
-                .add_typed_default(DataType::Version, DataValue::Str(connection.version.to_string()))
-                .add_typed_default(DataType::Id, DataValue::UnsignedNumber(guest_id as u128));
+            let response =
+                mtp_codec::CommunicationValue::new(CommunicationType::IdentificationResponse)
+                    .add_typed_default(DataType::Connected, DataValue::BoolTrue)
+                    .add_typed_default(
+                        DataType::Version,
+                        DataValue::Str(connection.version.to_string()),
+                    )
+                    .add_typed_default(DataType::Id, DataValue::UnsignedNumber(guest_id as u128));
             connection
                 .sender
                 .send(&response)
@@ -513,14 +545,11 @@ async fn accept_web_connection_inner(
             let host_config = _host_config.clone();
             let pq_signer = host_pq_signer.clone();
             async move {
-                let signer =
-                    Ed25519Signer::new(&host_config.host_keyring.sig_cl_secret_key)
-                        .map_err(|e| AcceptError::AuthenticationFailed(e.to_string()))?;
+                let signer = Ed25519Signer::new(&host_config.host_keyring.sig_cl_secret_key)
+                    .map_err(|e| AcceptError::AuthenticationFailed(e.to_string()))?;
                 if let Some(pq_signer) = pq_signer {
                     mtp_crypto::sign_parallel::sign_dual_parallel_shared_pq(
-                        signer,
-                        pq_signer,
-                        payload,
+                        signer, pq_signer, payload,
                     )
                     .await
                     .map_err(|e| AcceptError::AuthenticationFailed(e.to_string()))
@@ -535,21 +564,20 @@ async fn accept_web_connection_inner(
         let sign_challenge_started = Instant::now();
         let (sig, pq_sig) = host_sign(auth::challenge_payload(client_id, server_challenge)).await?;
         tracing::debug!(elapsed = ?sign_challenge_started.elapsed(), "web authentication handshake: sign challenge");
-        let mut challenge =
-            mtp_codec::CommunicationValue::new(CommunicationType::Challenge)
-                .add_typed_default(
-                    DataType::ServerNonce,
-                    DataValue::UnsignedNumber(server_challenge),
-                )
-                .add_typed_default(DataType::Signature, DataValue::Bytes(sig))
-                .add_typed_default(
-                    DataType::RequirePq,
-                    if _host_config.require_pq {
-                        DataValue::BoolTrue
-                    } else {
-                        DataValue::BoolFalse
-                    },
-                );
+        let mut challenge = mtp_codec::CommunicationValue::new(CommunicationType::Challenge)
+            .add_typed_default(
+                DataType::ServerNonce,
+                DataValue::UnsignedNumber(server_challenge),
+            )
+            .add_typed_default(DataType::Signature, DataValue::Bytes(sig))
+            .add_typed_default(
+                DataType::RequirePq,
+                if _host_config.require_pq {
+                    DataValue::BoolTrue
+                } else {
+                    DataValue::BoolFalse
+                },
+            );
         if pq_enabled {
             challenge =
                 challenge.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_sig));
@@ -579,8 +607,7 @@ async fn accept_web_connection_inner(
             }
         };
         tracing::debug!(elapsed = ?receive_proof_started.elapsed(), "web authentication handshake: receive client proof");
-        if Some(proof.get_type()) != CommunicationType::ChallengeResponse.try_to_id(&tm)
-        {
+        if Some(proof.get_type()) != CommunicationType::ChallengeResponse.try_to_id(&tm) {
             return Err(AcceptError::AuthenticationFailed(
                 "missing challenge response".into(),
             ));
@@ -605,11 +632,7 @@ async fn accept_web_connection_inner(
             DataValue::Bytes(bytes) => bytes.as_slice(),
             _ => &[],
         };
-        let payload = if first.get_type()
-            == CommunicationType::Register
-                .try_to_id(&tm)
-                .unwrap()
-        {
+        let payload = if first.get_type() == CommunicationType::Register.try_to_id(&tm).unwrap() {
             auth::register_proof_payload(
                 &version.to_string(),
                 &client_bundle.as_bytes(),
@@ -643,9 +666,13 @@ async fn accept_web_connection_inner(
         tracing::debug!(elapsed = ?verify_proof_started.elapsed(), "web authentication handshake: verify client proof");
 
         if !proof_ok {
-            let rejection = mtp_codec::CommunicationValue::new(CommunicationType::IdentificationResponse)
-                .add_typed_default(DataType::Connected, DataValue::BoolFalse)
-                .add_typed_default(DataType::ErrorMessage, DataValue::Str("client proof signature invalid".into()));
+            let rejection =
+                mtp_codec::CommunicationValue::new(CommunicationType::IdentificationResponse)
+                    .add_typed_default(DataType::Connected, DataValue::BoolFalse)
+                    .add_typed_default(
+                        DataType::ErrorMessage,
+                        DataValue::Str("client proof signature invalid".into()),
+                    );
             let _ = connection.sender.send(&rejection).await;
             connection.sender.close();
             return Err(AcceptError::AuthenticationFailed(
@@ -698,5 +725,3 @@ async fn accept_web_connection_inner(
         Ok(connection)
     }
 }
-
-

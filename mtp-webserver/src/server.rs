@@ -352,9 +352,11 @@ fn build_endpoint(
             transport.keep_alive_interval(Some(keep_alive));
         }
         if let Some(idle_timeout) = config.policy.max_idle_timeout {
-            transport.max_idle_timeout(Some(idle_timeout.try_into().map_err(
-                |error| CommunicationError::Other(format!("{error}")),
-            )?));
+            transport.max_idle_timeout(Some(
+                idle_timeout
+                    .try_into()
+                    .map_err(|error| CommunicationError::Other(format!("{error}")))?,
+            ));
         }
         Arc::new(transport)
     });
