@@ -1039,7 +1039,8 @@ impl Receiver {
 
     #[instrument(skip(self), level = "trace")]
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
-        if self.inner.handle.is_closed() {
+        let mut close_rx = self.inner.handle.subscribe_close();
+        if close_rx.borrow().is_some() {
             return Err(self
                 .inner
                 .handle
@@ -1050,7 +1051,14 @@ impl Receiver {
         #[cfg(feature = "pipes")]
         {
             let mut rx = self.inner.msg_rx.lock().await;
-            match rx.recv().await {
+            let result = tokio::select! {
+                message = rx.recv() => message,
+                _ = close_rx.changed() => return Err(close_rx
+                    .borrow()
+                    .clone()
+                    .unwrap_or(CommunicationError::StreamClosed)),
+            };
+            match result {
                 Some(Ok(msg)) => {
                     self.inner.queue_notify.notify_one();
                     Ok(msg)
@@ -1066,7 +1074,14 @@ impl Receiver {
         #[cfg(not(feature = "pipes"))]
         {
             let mut rx = self.inner.rx.lock().await;
-            match rx.recv().await {
+            let result = tokio::select! {
+                message = rx.recv() => message,
+                _ = close_rx.changed() => return Err(close_rx
+                    .borrow()
+                    .clone()
+                    .unwrap_or(CommunicationError::StreamClosed)),
+            };
+            match result {
                 Some(result) => {
                     self.inner.queue_notify.notify_one();
                     result
