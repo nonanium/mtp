@@ -260,17 +260,9 @@ fn client_config_from_roots(
 
     tls_config.alpn_protocols = vec![b"h3".to_vec()];
 
-    let transport_config = wtransport::config::QuicTransportConfig::default();
-    #[cfg(target_os = "android")]
-    let transport_config = {
-        let mut transport_config = transport_config;
-        transport_config.enable_segmentation_offload(false);
-        transport_config
-    };
-
     Ok(WTransportClientConfig::builder()
         .with_bind_default()
-        .with_custom_tls_and_transport(tls_config, transport_config)
+        .with_custom_tls(tls_config)
         .keep_alive_interval(policy.keep_alive_interval)
         .max_idle_timeout(policy.max_idle_timeout)
         .map_err(|e| CommunicationError::Other(e.to_string()))?
