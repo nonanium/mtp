@@ -7,27 +7,6 @@ use wtransport::{ClientConfig as WTransportClientConfig, Endpoint};
 
 use crate::{ConnectionHandle, Policy, Receiver, Sender};
 
-#[cfg(target_os = "android")]
-#[derive(Debug)]
-struct AndroidDnsResolver;
-
-#[cfg(target_os = "android")]
-impl wtransport::config::DnsResolver for AndroidDnsResolver {
-    fn resolve(&self, host: &str) -> std::pin::Pin<Box<dyn wtransport::config::DnsLookupFuture>> {
-        let host = host.to_string();
-        Box::pin(async move {
-            let mut fallback = None;
-            for address in tokio::net::lookup_host(host).await? {
-                if address.is_ipv4() {
-                    return Ok(Some(address));
-                }
-                fallback.get_or_insert(address);
-            }
-            Ok(fallback)
-        })
-    }
-}
-
 #[cfg(feature = "insecure-tls")]
 mod noop_verifier {
     use rustls::{
@@ -289,13 +268,11 @@ fn client_config_from_roots(
         transport_config
     };
 
-    let config = WTransportClientConfig::builder()
+    Ok(WTransportClientConfig::builder()
         .with_bind_default()
         .with_custom_tls_and_transport(tls_config, transport_config)
         .keep_alive_interval(policy.keep_alive_interval)
         .max_idle_timeout(policy.max_idle_timeout)
-        .map_err(|e| CommunicationError::Other(e.to_string()))?;
-    #[cfg(target_os = "android")]
-    let config = config.dns_resolver(AndroidDnsResolver);
-    Ok(config.build())
+        .map_err(|e| CommunicationError::Other(e.to_string()))?
+        .build())
 }
