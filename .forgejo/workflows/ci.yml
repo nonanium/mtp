@@ -18,7 +18,7 @@ jobs:
         run: nix profile add nixpkgs#nodejs_24
 
       - name: Checkout
-        uses: https://data.forgejo.org/actions/checkout@v4
+        uses: https://data.forgejo.org/actions/checkout@v7
 
       - name: Run checks
         run: |
