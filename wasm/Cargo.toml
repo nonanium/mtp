@@ -21,7 +21,7 @@ wasm-tracing = "2.1"
 
 hex = "0.4"
 
-getrandom = { version = "0.2.17", features = ["js"] }
+getrandom = { version = "0.4.0", features = ["js"] }
 getrandom-v04 = { package = "getrandom", version = "0.4.3", features = ["wasm_js"] }
 
 mtp-common = { version = "0.2.0", path = "../common" }

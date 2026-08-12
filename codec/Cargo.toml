@@ -7,7 +7,7 @@ edition = "2024"
 mtp-type-map = { version = "0.2.0", path = "../type-map" }
 mtp-common = { version = "0.2.0", path = "../common" }
 mtp-crypto = { version = "0.2.0", path = "../crypto", optional = true }
-base64 = "0.22"
+base64 = "0.23"
 byteorder = "1.5"
 rand = { version = "0.10.1", features = ["std", "std_rng"] }
 thiserror = "2.0.18"

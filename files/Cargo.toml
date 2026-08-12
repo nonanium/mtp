@@ -10,7 +10,7 @@ mtp-crypto = { version = "0.2.0", path = "../crypto", default-features = false, 
 argon2 = "0.5"
 rand = "0.10.2"
 
-thiserror = "1"
+thiserror = "2"
 zeroize = "1.9"
 
 [features]
