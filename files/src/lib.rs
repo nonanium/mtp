@@ -13,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mtp_crypto::{AeadDecrypt, AeadEncrypt, ChaCha20Poly1305, derive_encryption_key};
+use mtp_crypto::{AeadDecrypt, AeadEncrypt, ChaCha20Poly1305};
 use rand::RngExt;
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -29,11 +29,15 @@ pub const BUNDLE_EXTENSION: &str = "mpkb";
 const KEYRING_MAGIC: [u8; 4] = *b"MTMK"; /* Methanium Keyring */
 const BUNDLE_MAGIC: [u8; 4] = *b"MPKB"; /* Methanium Public Key Bundle */
 const RAW_FORMAT_VERSION: u8 = 1;
-const PROTECTED_FORMAT_VERSION: u8 = 2;
+const PROTECTED_FORMAT_VERSION: u8 = 3;
 const BUNDLE_FORMAT_VERSION: u8 = 1;
 const HEADER_LEN: usize = 4 + 1;
 const SALT_LEN: usize = 32;
-const KEYRING_KDF_CONTEXT: &[u8] = b"mtp-keyring-at-rest-v2";
+const KDF_ID_ARGON2ID: u8 = 1;
+const ARGON2_MEMORY_KIB: u32 = 19 * 1024;
+const ARGON2_ITERATIONS: u32 = 2;
+const ARGON2_LANES: u32 = 1;
+const PROTECTED_PARAMS_LEN: usize = 1 + 4 + 4 + 4 + SALT_LEN;
 
 #[derive(Error, Debug)]
 pub enum FileError {
@@ -145,7 +149,39 @@ fn write_secret_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Save a keyring encrypted with XChaCha20-Poly1305 under an HKDF-derived key.
+fn derive_key(
+    passphrase: &[u8],
+    salt: &[u8],
+    memory_kib: u32,
+    iterations: u32,
+    lanes: u32,
+) -> Result<Zeroizing<[u8; 32]>, FileError> {
+    if salt.len() != SALT_LEN
+        || !(8 * 1024..=256 * 1024).contains(&memory_kib)
+        || !(1..=10).contains(&iterations)
+        || !(1..=8).contains(&lanes)
+    {
+        return Err(FileError::Crypto(CryptoError::KdfError));
+    }
+    let params = argon2::Params::new(memory_kib, iterations, lanes, Some(32))
+        .map_err(|_| FileError::Crypto(CryptoError::KdfError))?;
+    let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut key = Zeroizing::new([0u8; 32]);
+    argon
+        .hash_password_into(passphrase, salt, key.as_mut())
+        .map_err(|_| FileError::Crypto(CryptoError::KdfError))?;
+    Ok(key)
+}
+
+fn protected_header_aad(parameters: &[u8]) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(HEADER_LEN + parameters.len());
+    aad.extend_from_slice(&KEYRING_MAGIC);
+    aad.push(PROTECTED_FORMAT_VERSION);
+    aad.extend_from_slice(parameters);
+    aad
+}
+
+/// Save a keyring encrypted with XChaCha20-Poly1305 under Argon2id.
 pub fn save_keyring(
     keyring: &Keyring,
     path: impl AsRef<Path>,
@@ -156,16 +192,24 @@ pub fn save_keyring(
     }
     let mut salt = [0u8; SALT_LEN];
     rand::rng().fill(&mut salt);
-    let key = Zeroizing::new(derive_encryption_key(
+    let key = derive_key(
         passphrase,
         &salt,
-        KEYRING_KDF_CONTEXT,
-    )?);
+        ARGON2_MEMORY_KIB,
+        ARGON2_ITERATIONS,
+        ARGON2_LANES,
+    )?;
+    let mut parameters = Vec::with_capacity(PROTECTED_PARAMS_LEN);
+    parameters.push(KDF_ID_ARGON2ID);
+    parameters.extend_from_slice(&ARGON2_MEMORY_KIB.to_be_bytes());
+    parameters.extend_from_slice(&ARGON2_ITERATIONS.to_be_bytes());
+    parameters.extend_from_slice(&ARGON2_LANES.to_be_bytes());
+    parameters.extend_from_slice(&salt);
     let cipher = ChaCha20Poly1305::new(*key);
     let plaintext = keyring.to_bytes();
-    let encrypted = cipher.encrypt(&plaintext, &KEYRING_MAGIC)?;
-    let mut payload = Vec::with_capacity(SALT_LEN + encrypted.len());
-    payload.extend_from_slice(&salt);
+    let encrypted = cipher.encrypt(&plaintext, &protected_header_aad(&parameters))?;
+    let mut payload = Vec::with_capacity(PROTECTED_PARAMS_LEN + encrypted.len());
+    payload.extend_from_slice(&parameters);
     payload.extend_from_slice(&encrypted);
     let bytes = encode(KEYRING_MAGIC, PROTECTED_FORMAT_VERSION, &payload);
     write_secret_atomic(path.as_ref(), &bytes)?;
@@ -187,23 +231,33 @@ pub fn load_keyring(path: impl AsRef<Path>, passphrase: &[u8]) -> Result<Keyring
             found: version,
         });
     }
-    let salt = payload
-        .get(..SALT_LEN)
-        .ok_or(FileError::Truncated(bytes.len()))?;
+    if payload.len() < PROTECTED_PARAMS_LEN {
+        return Err(FileError::Truncated(bytes.len()));
+    }
+    if payload[0] != KDF_ID_ARGON2ID {
+        return Err(FileError::UnsupportedVersion {
+            kind: "keyring KDF",
+            found: payload[0],
+        });
+    }
+    let memory_kib = u32::from_be_bytes(payload[1..5].try_into().unwrap());
+    let iterations = u32::from_be_bytes(payload[5..9].try_into().unwrap());
+    let lanes = u32::from_be_bytes(payload[9..13].try_into().unwrap());
+    let salt = &payload[13..PROTECTED_PARAMS_LEN];
     let encrypted = payload
-        .get(SALT_LEN..)
+        .get(PROTECTED_PARAMS_LEN..)
         .ok_or(FileError::Truncated(bytes.len()))?;
-    let key = Zeroizing::new(derive_encryption_key(
-        passphrase,
-        salt,
-        KEYRING_KDF_CONTEXT,
-    )?);
+    let key = derive_key(passphrase, salt, memory_kib, iterations, lanes)?;
     let cipher = ChaCha20Poly1305::new(*key);
-    let plaintext = Zeroizing::new(cipher.decrypt(encrypted, &KEYRING_MAGIC)?);
+    let plaintext = Zeroizing::new(cipher.decrypt(
+        encrypted,
+        &protected_header_aad(&payload[..PROTECTED_PARAMS_LEN]),
+    )?);
     Ok(Keyring::from_bytes(&plaintext)?)
 }
 
 /// Explicitly save the legacy plaintext format for tests and development.
+#[cfg(any(test, feature = "raw"))]
 pub fn save_keyring_raw(keyring: &Keyring, path: impl AsRef<Path>) -> Result<(), FileError> {
     let payload = keyring.to_bytes();
     let bytes = Zeroizing::new(encode(KEYRING_MAGIC, RAW_FORMAT_VERSION, &payload));
@@ -212,6 +266,7 @@ pub fn save_keyring_raw(keyring: &Keyring, path: impl AsRef<Path>) -> Result<(),
 }
 
 /// Explicitly load the legacy plaintext format for tests and development.
+#[cfg(any(test, feature = "raw"))]
 pub fn load_keyring_raw(path: impl AsRef<Path>) -> Result<Keyring, FileError> {
     let bytes = Zeroizing::new(fs::read(path)?);
     let (version, payload) = decode(&bytes, KEYRING_MAGIC, "keyring")?;
@@ -245,15 +300,16 @@ pub fn load_public_key_bundle(path: impl AsRef<Path>) -> Result<PublicKeyBundle,
             found: version,
         });
     }
-    Ok(PublicKeyBundle::from_bytes(payload)?)
+    Ok(PublicKeyBundle::from_bytes_validated(payload)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mtp_crypto::keypair::{
-        KemPrivateKey, KemPublicKey, SignaturePqPrivateKey, SignaturePqPublicKey,
-        SignaturePrivateKey, SignaturePublicKey,
+        KEM_PUBLIC_KEY_LEN, KemPrivateKey, KemPublicKey, SIG_CL_PUBLIC_KEY_LEN,
+        SIG_PQ_PUBLIC_KEY_LEN, SignaturePqPrivateKey, SignaturePqPublicKey, SignaturePrivateKey,
+        SignaturePublicKey,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -268,11 +324,11 @@ mod tests {
 
     fn sample_keyring() -> Keyring {
         Keyring::new(
-            KemPublicKey::new(vec![1u8; 32]),
+            KemPublicKey::new(vec![1u8; KEM_PUBLIC_KEY_LEN]),
             KemPrivateKey::new(vec![2u8; 32]),
-            SignaturePqPublicKey::new(vec![3u8; 64]),
+            SignaturePqPublicKey::new(vec![3u8; SIG_PQ_PUBLIC_KEY_LEN]),
             SignaturePqPrivateKey::new(vec![4u8; 64]),
-            SignaturePublicKey::new(vec![5u8; 32]),
+            SignaturePublicKey::new(vec![5u8; SIG_CL_PUBLIC_KEY_LEN]),
             SignaturePrivateKey::new(vec![6u8; 32]),
         )
     }
@@ -374,6 +430,23 @@ mod tests {
                 .windows(serialized.len())
                 .any(|window| window == serialized.as_slice())
         );
+        let _ = fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn protected_header_parameters_are_authenticated() -> Result<(), Box<dyn std::error::Error>> {
+        let path = temp_path(KEYRING_EXTENSION);
+        save_keyring(&sample_keyring(), &path, b"passphrase")?;
+        let mut stored = fs::read(&path)?;
+        // The iteration count begins after the file header, KDF identifier,
+        // and memory parameter: MTMK || version || KDF || memory.
+        stored[5 + 1 + 4 + 3] ^= 1;
+        fs::write(&path, stored)?;
+        assert!(matches!(
+            load_keyring(&path, b"passphrase"),
+            Err(FileError::Crypto(CryptoError::DecryptionFailed))
+        ));
         let _ = fs::remove_file(&path);
         Ok(())
     }

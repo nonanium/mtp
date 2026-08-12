@@ -1,4 +1,4 @@
-use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue};
+use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap};
 use mtp_common::{CommunicationError, PipeError};
 use mtp_transport::{PipeReader, PipeWriter, Policy, TransportEvent};
 use std::collections::HashMap;
@@ -152,24 +152,49 @@ where
             .await
             .insert(self.pipe_id, pipe_tx);
 
-        let response = CommunicationValue::new(CommunicationType::PipeResponse)
-            .with_id(self.pipe_id)
-            .add_typed_default(DataType::Accepted, DataValue::BoolTrue);
-        self.sender
-            .send_pipe_message(&response)
-            .await
-            .map_err(PipeError::from)?;
+        let response = CommunicationValue::new_with_type_map(
+            CommunicationType::PipeResponse,
+            &self.dispatcher.type_map,
+        )
+        .with_id(self.pipe_id)
+        .add_typed_default(DataType::Accepted, DataValue::BoolTrue);
+        if let Err(error) = self.sender.send_pipe_message(&response).await {
+            self.dispatcher
+                .pending_pipes
+                .lock()
+                .await
+                .remove(&self.pipe_id);
+            return Err(PipeError::from(error));
+        }
 
-        tokio::time::timeout(self.dispatcher.policy.read_timeout, pipe_rx)
-            .await
-            .map_err(|_| PipeError::HandshakeTimeout)?
-            .map_err(|_| PipeError::StreamClosed)
+        match tokio::time::timeout(self.dispatcher.policy.read_timeout, pipe_rx).await {
+            Ok(Ok(reader)) => Ok(reader),
+            Ok(Err(_)) => {
+                self.dispatcher
+                    .pending_pipes
+                    .lock()
+                    .await
+                    .remove(&self.pipe_id);
+                Err(PipeError::StreamClosed)
+            }
+            Err(_) => {
+                self.dispatcher
+                    .pending_pipes
+                    .lock()
+                    .await
+                    .remove(&self.pipe_id);
+                Err(PipeError::HandshakeTimeout)
+            }
+        }
     }
 
     pub async fn deny(self) -> Result<(), PipeError> {
-        let response = CommunicationValue::new(CommunicationType::PipeResponse)
-            .with_id(self.pipe_id)
-            .add_typed_default(DataType::Accepted, DataValue::BoolFalse);
+        let response = CommunicationValue::new_with_type_map(
+            CommunicationType::PipeResponse,
+            &self.dispatcher.type_map,
+        )
+        .with_id(self.pipe_id)
+        .add_typed_default(DataType::Accepted, DataValue::BoolFalse);
         self.sender
             .send_pipe_message(&response)
             .await
@@ -182,6 +207,7 @@ pub(crate) struct PipeDispatcher<P> {
         Mutex<HashMap<u32, tokio::sync::oneshot::Sender<Result<bool, PipeError>>>>,
     pub(crate) pending_pipes: Mutex<HashMap<u32, tokio::sync::oneshot::Sender<PipeReader<P>>>>,
     pub(crate) policy: Arc<Policy>,
+    pub(crate) type_map: TypeMap,
 }
 
 pub(crate) async fn run_dispatcher<S, R, P>(
@@ -195,15 +221,21 @@ pub(crate) async fn run_dispatcher<S, R, P>(
     R: PipeReceiver<P>,
     P: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
-    let pipe_req_type = CommunicationType::PipeRequest.try_to_id(&mtp_codec::TypeMap::latest());
-    let pipe_resp_type = CommunicationType::PipeResponse.try_to_id(&mtp_codec::TypeMap::latest());
-
     loop {
         match receiver.receive_pipe_event().await {
             Ok(TransportEvent::Message(message)) => {
-                if Some(message.get_type()) == pipe_req_type {
+                if message.is_type(CommunicationType::PipeRequest) {
+                    let Some(pipe_id) = message.id().filter(|id| *id != 0) else {
+                        let error = CommunicationError::Other(
+                            "PipeRequest frame must contain a non-zero id".into(),
+                        );
+                        if app_tx.send(Err(error)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    };
                     let request = PipeRequest {
-                        pipe_id: message.get_id(),
+                        pipe_id,
                         description: message
                             .get_str(DataType::Description)
                             .unwrap_or("")
@@ -214,11 +246,33 @@ pub(crate) async fn run_dispatcher<S, R, P>(
                     let _ = pipe_req_tx.send(request).await;
                     continue;
                 }
-                if Some(message.get_type()) == pipe_resp_type {
+                if message.is_type(CommunicationType::PipeResponse) {
+                    let Some(pipe_id) = message.id().filter(|id| *id != 0) else {
+                        let error = CommunicationError::Other(
+                            "PipeResponse frame must contain a non-zero id".into(),
+                        );
+                        if app_tx.send(Err(error)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    };
                     let mut pending = dispatcher.pending_creations.lock().await;
-                    if let Some(reply) = pending.remove(&message.get_id()) {
+                    if let Some(reply) = pending.remove(&pipe_id) {
                         let _ =
                             reply.send(Ok(message.get_bool(DataType::Accepted).unwrap_or(false)));
+                    }
+                    continue;
+                }
+                if !matches!(message.id(), Some(id) if id != 0)
+                    && message
+                        .get_type_name()
+                        .is_some_and(|name| name.ends_with("Response"))
+                {
+                    let error = CommunicationError::Other(
+                        "response frame must contain a non-zero id".into(),
+                    );
+                    if app_tx.send(Err(error)).await.is_err() {
+                        break;
                     }
                     continue;
                 }

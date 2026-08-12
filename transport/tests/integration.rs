@@ -50,12 +50,14 @@ async fn connected_pair()
 }
 
 fn numbered_message(comm_type: CommunicationType, value: u128, tm: &TypeMap) -> CommunicationValue {
-    CommunicationValue::new(comm_type).add_data(
-        DataType::PqSignature
-            .try_to_id(tm)
-            .expect("test type must be mapped"),
-        DataValue::UnsignedNumber(value),
-    )
+    CommunicationValue::new(comm_type)
+        .add_data(
+            DataType::PqSignature
+                .try_to_id(tm)
+                .expect("test type must be mapped"),
+            DataValue::UnsignedNumber(value),
+        )
+        .expect("numbered message must have a container payload")
 }
 
 fn assert_numbered_message(
@@ -69,8 +71,8 @@ fn assert_numbered_message(
         comm_type.try_to_id(tm).expect("test type must be mapped")
     );
     assert_eq!(
-        message.get_data(DataType::PqSignature).clone(),
-        DataValue::UnsignedNumber(value)
+        message.get_data(DataType::PqSignature),
+        Some(&DataValue::UnsignedNumber(value))
     );
 }
 
@@ -133,6 +135,25 @@ async fn test_send_receive_roundtrip() -> Result<(), Box<dyn std::error::Error>>
     assert_numbered_message(&client_received, CommunicationType::Pong, 99, &tm);
 
     // Close both sides
+    client_tx.close().await;
+    host_tx.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_generic_payload_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    let (_h, client_tx, _client_rx, host_tx, host_rx) = connected_pair().await?;
+    let payload = DataValue::Array(vec![
+        DataValue::Str("generic payload".into()),
+        DataValue::Bytes(vec![1, 2, 3]),
+    ]);
+    let message =
+        CommunicationValue::new(CommunicationType::BadRequest).with_payload(payload.clone());
+
+    client_tx.send(&message).await?;
+    let received = host_rx.receive().await?;
+
+    assert_eq!(received.into_payload(), payload);
     client_tx.close().await;
     host_tx.close().await;
     Ok(())

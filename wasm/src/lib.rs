@@ -7,11 +7,14 @@ pub mod error;
 pub mod frame;
 pub mod logging;
 pub mod pipe;
+pub mod protected;
+pub mod relay;
 pub mod subscription;
 pub mod transport;
 
 pub use client::WasmClient;
 pub use config::{ConnectionConfig, WasmClientConfig};
+pub use crypto::{decrypt_data_value, encrypt_data_value, encrypt_data_value_for_recipients};
 
 #[cfg(not(test))]
 use wasm_bindgen::prelude::*;

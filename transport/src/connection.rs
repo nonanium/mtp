@@ -1,7 +1,7 @@
 use crate::ConnectionHandle;
 #[cfg(feature = "pipes")]
 use crate::pipe::PipeReader;
-use mtp_codec::CommunicationValue;
+use mtp_codec::{CommunicationValue, DecodeLimits, TypeMap};
 use mtp_common::CommunicationError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -148,6 +148,7 @@ pub struct Sender {
     handle: Arc<ConnectionHandle>,
     connection: Connection,
     policy: Arc<Policy>,
+    type_map: Arc<RwLock<TypeMap>>,
 }
 
 impl Sender {
@@ -158,7 +159,13 @@ impl Sender {
             handle,
             connection,
             policy,
+            type_map: Arc::new(RwLock::new(TypeMap::latest())),
         }
+    }
+
+    /// Bind control frames created by this sender to the negotiated protocol map.
+    pub async fn set_type_map(&self, type_map: &TypeMap) {
+        *self.type_map.write().await = type_map.clone();
     }
 
     #[instrument(skip(stream, data, policy), level = "trace")]
@@ -174,9 +181,7 @@ impl Sender {
             return Err(CommunicationError::MessageTooLarge);
         }
 
-        let len_bytes = (bytes.len() as u32).to_be_bytes();
         let write_result = async {
-            stream.write_all(&len_bytes).await?;
             stream.write_all(&bytes).await?;
             Ok::<(), wtransport::error::StreamWriteError>(())
         };
@@ -458,12 +463,16 @@ impl Sender {
 
         let mut stream = Self::open_uni_stream(&self.connection, &self.policy).await?;
 
-        let request = CommunicationValue::new(mtp_codec::CommunicationType::PipeRequest)
-            .with_id(pipe_id)
-            .add_typed_default(
-                mtp_codec::DataType::Description,
-                mtp_codec::DataValue::Str(description.to_string()),
-            );
+        let type_map = self.type_map.read().await.clone();
+        let request = CommunicationValue::new_with_type_map(
+            mtp_codec::CommunicationType::PipeRequest,
+            &type_map,
+        )
+        .with_id(pipe_id)
+        .add_typed_default(
+            mtp_codec::DataType::Description,
+            mtp_codec::DataValue::Str(description.to_string()),
+        );
 
         Self::write_frame(&mut stream, &request, &self.policy).await?;
 
@@ -595,6 +604,7 @@ struct ReceiverInner {
     ping_control: Arc<RwLock<PingControl>>,
     queue_notify: Arc<Notify>,
     max_message_size: Arc<AtomicU64>,
+    type_map: Arc<RwLock<TypeMap>>,
 }
 
 impl Clone for Receiver {
@@ -624,6 +634,7 @@ impl Receiver {
         Self::new_with_max_message_size(connection, handle, policy.clone(), policy.max_message_size)
     }
 
+    #[cfg(feature = "host")]
     pub(crate) fn new_for_handshake(
         connection: Connection,
         handle: Arc<ConnectionHandle>,
@@ -661,6 +672,8 @@ impl Receiver {
         let accept_queue_notify = queue_notify.clone();
         let max_message_size = Arc::new(AtomicU64::new(initial_max_message_size));
         let accept_max_message_size = max_message_size.clone();
+        let type_map = Arc::new(RwLock::new(TypeMap::latest()));
+        let accept_type_map = type_map.clone();
         let stream_limit = Arc::new(Semaphore::new(policy.max_concurrent_stream_tasks.max(1)));
         let accept_stream_limit = stream_limit.clone();
         debug!(
@@ -728,6 +741,7 @@ impl Receiver {
                                 let stream_policy = accept_policy.clone();
                                 let stream_ping_control = accept_ping_control.clone();
                                 let stream_max_message_size = accept_max_message_size.clone();
+                                let stream_type_map = accept_type_map.clone();
 
                                 tokio::spawn(async move {
                                     let _permit = permit;
@@ -748,18 +762,25 @@ impl Receiver {
 
                                         let frame_limit = stream_max_message_size.load(Ordering::Relaxed);
                                         match Self::read_one_frame(&mut s, &stream_policy, frame_limit).await {
-                                            Ok(ReceivedFrame::Message(msg)) => {
+                                            Ok(ReceivedFrame::Message(mut msg)) => {
+                                                let negotiated_type_map =
+                                                    stream_type_map.read().await.clone();
+                                                msg.set_type_map(&negotiated_type_map);
                                                 frame_count += 1;
 
                                                 #[cfg(feature = "pipes")]
                                                 {
-                                                    let pipe_request_type =
-                                                        mtp_codec::CommunicationType::PipeRequest
-                                                            .try_to_id(&mtp_codec::TypeMap::latest());
-                                                    if Some(msg.get_type()) == pipe_request_type
+                                                    if msg.is_type(mtp_codec::CommunicationType::PipeRequest)
                                                         && frame_count == 1
                                                     {
-                                                        let pipe_id = msg.get_id();
+                                                        let Some(pipe_id) = msg.id().filter(|id| *id != 0) else {
+                                                            let error = CommunicationError::Other(
+                                                                "PipeRequest frame must contain a non-zero id".into(),
+                                                            );
+                                                            let _ = msg_tx_stream.send(Err(error.clone())).await;
+                                                            stream_handle.close(Some(error));
+                                                            break;
+                                                        };
                                                         let description = msg
                                                             .get_str(mtp_codec::DataType::Description)
                                                             .unwrap_or("")
@@ -784,18 +805,14 @@ impl Receiver {
                                                     }
                                                 }
 
-                                                let ping_type = mtp_codec::CommunicationType::Ping
-                                                    .try_to_id(&mtp_codec::TypeMap::latest());
-                                                let pong_type = mtp_codec::CommunicationType::Pong
-                                                    .try_to_id(&mtp_codec::TypeMap::latest());
                                                 let control = {
                                                     let control = stream_ping_control.read().await;
-                                                    if Some(msg.get_type()) == ping_type {
+                                                    if msg.is_type(mtp_codec::CommunicationType::Ping) {
                                                         control
                                                             .pong_sender
                                                             .clone()
                                                             .map(|sender| (Some(sender), None))
-                                                    } else if Some(msg.get_type()) == pong_type {
+                                                    } else if msg.is_type(mtp_codec::CommunicationType::Pong) {
                                                         control
                                                             .pong_observer
                                                             .clone()
@@ -806,9 +823,16 @@ impl Receiver {
                                                 };
 
                                                 if let Some((Some(sender), _)) = control {
-                                                    let mut pong = CommunicationValue::new(mtp_codec::CommunicationType::Pong)
-                                                        .with_id(msg.get_id());
-                                                    if let Some(timestamp) = msg.get_data_opt(mtp_codec::DataType::Timestamp) {
+                                                    let mut pong = CommunicationValue::new_with_type_map(
+                                                        mtp_codec::CommunicationType::Pong,
+                                                        &negotiated_type_map,
+                                                    );
+                                                    if let Some(id) = msg.id() {
+                                                        pong = pong.with_id(id);
+                                                    } else {
+                                                        pong = pong.without_id();
+                                                    }
+                                                    if let Some(timestamp) = msg.get_data(mtp_codec::DataType::Timestamp) {
                                                             pong = pong.add_typed_default(
                                                                 mtp_codec::DataType::Timestamp,
                                                                 timestamp.clone(),
@@ -917,6 +941,7 @@ impl Receiver {
                 ping_control,
                 queue_notify,
                 max_message_size,
+                type_map,
             }),
         }
     }
@@ -926,6 +951,11 @@ impl Receiver {
         self.inner
             .max_message_size
             .store(max_message_size, Ordering::Relaxed);
+    }
+
+    /// Bind subsequently decoded frames to the negotiated protocol version.
+    pub async fn set_type_map(&self, type_map: &TypeMap) {
+        *self.inner.type_map.write().await = type_map.clone();
     }
 
     /* Respond to reserved Ping frames without exposing them to application I/O. */
@@ -982,18 +1012,21 @@ impl Receiver {
             return Ok(ReceivedFrame::ClosedByPeer);
         }
 
-        let len_usize = len as usize;
-        if len as u64 > max_message_size {
+        let body_len = len as usize;
+        let frame_len = body_len
+            .checked_add(4)
+            .ok_or(CommunicationError::MessageTooLarge)?;
+        if frame_len as u64 > max_message_size {
             return Err(CommunicationError::MessageTooLarge);
         }
 
         // Grow in bounded chunks instead of trusting the peer's length prefix
         // enough to allocate the complete frame up front.
         let mut buf = Vec::new();
-        buf.try_reserve(len_usize.min(16 * 1024))
+        buf.try_reserve(body_len.min(16 * 1024))
             .map_err(|_| CommunicationError::MessageTooLarge)?;
-        while buf.len() < len_usize {
-            let chunk_len = (len_usize - buf.len()).min(16 * 1024);
+        while buf.len() < body_len {
+            let chunk_len = (body_len - buf.len()).min(16 * 1024);
             let mut chunk = [0u8; 16 * 1024];
             match timeout(
                 policy.read_timeout,
@@ -1008,7 +1041,7 @@ impl Receiver {
                 }
                 Ok(Err(StreamReadExactError::FinishedEarly(n))) => {
                     warn!(
-                        "[Receiver] body read ended early ({}/{len_usize} bytes): stream closed by peer",
+                        "[Receiver] body read ended early ({}/{body_len} bytes): stream closed by peer",
                         buf.len() + n
                     );
                     return Err(CommunicationError::StreamError);
@@ -1024,14 +1057,20 @@ impl Receiver {
                     return Err(CommunicationError::StreamError);
                 }
                 Err(_) => {
-                    warn!("[Receiver] body read timed out (len={len_usize})");
+                    warn!("[Receiver] body read timed out (len={body_len})");
                     return Err(CommunicationError::StreamError);
                 }
             }
         }
 
-        let message = CommunicationValue::from_bytes(&buf)
-            .map_err(|_| CommunicationError::ParseCommunicationValue)?;
+        let mut frame = Vec::with_capacity(frame_len);
+        frame.extend_from_slice(&len_buf);
+        frame.extend_from_slice(&buf);
+        let message = CommunicationValue::from_bytes_with_limits(
+            &frame,
+            DecodeLimits::for_transport_message_size(max_message_size),
+        )
+        .map_err(|_| CommunicationError::ParseCommunicationValue)?;
 
         Ok(ReceivedFrame::Message(message))
     }

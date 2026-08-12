@@ -3,9 +3,7 @@ use std::time::{Duration, Instant};
 use tokio::fs;
 
 use mtp::client::{ClientConfig, MTPClient, MTPConnection};
-use mtp::crypto::{
-    Ed25519Signer, KemPrivateKey, KemPublicKey, Keyring, MlDsaSigner, PublicKeyBundle,
-};
+use mtp::crypto::{Keyring, PublicKeyBundle};
 use mtp::files::{load_keyring_raw, save_keyring_raw};
 
 pub async fn connect_or_register(
@@ -40,17 +38,8 @@ pub async fn connect_or_register(
 
     println!("No existing keys found: registering new client");
 
-    /* The client authenticates with signatures only, so the KEM slot is empty. */
-    let (_ed_signer, sig_sk, sig_pk) = Ed25519Signer::generate();
-    let (_pq_signer, sig_pq_sk, sig_pq_pk) = MlDsaSigner::generate();
-    let keyring = Keyring::new(
-        KemPublicKey::new(vec![]),
-        KemPrivateKey::new(vec![]),
-        sig_pq_pk,
-        sig_pq_sk,
-        sig_pk,
-        sig_sk,
-    );
+    /* Registration publishes a complete MTP identity for later protection. */
+    let keyring = Keyring::generate();
 
     let reg_started = Instant::now();
     let conn = MTPClient::auth_register(config, &keyring, &host_public_key).await?;
@@ -62,4 +51,20 @@ pub async fn connect_or_register(
     println!("Saved client keys -> {keyring_path}");
 
     Ok((conn, keyring, "register".into(), reg_duration))
+}
+
+/// Open a guest transport even when the caller already owns registered
+/// credentials. The credentials stay with the caller for protected signing.
+pub async fn connect_unauthenticated(
+    config: ClientConfig,
+) -> Result<MTPConnection, Box<dyn std::error::Error>> {
+    let conn = MTPClient::connect(config).await?;
+    if conn.auth_state != mtp::client::AuthState::Unauthenticated {
+        return Err("guest connection did not report Unauthenticated state".into());
+    }
+    println!(
+        "Opened unauthenticated transport with host-assigned guest ID {}",
+        conn.client_id
+    );
+    Ok(conn)
 }

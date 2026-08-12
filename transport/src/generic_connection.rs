@@ -7,7 +7,7 @@
 use crate::{
     Policy, TransportConnection, TransportRecvStream, TransportSendStream, framing::write_frame,
 };
-use mtp_codec::CommunicationValue;
+use mtp_codec::{CommunicationValue, DecodeLimits, TypeMap};
 use mtp_common::CommunicationError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +22,7 @@ pub struct GenericSender<C: TransportConnection> {
     policy: Arc<Policy>,
     persistent: Arc<Mutex<Option<C::SendStream>>>,
     send_lock: Arc<Mutex<()>>,
+    type_map: Arc<RwLock<TypeMap>>,
 }
 
 impl<C: TransportConnection> Clone for GenericSender<C> {
@@ -31,6 +32,7 @@ impl<C: TransportConnection> Clone for GenericSender<C> {
             policy: self.policy.clone(),
             persistent: self.persistent.clone(),
             send_lock: self.send_lock.clone(),
+            type_map: self.type_map.clone(),
         }
     }
 }
@@ -42,7 +44,13 @@ impl<C: TransportConnection> GenericSender<C> {
             policy,
             persistent: Arc::new(Mutex::new(None)),
             send_lock: Arc::new(Mutex::new(())),
+            type_map: Arc::new(RwLock::new(TypeMap::latest())),
         }
+    }
+
+    /// Bind control frames created by this sender to the negotiated protocol map.
+    pub async fn set_type_map(&self, type_map: &TypeMap) {
+        *self.type_map.write().await = type_map.clone();
     }
 
     async fn open(&self) -> Result<C::SendStream, CommunicationError> {
@@ -112,12 +120,16 @@ impl<C: TransportConnection> GenericSender<C> {
 
         let mut stream = self.open().await?;
 
-        let request = CommunicationValue::new(mtp_codec::CommunicationType::PipeRequest)
-            .with_id(pipe_id)
-            .add_typed_default(
-                mtp_codec::DataType::Description,
-                mtp_codec::DataValue::Str(description.to_string()),
-            );
+        let type_map = self.type_map.read().await.clone();
+        let request = CommunicationValue::new_with_type_map(
+            mtp_codec::CommunicationType::PipeRequest,
+            &type_map,
+        )
+        .with_id(pipe_id)
+        .add_typed_default(
+            mtp_codec::DataType::Description,
+            mtp_codec::DataValue::Str(description.to_string()),
+        );
 
         timeout(
             self.policy.write_timeout,
@@ -166,6 +178,7 @@ pub struct GenericReceiver<C: TransportConnection> {
     connection: C,
     ping_sender: Arc<RwLock<Option<GenericSender<C>>>>,
     max_message_size: Arc<AtomicU64>,
+    type_map: Arc<RwLock<TypeMap>>,
     _accept_task: Arc<tokio::task::JoinHandle<()>>,
 }
 
@@ -178,6 +191,7 @@ impl<C: TransportConnection> Clone for GenericReceiver<C> {
             connection: self.connection.clone(),
             ping_sender: self.ping_sender.clone(),
             max_message_size: self.max_message_size.clone(),
+            type_map: self.type_map.clone(),
             _accept_task: self._accept_task.clone(),
         }
     }
@@ -206,6 +220,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
         let task_connection = connection.clone();
         let task_policy = policy.clone();
         let task_max_message_size = max_message_size.clone();
+        let type_map = Arc::new(RwLock::new(TypeMap::latest()));
+        let task_type_map = type_map.clone();
         let task_accept_task_tx = tx.clone();
         #[cfg(feature = "pipes")]
         let task_accept_task_pipe_tx = pipe_tx.clone();
@@ -260,6 +276,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                 let max_message_size = task_max_message_size.clone();
                 let ping_sender = task_ping_sender.clone();
                 let connection = task_connection.clone();
+                let type_map = task_type_map.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
                     let mut stream = stream;
@@ -298,13 +315,22 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             break;
                         }
                         let frame_limit = max_message_size.load(Ordering::Relaxed);
-                        if len as u64 > frame_limit {
-                            tracing::warn!(len, "MTP receive stream frame is too large");
+                        let body_len = len as usize;
+                        let frame_len = match body_len.checked_add(4) {
+                            Some(frame_len) => frame_len,
+                            None => {
+                                let _ = tx.send(Err(CommunicationError::MessageTooLarge)).await;
+                                connection.close(policy.application_close_code, b"frame too large");
+                                break;
+                            }
+                        };
+                        if frame_len as u64 > frame_limit {
+                            tracing::warn!(frame_len, "MTP receive stream frame is too large");
                             let _ = tx.send(Err(CommunicationError::MessageTooLarge)).await;
                             connection.close(policy.application_close_code, b"frame too large");
                             break;
                         }
-                        let target_len = len as usize;
+                        let target_len = body_len;
                         let mut body = Vec::new();
                         if body.try_reserve(target_len.min(16 * 1024)).is_err() {
                             tracing::warn!(
@@ -343,7 +369,13 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             break;
                         }
                         frames += 1;
-                        let message = match CommunicationValue::from_bytes(&body) {
+                        let mut frame = Vec::with_capacity(frame_len);
+                        frame.extend_from_slice(&len.to_be_bytes());
+                        frame.extend_from_slice(&body);
+                        let mut message = match CommunicationValue::from_bytes_with_limits(
+                            &frame,
+                            DecodeLimits::for_transport_message_size(frame_limit),
+                        ) {
                             Ok(message) => message,
                             Err(_) => {
                                 tracing::warn!("MTP receive stream contained an invalid frame");
@@ -354,13 +386,25 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                 break;
                             }
                         };
+                        let negotiated_type_map = type_map.read().await.clone();
+                        message.set_type_map(&negotiated_type_map);
 
                         #[cfg(feature = "pipes")]
                         {
-                            let pipe_request_type = mtp_codec::CommunicationType::PipeRequest
-                                .try_to_id(&mtp_codec::TypeMap::latest());
-                            if Some(message.get_type()) == pipe_request_type && frames == 1 {
-                                let pipe_id = message.get_id();
+                            if message.is_type(mtp_codec::CommunicationType::PipeRequest)
+                                && frames == 1
+                            {
+                                let Some(pipe_id) = message.id().filter(|id| *id != 0) else {
+                                    let error = CommunicationError::Other(
+                                        "PipeRequest frame must contain a non-zero id".into(),
+                                    );
+                                    let _ = tx.send(Err(error.clone())).await;
+                                    connection.close(
+                                        policy.application_close_code,
+                                        b"pipe request missing id",
+                                    );
+                                    break;
+                                };
                                 let description = message
                                     .get_str(mtp_codec::DataType::Description)
                                     .unwrap_or("")
@@ -383,11 +427,17 @@ impl<C: TransportConnection> GenericReceiver<C> {
 
                         if message.is_type(mtp_codec::CommunicationType::Ping) {
                             if let Some(sender) = ping_sender.read().await.clone() {
-                                let mut pong =
-                                    CommunicationValue::new(mtp_codec::CommunicationType::Pong)
-                                        .with_id(message.get_id());
+                                let mut pong = CommunicationValue::new_with_type_map(
+                                    mtp_codec::CommunicationType::Pong,
+                                    &negotiated_type_map,
+                                );
+                                if let Some(id) = message.id() {
+                                    pong = pong.with_id(id);
+                                } else {
+                                    pong = pong.without_id();
+                                }
                                 if let Some(timestamp) =
-                                    message.get_data_opt(mtp_codec::DataType::Timestamp)
+                                    message.get_data(mtp_codec::DataType::Timestamp)
                                 {
                                     pong = pong.add_typed_default(
                                         mtp_codec::DataType::Timestamp,
@@ -412,6 +462,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
             connection,
             ping_sender,
             max_message_size,
+            type_map,
             _accept_task: Arc::new(accept_task),
         }
     }
@@ -423,6 +474,11 @@ impl<C: TransportConnection> GenericReceiver<C> {
     pub fn set_max_message_size(&self, max_message_size: u64) {
         self.max_message_size
             .store(max_message_size, Ordering::Relaxed);
+    }
+
+    /// Bind subsequently decoded frames to the negotiated protocol version.
+    pub async fn set_type_map(&self, type_map: &TypeMap) {
+        *self.type_map.write().await = type_map.clone();
     }
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
         self.incoming

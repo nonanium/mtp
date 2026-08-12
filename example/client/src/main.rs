@@ -2,12 +2,13 @@ mod auth;
 mod metrics;
 mod messages;
 mod pipes;
+mod protected;
 
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use mtp::client::ClientConfig;
+use mtp::client::{AuthState, ClientConfig};
 use mtp::files::load_public_key_bundle;
 
 fn dev_cert_path() -> String {
@@ -43,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connecting to 127.0.0.1:8080 ...");
 
     let config = ClientConfig::new("https://127.0.0.1:8080")
-        .with_pinned_pem(cert_pem)
+        .with_pinned_pem(cert_pem.clone())
         .with_description("MTP example client");
 
     let server_bundle = host_public_key.clone();
@@ -62,8 +63,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut builder = metrics::SessionBuilder::new(&auth_method, auth_duration);
 
+    if conn.auth_state != AuthState::Authenticated {
+        return Err("authenticated example connection did not report Authenticated state".into());
+    }
+    println!(
+        "Receive connection A: authenticated client {}",
+        conn.client_id
+    );
+
+    let unauthenticated_config = ClientConfig::new("https://127.0.0.1:8080")
+        .with_pinned_pem(cert_pem.clone())
+        .with_description("MTP example unauthenticated sender");
+    let unauthenticated_conn = auth::connect_unauthenticated(unauthenticated_config).await?;
+    println!(
+        "Send connection B: unauthenticated guest transport ID {}",
+        unauthenticated_conn.client_id
+    );
+
+    let direct_roundtrip = protected::send_direct_protected(
+        &unauthenticated_conn,
+        conn.client_id,
+        &keyring,
+        &server_bundle,
+    )
+    .await?;
+    println!(
+        "Protected signer {} was accepted through unauthenticated connection B",
+        conn.client_id
+    );
+
+    let relay_roundtrip = protected::send_sealed_relay(
+        &unauthenticated_conn,
+        conn.client_id,
+        &keyring,
+        &server_bundle,
+    )
+    .await?;
+    println!(
+        "Sealed relay round-trip completed in {:.3}ms",
+        relay_roundtrip.as_secs_f64() * 1000.0
+    );
+
+    unauthenticated_conn.sender.close().await;
+
     let roundtrip = messages::send_and_receive(&conn, &keyring, &server_bundle).await?;
     builder.set_message_roundtrip(roundtrip);
+
+    println!(
+        "Direct protected round-trip: {:.3}ms",
+        direct_roundtrip.as_secs_f64() * 1000.0
+    );
 
     println!("\n--- Pipe demo ---");
     let pipe_results = pipes::run_pipe_demo(&conn, 1).await?;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, Instant};
 
-use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue};
+use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap};
 use mtp_transport::{Receiver, Sender};
 
 pub(crate) struct PingSession {
@@ -59,6 +59,8 @@ pub(crate) async fn start_ping_session(
     config: &crate::config::ClientConfig,
     sender: Sender,
     receiver: &Receiver,
+    type_map: &TypeMap,
+    client_id: u64,
 ) -> Option<PingSession> {
     if config.ping_interval.is_zero() {
         return None;
@@ -72,6 +74,7 @@ pub(crate) async fn start_ping_session(
     let ping_jitter = config.ping_jitter;
     let max_missed_pings = config.max_missed_pings;
     let ping_timestamp = config.ping_timestamp;
+    let type_map = type_map.clone();
     let mut close_rx = receiver.handle().subscribe_close();
 
     let task = tokio::spawn(async move {
@@ -99,7 +102,11 @@ pub(crate) async fn start_ping_session(
                         tokio::time::sleep(Duration::from_millis(extra)).await;
                     }
 
-                    let mut ping = CommunicationValue::new(CommunicationType::Ping);
+                    let mut ping = CommunicationValue::new_with_type_map(
+                        CommunicationType::Ping,
+                        &type_map,
+                    )
+                        .with_sender(client_id);
                     if ping_timestamp {
                         let sent_at = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -110,7 +117,10 @@ pub(crate) async fn start_ping_session(
                             DataValue::UnsignedNumber(sent_at),
                         );
                     }
-                    let id = ping.get_id();
+                    let Some(id) = ping.id() else {
+                        sender.close().await;
+                        break;
+                    };
                     if sender.send(&ping).await.is_err() {
                         sender.close().await;
                         break;
@@ -119,7 +129,9 @@ pub(crate) async fn start_ping_session(
                 }
                 pong = pong_rx.recv() => match pong {
                     Some(pong) => {
-                        if let Some(ping) = tracker.received(pong.get_id()) {
+                        if let Some(id) = pong.id()
+                            && let Some(ping) = tracker.received(id)
+                        {
                             let mut last_ping = ping_state.lock().await;
                             *last_ping = Some(ping);
                         }

@@ -25,6 +25,8 @@ impl SigAlgorithm {
 use crate::keypair::{SignaturePqPrivateKey, SignaturePqPublicKey};
 
 pub trait SignatureScheme {
+    /// The wire algorithm identifier produced by this signer.
+    fn algorithm(&self) -> u8;
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError>;
     fn verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), CryptoError>;
 }
@@ -76,6 +78,10 @@ impl Ed25519Signer {
 
 #[cfg(feature = "ed25519-dalek")]
 impl SignatureScheme for Ed25519Signer {
+    fn algorithm(&self) -> u8 {
+        SigAlgorithm::ED25519
+    }
+
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         use ed25519_dalek::Signer;
         let signature = self.secret.sign(msg).to_bytes().to_vec();
@@ -170,6 +176,10 @@ impl MlDsaSigner {
 
 #[cfg(feature = "ml-dsa")]
 impl SignatureScheme for MlDsaSigner {
+    fn algorithm(&self) -> u8 {
+        SigAlgorithm::ML_DSA_65
+    }
+
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         use ml_dsa::Signer;
         let signature = self
@@ -235,6 +245,75 @@ pub fn sign_dual(
             .to_vec()
     };
     Ok(DualSignature { ed25519, mldsa })
+}
+
+/// A signer that produces the canonical concatenated Ed25519 + ML-DSA-65
+/// signature represented by [`SigAlgorithm::DUAL`].
+#[cfg(all(feature = "ed25519-dalek", feature = "ml-dsa"))]
+pub struct DualSigner {
+    ed25519: Ed25519Signer,
+    mldsa: MlDsaSigner,
+}
+
+#[cfg(all(feature = "ed25519-dalek", feature = "ml-dsa"))]
+impl DualSigner {
+    pub fn new(
+        ed25519_secret: &SignaturePrivateKey,
+        mldsa_secret: &SignaturePqPrivateKey,
+        mldsa_public: &SignaturePqPublicKey,
+    ) -> Result<Self, CryptoError> {
+        Ok(Self {
+            ed25519: Ed25519Signer::new(ed25519_secret)?,
+            mldsa: MlDsaSigner::new(mldsa_secret, mldsa_public)?,
+        })
+    }
+
+    pub fn generate() -> (
+        Self,
+        SignaturePrivateKey,
+        SignaturePqPrivateKey,
+        SignaturePublicKey,
+        SignaturePqPublicKey,
+    ) {
+        let (ed25519, ed25519_secret, ed25519_public) = Ed25519Signer::generate();
+        let (mldsa, mldsa_secret, mldsa_public) = MlDsaSigner::generate();
+        (
+            Self { ed25519, mldsa },
+            ed25519_secret,
+            mldsa_secret,
+            ed25519_public,
+            mldsa_public,
+        )
+    }
+}
+
+#[cfg(all(feature = "ed25519-dalek", feature = "ml-dsa"))]
+impl SignatureScheme for DualSigner {
+    fn algorithm(&self) -> u8 {
+        SigAlgorithm::DUAL
+    }
+
+    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let dual = sign_dual(self.ed25519.signing_key(), self.mldsa.signing_key(), msg)?;
+        let mut signature = Vec::with_capacity(
+            SigAlgorithm::length(SigAlgorithm::DUAL).expect("known signature algorithm length"),
+        );
+        signature.extend_from_slice(&dual.ed25519);
+        signature.extend_from_slice(&dual.mldsa);
+        Ok(signature)
+    }
+
+    fn verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
+        let ed_len =
+            SigAlgorithm::length(SigAlgorithm::ED25519).expect("known signature algorithm length");
+        let mldsa_len = SigAlgorithm::length(SigAlgorithm::ML_DSA_65)
+            .expect("known signature algorithm length");
+        if signature.len() != ed_len + mldsa_len {
+            return Err(CryptoError::InvalidSignature);
+        }
+        verify_ed25519(&self.ed25519.public_key(), msg, &signature[..ed_len])?;
+        verify_ml_dsa(&self.mldsa.public_key(), msg, &signature[ed_len..])
+    }
 }
 
 impl DualSignature {

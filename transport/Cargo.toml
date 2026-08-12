@@ -19,6 +19,8 @@ rcgen = "0.14"
 tracing = "0.1"
 async-trait = "0.1"
 sha2 = "0.11"
+rand = "0.10.2"
+zeroize = "1.9"
 
 [dev-dependencies]
 
@@ -30,7 +32,7 @@ required-features = ["host", "insecure-tls"]
 # Enables hosting a MTP server
 host = []
 
-pipes = ["mtp-codec/pipes"]
+pipes = ["mtp-codec/pipes", "mtp-codec/crypto"]
 
 # Compiles the insecure certificate verifier (NoopCertVerifier).
 # Even with this feature enabled, the verifier requires the environment

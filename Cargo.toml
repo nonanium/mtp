@@ -96,6 +96,10 @@ pipes = ["mtp-common/pipes", "mtp-codec/pipes", "mtp-transport?/pipes", "mtp-hos
 # Pulls in `crypto` so the `Keyring` / `PublicKeyBundle` types are in scope.
 files = ["dep:mtp-files", "crypto"]
 
+# Development/migration-only access to the legacy plaintext keyring format.
+# Production users should use the Argon2id-protected `.mk` APIs instead.
+raw = ["mtp-files?/raw"]
+
 # HTTP/3 routing and WebTransport-based MTP hosting on one QUIC endpoint.
 web-server = ["dep:mtp-webserver", "dep:mtp-host", "mtp-codec/registry", "transport"]
 

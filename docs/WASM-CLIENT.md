@@ -30,6 +30,11 @@ import { mtp } from "mtp/vite";
 
 Browser apps provide their own type map. The Vite plugin runs `wasm-pack` during dev and build with `MTP_TYPE_MAPS` set, writes generated output under `node_modules/.vite/mtp/` by default, and aliases `mtp/raw` plus `mtp/type-map` to that generated output. Configuration: [Type Map](TYPE-MAP.md).
 
+The browser build uses the map named by `protocol_version` and includes the
+reserved MTP names. It does not advertise application names from other map
+versions, because the generated WASM client is compiled for that one protocol
+version. The selected version must exist in `type_maps`.
+
 You do not need to publish, fork, or copy an app-specific generated WASM package.
 
 The [web client example](../example/web-client/src/main.ts) shows the entry point. Its [Vite configuration](../example/web-client/vite.config.ts) shows the generated binding integration.
@@ -100,7 +105,8 @@ if (!MTPClient.isSupported()) {
 | `pings` | `false` | Protocol pings, or an object with `intervalMs`. |
 | `logger` | No-op | Receives SDK state and error events. |
 | `sessionStorage` | In-memory | E2EE session state storage. |
-| `encryptedDeviceSecretProvider` | In-memory | Device-secret storage for E2EE. |
+| `encryptedSecretProvider` | In-memory | Independent caller-managed encrypted secret storage. |
+| `defaultSignatureVerificationPolicy` | `"ed25519"` | Receiver policy for protected signatures. |
 
 `wasm` selects a custom generated WASM module. `MTPClient.create` validates positive safe-integer values for the numeric limits and timeout options.
 
@@ -112,7 +118,222 @@ The browser SDK uses WebTransport and JavaScript promises. The native client use
 
 The `storage` option supplies the credential adapter. The adapter stores the client ID and serialized keyring after registration and returns them for later connections. The SDK does not select `localStorage` or IndexedDB for an application. Treat the serialized keyring as private key material.
 
-`sessionStorage` and `encryptedDeviceSecretProvider` are separate E2EE session stores. The latter exchanges `EncryptedDeviceSecretRecord` values through `setEncryptedDeviceSecret` and `getEncryptedDeviceSecret`; the application chooses the backing store and protects its wrapping key.
+`sessionStorage` and `encryptedSecretProvider` are separate caller-managed
+stores. The latter exchanges `MTPEncryptedSecretRecord` values through
+`setEncryptedSecret`, `getEncryptedSecret`, and `deleteEncryptedSecret`.
+`MTPSessionManager` does not automatically route session state through the
+provider. If session material must be encrypted at rest, the caller must make
+that coordination explicit in its `MTPSessionStorage` implementation. Secret
+IDs are opaque to MTP, so a caller can map its own state to the ID while
+choosing the backing store and protecting its wrapping key.
+
+### Direct Protected Messages
+
+Use `sendProtected` when the destination is the frame receiver and no
+intermediate relay needs a separately encrypted metadata layer. It keeps the
+application communication type on the outer frame and encrypts an MTP-owned
+signed envelope for the exact recipient bundles supplied by the caller. The
+envelope authenticates `ProtectedVersion`, `MessageType`, `FinalRecipientId`,
+`MessageId`, `CreatedAt`, and `Content`. The opening operation checks the
+authenticated type and final recipient against the outer frame.
+
+```typescript
+await client.sendProtected("ProtectedMessage", { Content: "hello" }, {
+  receiverId: recipientId,
+  recipients: [recipientPublicKey],
+  signaturePurpose: 0x40,
+  encryptionPurpose: 0x41,
+  exposeSender: false,
+});
+```
+
+The protection purposes are application-defined domain-separation values.
+`exposeSender` controls only the outer frame sender; the protected value remains
+signed in either case. If `identity` is omitted, the SDK uses stored registered
+credentials and rejects the operation when no usable protection identity is
+available.
+
+An unauthenticated connection can still send a protected value when the caller
+provides an explicit `identity` with the signer ID and keyring. The connection's
+authentication state and the protected signer's identity are independent.
+
+When `signatureSuite` is omitted, protected send helpers use Ed25519 even when
+the signing keyring also contains post-quantum keys. This matches the default
+receiver policy. Use `signatureSuite: "dual"` together with
+`signaturePolicy: "dual"` when both sides explicitly require hybrid
+signatures.
+
+Open a direct protected frame with the recipient keyring and a resolver that
+receives the claimed, unverified signer ID only as a trusted-key lookup key:
+
+```typescript
+const message = await client.openProtected(frame, {
+  recipient: {
+    id: recipientId,
+    keyring: recipientKeyring,
+    keyringHistory: previousRecipientKeyrings,
+  },
+  expectedReceiverId: recipientId,
+  expectedSignerId: signerId,
+  resolveSignerPublicKeys: (id) => signerDirectory.get(id) ?? [],
+  signaturePolicy: "dual",
+  signaturePurpose: 0x40,
+  encryptionPurpose: 0x41,
+  replayGuard,
+});
+
+console.log(message.type, message.signerId, message.messageId, message.data);
+```
+
+`protectedVersion`, `finalRecipientId`, `signerId`, `messageId`, and `createdAt`
+are taken from the verified protected envelope. `outerSender`, when present,
+must equal the authenticated signer.
+Protected application data may be any supported MTP `DataValue`, including
+scalar, byte, array, and container values. Direct opening uses a bounded
+process-local duplicate-suppression guard by default. The bounded cache can
+evict old entries, so supply a durable `replayGuard` keyed by authenticated
+signer and message ID when replay protection must survive eviction, reloads, or
+multiple receiver processes. The guard also receives authenticated
+`createdAt` metadata, which is not part of the replay key.
+`subscribeProtected` uses the same opening and verification path:
+
+```typescript
+const unsubscribe = client.subscribeProtected(
+  "ProtectedMessage",
+  (message, frame) => handleMessage(message.data, frame),
+  {
+    recipient: { id: recipientId, keyring: recipientKeyring },
+    resolveSignerPublicKeys: (id) => signerDirectory.get(id) ?? [],
+    signaturePolicy: "dual",
+    signaturePurpose: 0x40,
+    encryptionPurpose: 0x41,
+  },
+);
+```
+
+Each `subscribeProtected` registration owns its own bounded default replay
+guard, so multiple handlers receive the same raw frame through the WASM
+fan-out dispatcher. Pass the same caller-owned `replayGuard` deliberately when
+several subscriptions should share replay state.
+
+### Sealed Relay Messages
+
+`sendSealedRelay` uses the reserved opaque `Relay` communication type. Its
+inner message type must be an application communication type, not an MTP
+control type. The outer frame contains no sender and exposes only the next-hop
+receiver. The
+signed relay metadata contains the generic `signerId`, `finalRecipientId`,
+`messageId`, `createdAt`, application `metadata`, and an opaque encrypted
+content value. `createdAt` is generated as Unix epoch milliseconds. For
+example, `2026-08-11T12:00:00.000Z` is `1786449600000`.
+
+```typescript
+const data = { Content: "hello" };
+
+await client.sendSealedRelay("ProtectedMessage", data, {
+  finalRecipientId,
+  nextHopId,
+  metadataRecipients: [
+    relayPublicKey,
+    recipientPublicKey,
+  ],
+  contentRecipients: [
+    recipientPublicKey,
+  ],
+  metadata: {
+    ExampleMetadata: "routing context",
+  },
+});
+
+client.subscribeSealedRelay(
+  "ProtectedMessage",
+  (message, frame) => handleMessage(message.data, frame),
+  {
+    recipient: {
+      id: finalRecipientId,
+      keyring: recipientKeyring,
+    },
+    expectedSignerId: signerId,
+    resolveSignerPublicKeys: () => [senderPublicKey],
+  },
+);
+```
+
+The caller supplies the exact metadata and content recipient sets; the SDK
+does not infer application topology. Set `signaturePolicy: "dual"` to require
+hybrid signatures explicitly, and install a durable `replayGuard` so a valid
+`(signerId, messageId)` is dispatched only once.
+
+Each sealed-relay or metadata subscription likewise gets an independent
+bounded default guard. This preserves fan-out when multiple handlers inspect
+the same outer `Relay` frame; an explicitly supplied guard is shared by the
+subscriptions that receive it.
+
+Applications choose between direct protected delivery and sealed relay based
+on topology and metadata-access requirements. Prefer `sendProtected` for a
+direct destination. Use `sendSealedRelay` when a next hop must route or store a
+message and the application needs metadata recipients to differ from content
+recipients. Neither construction requires connection authentication, although
+the host can associate an authenticated connection with its registered MTP
+identity.
+
+For metadata-only access, call `openRelayMetadata` or subscribe with
+`subscribeRelayMetadata`. These operations authenticate the metadata and
+expose `encryptedContent` for forwarding without attempting content
+decryption. A final recipient calls `openRelayContent` after metadata
+verification; the returned `MTPVerifiedRelayContent` includes the application
+type and data plus `signerId`, `finalRecipientId`, `messageId`, `createdAt`,
+and generic metadata fields. These are authenticated protected identities, not
+the clear outer sender and next-hop receiver.
+Relay content inherits the authenticated metadata's `signaturePolicy` when no
+content override is supplied. A different content policy is rejected so the
+two relay layers cannot be verified under conflicting rules.
+Metadata passed to a `subscribeRelayMetadata` handler is callback-scoped and is
+disposed after the handler resolves. Do not retain it for a later
+`openRelayContent` call; use `openRelayMetadata` directly when a longer-lived
+verified capability is needed, and call `dispose()` when finished.
+When signer key history is used, `signerPublicKeys` exposes the trusted
+candidates, `matchedSignerKeyIndex` identifies the key that verified the
+metadata, and `matchedSignerPublicKey` returns that exact bundle.
+
+Protected receive operations accept an optional `recipient` decryption
+identity. Its `keyring` controls decryption and its optional `id` is used only
+for final-recipient validation. The identity is independent from connection
+authentication. Metadata opening does not require the identity ID to match the
+clear next-hop receiver, so a forwarded frame can be opened by a metadata
+recipient or final recipient with the appropriate keyring. When `recipient` is
+omitted, stored registered credentials remain the convenience fallback.
+
+To open values encrypted for a rotated recipient, provide `keyringHistory` on
+the decryption identity. The current `keyring` is tried first, followed by
+history entries from newest to oldest. Exact duplicate byte sequences are
+removed without changing the caller's input arrays. An empty current keyring
+or an empty history entry is rejected.
+
+Generic MTP `DataValue` inputs accept `bigint` for exact integer values. An
+integral JavaScript `number` outside the safe-integer range is rejected, so it
+cannot silently become an imprecise float. Use `bigint` for large signed or
+unsigned integers.
+
+For streams, prefer `createEncryptedPipe` and `acceptEncryptedPipe`; they bind
+the actual pipe ID and local identity automatically. The lower-level
+`initiateMTPPipeSession` API also accepts multiple recipient bundles for a
+group bootstrap. Group membership changes require a fresh session ID and
+recipient set. Live calls that need forward secrecy can use the exported
+duplex `initiateMTPForwardSecurePipeSession` and
+`acceptMTPForwardSecurePipeSession` helpers.
+
+The convenience pipe methods intentionally require registered client
+credentials because they use the connection's registered identity as the
+endpoint identity. Use the lower-level session functions when transport
+authentication and cryptographic endpoint identity must remain independent.
+
+Receive-side signature policy is independent from the recipient keyring. Use
+`signaturePolicy` on protected receive and encrypted-pipe accept operations,
+or configure `defaultSignatureVerificationPolicy` on the client. The sender's
+`signatureSuite` selects how local values are signed and is a separate choice.
+Both sender and receiver default to Ed25519; `dual` is always an explicit
+choice on each side.
 
 ### Native and Browser Certificate Checks
 
@@ -262,7 +483,10 @@ Use `pings: true` for the default interval.
 
 ## Pipes
 
-Pipes are raw binary streams over QUIC. A pipe starts with a lightweight `PipeRequest` handshake frame, then the stream carries raw bytes with zero per-frame overhead. Pipes are unidirectional; the peer that initiates the pipe writes, and the peer that accepts it reads.
+Pipes are byte-oriented streams over WebTransport. The `PipeRequest` type and
+description are clear transport metadata; raw stream bytes are not protected
+by MTP. For sensitive calls, files, or application streams, wrap the accepted
+pipe with `MTPEncryptedPipeWriter` or `MTPEncryptedPipeReader`.
 
 ### Outgoing Pipes
 
@@ -283,6 +507,41 @@ await writer.close();
 ```
 
 `writer.close()` sends a QUIC stream FIN. `writer.abort()` resets the stream abruptly. Each `write` resolves when the chunk has been handed to the transport; it does not wait for the peer to consume it.
+
+### Encrypted Pipe Records
+
+`initiateMTPPipeSession` and `acceptMTPPipeSession` perform the signed/KEM
+protected pipe-session offer and return the encrypted record wrapper. The
+offer binds the session ID, pipe ID, endpoint IDs, direction, and purpose. Do
+not derive the initial chain key from the clear description or pipe ID alone.
+
+```typescript
+import {
+  initiateMTPPipeSession,
+} from "mtp";
+
+const encryptedWriter = await initiateMTPPipeSession(
+  writer,
+  {
+    sessionId: new TextEncoder().encode(`file-transfer/${writer.pipeId}`),
+    pipeId: writer.pipeId,
+    senderId: ownClientId,
+    recipientId: hostClientId,
+    purpose: 0x40,
+    direction: 0,
+  },
+  ownKeyring,
+  hostPublicKeyBundle,
+);
+await encryptedWriter.writeRecord(chunk);
+await encryptedWriter.close();
+```
+
+`writeRecord` and `readRecord` use XChaCha20-Poly1305 with ordered sequence
+numbers bound to the session context. Each record advances an HKDF chain and
+uses a one-use message key. Record insertion, removal, reordering, or
+modification fails authentication. The wrapper is intentionally separate from
+the raw `PipeWriter`/`PipeReader` transport primitives.
 
 The handle and writer expose `pipeId` and `description`:
 
@@ -330,8 +589,8 @@ console.log(reader.pipeId, reader.description);
 
 1. The initiator calls `createPipe(description)`; the SDK sends a `PipeRequest` frame with a random `pipeId` and the description.
 2. The receiver's `setOnPipeRequest` callback fires with `{ pipeId, description }`.
-3. The receiver calls `acceptPipe(pipeId)`; the SDK sends a `PipeResponse` with `Accepted = true` and opens a new unidirectional stream for raw data.
-4. The initiator's `handle.wait()` resolves with a `PipeWriter` bound to that stream.
+3. The receiver calls `acceptPipe(pipeId)`; the SDK sends a `PipeResponse` with `Accepted = true` and opens a new unidirectional stream for byte transport.
+4. The initiator's `handle.wait()` resolves with a `PipeWriter` bound to that stream. Sensitive applications then perform their signed/encrypted session-key setup and construct an encrypted record wrapper.
 5. If the receiver calls `denyPipe(pipeId)`, `handle.wait()` resolves with `null`.
 
 Pipes share the same WebTransport session as message frames; they do not need a separate connection.
@@ -417,9 +676,13 @@ Raw crypto and key helpers include:
 - `keyring_generate()`
 - `keyring_from_ed25519(secretKey, publicKey)`
 - `WasmKeyring.from_bytes(bytes)` and `keyring.to_bytes()`
+- `keyring.validate_encryption()` for envelope decryption roles
+- `keyring.validate_full()` for complete hybrid identities
 - `WasmPublicKeyBundle.from_bytes(bytes)` and `bundle.to_bytes()`
 - `WasmEd25519Signer`
 - `WasmChaCha20Poly1305`
+- `sign_data_value_with_keyring` and `verify_data_value_with_policy` (both require an explicit signature suite), plus `encrypt_data_value`, `encrypt_data_value_for_recipients`, and `decrypt_data_value`
+- `parse_data_value` and `encode_data_value`
 - `wasm_sha256`, `wasm_sha256_double`, `wasm_hkdf_expand`, and `wasm_derive_encryption_key`
 
 Raw authenticated login and registration map directly to the Rust WASM layer:
@@ -463,4 +726,4 @@ A `WasmClient` manages one active WebTransport session. Create a new instance fo
 
 ### State Management
 
-A `WasmClient` owns one active WebTransport session. Create a separate client for each independent connection. Call `free()` or `[Symbol.dispose]()` on raw WASM objects when the application no longer needs them. SDK session and device secret persistence are documented in [Security](SECURITY.md#browser-end-to-end-encryption).
+A `WasmClient` owns one active WebTransport session. Create a separate client for each independent connection. Call `free()` or `[Symbol.dispose]()` on raw WASM objects when the application no longer needs them. SDK session and encrypted secret persistence are documented in [Security](SECURITY.md#browser-end-to-end-encryption).

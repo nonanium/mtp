@@ -62,7 +62,7 @@ The `mtp` facade re-exports the following modules:
 
 ### Codec
 
-The codec encodes and decodes MTP frames using Communication Types and Data Types resolved through a version-specific type map. It supports containers, integers, booleans, floats, strings, arrays, bytes, null values, and optional signed or encrypted containers. See [Type Map](./docs/TYPE-MAP.md) for mapping configuration and [Connector](./docs/CONNECTOR.md) for negotiated codecs.
+The codec encodes and decodes MTP frames using Communication Types and Data Types resolved through a version-specific type map. It supports self-delimiting containers, integers, booleans, floats, strings, arrays, bytes, null values, and composable `Signed<Value>` and `Encrypted<Value>` protection wrappers. Wrap in either order to choose whether signer metadata is public or encrypted. See [Type Map](./docs/TYPE-MAP.md) for mapping configuration and [Connector](./docs/CONNECTOR.md) for negotiated codecs.
 
 ### Transport
 
@@ -90,7 +90,7 @@ The type-map build script reads YAML and generates `CommunicationType` and `Data
 
 ### Crypto
 
-`mtp-crypto` provides AEAD encryption, Ed25519 and ML-DSA-65 signatures, X25519 plus ML-KEM-768 hybrid KEM support, HKDF, SHA-256, keyrings, encrypted containers, and certificate generation for development. Feature flags and security boundaries: [Security](./docs/SECURITY.md).
+`mtp-crypto` provides AEAD encryption, Ed25519 and ML-DSA-65 signatures, X25519 plus ML-KEM-768 hybrid KEM support, HKDF, SHA-256, keyrings, composable protection envelopes, and certificate generation for development. Feature flags and security boundaries: [Security](./docs/SECURITY.md).
 
 ## Examples
 

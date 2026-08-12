@@ -164,6 +164,8 @@ impl HandshakeContext {
         let remote_addr = sender.handle().remote_addr();
         receiver.set_max_message_size(self.config.policy.max_message_size);
         #[cfg(feature = "pipes")]
+        let type_map = result.codec.type_map().clone();
+        #[cfg(feature = "pipes")]
         {
             if self.config.send_pongs {
                 receiver.respond_to_pings(sender.clone());
@@ -177,6 +179,7 @@ impl HandshakeContext {
                 pending_creations: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 pending_pipes: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 policy: Arc::new(self.config.policy),
+                type_map: type_map.clone(),
             });
 
             let dispatcher_clone = dispatcher.clone();
@@ -202,9 +205,11 @@ impl HandshakeContext {
                 pipe_dispatcher: dispatcher,
                 description: result.description,
                 _dispatcher_task: task,
+                _connection_guard: None,
                 auth_state: result.auth_state,
                 client_id: result.client_id,
                 client_public_key: result.client_public_key,
+                guest_id_lease: result.guest_id_lease,
             }
         }
 
@@ -226,9 +231,11 @@ impl HandshakeContext {
                 _pipe_stream: std::marker::PhantomData,
                 description: result.description,
                 _dispatcher_task: task,
+                _connection_guard: None,
                 auth_state: result.auth_state,
                 client_id: result.client_id,
                 client_public_key: result.client_public_key,
+                guest_id_lease: result.guest_id_lease,
             }
         }
     }
@@ -246,6 +253,8 @@ impl HandshakeContext {
         let remote_addr = sender.handle().remote_addr();
         receiver.set_max_message_size(self.config.policy.max_message_size);
         #[cfg(feature = "pipes")]
+        let type_map = codec.type_map().clone();
+        #[cfg(feature = "pipes")]
         {
             if self.config.send_pongs {
                 receiver.respond_to_pings(sender.clone());
@@ -259,6 +268,7 @@ impl HandshakeContext {
                 pending_creations: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 pending_pipes: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 policy: Arc::new(self.config.policy),
+                type_map,
             });
 
             let dispatcher_clone = dispatcher.clone();
@@ -284,6 +294,7 @@ impl HandshakeContext {
                 pipe_dispatcher: dispatcher,
                 description,
                 _dispatcher_task: task,
+                _connection_guard: None,
             }
         }
 
@@ -305,6 +316,7 @@ impl HandshakeContext {
                 _pipe_stream: std::marker::PhantomData,
                 description,
                 _dispatcher_task: task,
+                _connection_guard: None,
             }
         }
     }

@@ -331,7 +331,7 @@ impl ServerMetrics {
 }
 
 // ---------------------------------------------------------------------------
-// Session handle — local accumulators, no mutex contention during connection
+// Session handle, local accumulators, no mutex contention during connection
 // ---------------------------------------------------------------------------
 
 pub struct SessionHandle<'a> {

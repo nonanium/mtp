@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 mtp-common = { version = "0.2.0", path = "../common" }
-mtp-codec = { version = "0.2.0", path = "../codec" }
+mtp-codec = { version = "0.2.0", path = "../codec", features = ["registry"] }
 mtp-transport = { version = "0.2.0", path = "../transport" }
 mtp-crypto = { version = "0.2.0", path = "../crypto", optional = true }
 rand = "0.10.1"

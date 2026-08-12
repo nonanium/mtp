@@ -63,7 +63,7 @@ When `require_pq` is true, both Ed25519 and ML-DSA-65 keys and signatures must b
 
 `ReservedCommunicationType` means application code attempted to use a reserved wire ID. Use generated communication types instead of assigning protocol IDs manually. `MissingField` means a required typed field was not present.
 
-`InvalidEncoding` indicates truncated, malformed, or structurally invalid bytes. `TooManyEntries` indicates that an array, container, or frame exceeds the codec's representable count or length. `CryptoFailed` indicates that signature verification or encrypted-container processing failed. The complete variant table is in [Errors](ERRORS.md).
+`InvalidEncoding` indicates truncated, malformed, duplicate-field, reserved-kind, or structurally invalid bytes. `TooManyEntries` indicates that an array, container, or frame exceeds the codec's representable count or length. Protection operations return typed errors for malformed envelopes, authentication failures, invalid signatures, and missing recipients. The complete variant table is in [Errors](ERRORS.md).
 
 ## Frames and Message Limits
 

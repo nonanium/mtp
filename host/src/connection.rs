@@ -77,12 +77,30 @@ pub struct MTPConnection<
     pub(crate) _pipe_stream: std::marker::PhantomData<P>,
     pub description: Option<String>,
     pub(crate) _dispatcher_task: tokio::task::JoinHandle<()>,
+    /// Keeps an outer server admission permit alive for this MTP session.
+    /// Native hosts leave it empty; WebTransport hosts use it to make the
+    /// configured connection limit cover the session lifetime.
+    pub(crate) _connection_guard: Option<tokio::sync::OwnedSemaphorePermit>,
     #[cfg(feature = "crypto")]
     pub auth_state: crate::error::AuthState,
     #[cfg(feature = "crypto")]
     pub client_id: u64,
     #[cfg(feature = "crypto")]
     pub client_public_key: Option<mtp_crypto::PublicKeyBundle>,
+    #[cfg(feature = "crypto")]
+    pub(crate) guest_id_lease: Option<crate::engine::GuestIdLease>,
+}
+
+impl<S, R, P> MTPConnection<S, R, P> {
+    /// Keep an outer server admission permit until this connection is dropped.
+    pub fn set_connection_guard(&mut self, guard: tokio::sync::OwnedSemaphorePermit) {
+        self._connection_guard = Some(guard);
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn set_guest_id_lease(&mut self, lease: Option<crate::engine::GuestIdLease>) {
+        self.guest_id_lease = lease;
+    }
 }
 
 #[cfg(feature = "pipes")]
@@ -133,6 +151,7 @@ where
             pending_creations: Mutex::new(std::collections::HashMap::new()),
             pending_pipes: Mutex::new(std::collections::HashMap::new()),
             policy,
+            type_map: codec.type_map().clone(),
         });
         let task = tokio::spawn(run_dispatcher(
             receiver.clone(),
@@ -153,12 +172,15 @@ where
             pipe_dispatcher: dispatcher,
             description,
             _dispatcher_task: task,
+            _connection_guard: None,
             #[cfg(feature = "crypto")]
             auth_state: crate::error::AuthState::Unauthenticated,
             #[cfg(feature = "crypto")]
             client_id: random_client_id(),
             #[cfg(feature = "crypto")]
             client_public_key: None,
+            #[cfg(feature = "crypto")]
+            guest_id_lease: None,
         }
     }
 
@@ -182,6 +204,7 @@ where
             pending_creations: Mutex::new(std::collections::HashMap::new()),
             pending_pipes: Mutex::new(std::collections::HashMap::new()),
             policy,
+            type_map: codec.type_map().clone(),
         });
         let task = tokio::spawn(run_dispatcher(
             receiver.clone(),
@@ -202,12 +225,15 @@ where
             pipe_dispatcher: dispatcher,
             description,
             _dispatcher_task: task,
+            _connection_guard: None,
             #[cfg(feature = "crypto")]
             auth_state: crate::error::AuthState::Unauthenticated,
             #[cfg(feature = "crypto")]
             client_id: random_client_id(),
             #[cfg(feature = "crypto")]
             client_public_key: None,
+            #[cfg(feature = "crypto")]
+            guest_id_lease: None,
         }
     }
 }
@@ -252,12 +278,15 @@ impl<S, R, P> MTPConnection<S, R, P> {
             description,
             _pipe_stream: std::marker::PhantomData,
             _dispatcher_task: tokio::spawn(async {}),
+            _connection_guard: None,
             #[cfg(feature = "crypto")]
             auth_state: crate::error::AuthState::Unauthenticated,
             #[cfg(feature = "crypto")]
             client_id: random_client_id(),
             #[cfg(feature = "crypto")]
             client_public_key: None,
+            #[cfg(feature = "crypto")]
+            guest_id_lease: None,
         }
     }
 }
@@ -293,21 +322,33 @@ where
         &self,
         description: &str,
     ) -> Result<crate::pipe::PipeHandle<S>, mtp_common::PipeError> {
-        let pipe_id = rand::random::<u32>();
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        self.pipe_dispatcher
-            .pending_creations
-            .lock()
-            .await
-            .insert(pipe_id, response_tx);
+        let pipe_id = {
+            let mut pending = self.pipe_dispatcher.pending_creations.lock().await;
+            let pipe_id = loop {
+                let candidate = rand::random::<u32>();
+                if candidate != 0 && !pending.contains_key(&candidate) {
+                    break candidate;
+                }
+            };
+            pending.insert(pipe_id, response_tx);
+            pipe_id
+        };
 
-        let request = CommunicationValue::new(CommunicationType::PipeRequest)
-            .with_id(pipe_id)
-            .add_typed_default(DataType::Description, DataValue::Str(description.into()));
-        self.sender
-            .send_pipe_message(&request)
-            .await
-            .map_err(mtp_common::PipeError::from)?;
+        let request = CommunicationValue::new_with_type_map(
+            CommunicationType::PipeRequest,
+            self.codec.type_map(),
+        )
+        .with_id(pipe_id)
+        .add_typed_default(DataType::Description, DataValue::Str(description.into()));
+        if let Err(error) = self.sender.send_pipe_message(&request).await {
+            self.pipe_dispatcher
+                .pending_creations
+                .lock()
+                .await
+                .remove(&pipe_id);
+            return Err(mtp_common::PipeError::from(error));
+        }
 
         Ok(crate::pipe::PipeHandle {
             pipe_id,

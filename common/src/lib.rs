@@ -1,5 +1,32 @@
 use thiserror::Error;
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Errors returned when the system clock cannot be represented as MTP time.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum TimeError {
+    #[error("system clock is before the Unix epoch")]
+    BeforeUnixEpoch,
+    #[error("Unix epoch milliseconds exceed the u64 range")]
+    OutOfRange,
+}
+
+fn duration_to_unix_time_millis(duration: Duration) -> Result<u64, TimeError> {
+    u64::try_from(duration.as_millis()).map_err(|_| TimeError::OutOfRange)
+}
+
+/// Return the current Unix time in milliseconds.
+///
+/// MTP protocol fields that use `CreatedAt` store this value as an unsigned
+/// integer. The conversion is centralized here so native writers do not
+/// accidentally use seconds.
+pub fn unix_time_millis() -> Result<u64, TimeError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| TimeError::BeforeUnixEpoch)?;
+    duration_to_unix_time_millis(duration)
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodecError {
     #[error("Unknown version")]
@@ -24,6 +51,24 @@ pub enum CodecError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unix_time_millis_preserves_subsecond_precision() {
+        let duration = Duration::new(1_786_449_600, 123_000_000);
+        assert_eq!(
+            duration_to_unix_time_millis(duration),
+            Ok(1_786_449_600_123)
+        );
+    }
+
+    #[test]
+    fn unix_time_millis_rejects_values_outside_u64() {
+        let duration = Duration::new(u64::MAX, 0);
+        assert_eq!(
+            duration_to_unix_time_millis(duration),
+            Err(TimeError::OutOfRange)
+        );
+    }
 
     #[test]
     fn test_codec_error_display() {

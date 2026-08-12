@@ -10,7 +10,7 @@ Native clients and hosts share the same connection shape after the opening hands
 | `description` | Optional label sent during setup | Optional label received from the client | Optional label received from the client |
 | `client_id` | Confirmed or assigned ID with `crypto` | Authenticated or guest client ID with `crypto` | Authenticated or guest client ID with `crypto` |
 | `auth_state` | Authentication result with `crypto` | Authentication result with `crypto` | Authentication result with `crypto` |
-| `request_path` | — | — | WebTransport CONNECT path (e.g. `/mtp`) |
+| `request_path` | / | / | WebTransport CONNECT path (e.g. `/mtp`) |
 | `remote_addr` | Server `SocketAddr` when available | Peer `SocketAddr` | Peer `SocketAddr` |
 
 `WebMTPConnection`, returned by `MTPWebServer::accept()`, exposes the same members as the native host connection plus `request_path`, which contains the HTTP/3 path used for the WebTransport extended CONNECT request.

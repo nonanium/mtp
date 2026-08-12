@@ -43,7 +43,7 @@ pub use keypair::{
 };
 
 #[cfg(feature = "chacha20poly1305")]
-pub use aead::ChaCha20Poly1305;
+pub use aead::{ChaCha20Poly1305, XChaCha20Poly1305};
 
 #[cfg(feature = "aes-gcm")]
 pub use aead::Aes256Gcm;
@@ -55,7 +55,7 @@ pub use sign::{Ed25519Signer, SignatureScheme, verify_ed25519};
 pub use sign::{MlDsaSigner, verify_ml_dsa};
 
 #[cfg(all(feature = "ed25519-dalek", feature = "ml-dsa"))]
-pub use sign::{DualSignature, sign_dual};
+pub use sign::{DualSignature, DualSigner, sign_dual};
 
 #[cfg(feature = "sha2")]
 pub use hash::{Sha256Hasher, sha256, sha256_double};
@@ -79,11 +79,12 @@ pub fn ensure_crypto_provider() {
     });
 }
 
-#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
-pub use enc::{decrypt_with, encrypt_for};
+pub use helper::{ENCRYPT_DOMAIN, KEY_WRAP_DOMAIN};
 
-#[cfg(all(feature = "mlkem-tls", feature = "chacha20poly1305", feature = "hkdf"))]
-pub use helper::{MultiEncryptedMessage, RecipientEntry, decrypt_multi, encrypt_multi};
+#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
+pub use helper::{
+    MAX_RECIPIENTS, MultiEncryptedMessage, RecipientEntry, decrypt_multi_for, encrypt_multi_for,
+};
 
 /* ================================ TESTS ================================ */
 #[cfg(test)]
@@ -207,6 +208,20 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[cfg(all(feature = "ed25519-dalek", feature = "ml-dsa"))]
+    #[test]
+    fn dual_scheme_implements_signature_trait() {
+        use crate::sign::SignatureScheme;
+
+        let (signer, _, _, _, _) = DualSigner::generate();
+        let signature = signer.sign(b"msg").expect("dual signing should succeed");
+        assert_eq!(signer.algorithm(), SigAlgorithm::DUAL);
+        signer
+            .verify(b"msg", &signature)
+            .expect("dual verification should succeed");
+        assert!(signer.verify(b"wrong", &signature).is_err());
     }
 
     #[cfg(feature = "hkdf")]
@@ -343,17 +358,46 @@ mod tests {
         assert_eq!(enc.shared_secret, ss);
     }
 
-    #[cfg(all(feature = "mlkem-tls", feature = "chacha20poly1305", feature = "hkdf"))]
-    #[test]
-    fn encrypt_multi_roundtrip() {
-        use crate::helper::{decrypt_multi, encrypt_multi};
+    #[cfg(all(
+        feature = "mlkem-tls",
+        feature = "hkdf",
+        feature = "ml-dsa",
+        feature = "ed25519-dalek"
+    ))]
+    fn multi_envelope_roundtrip(encryption_type: EncryptionType) {
+        use crate::helper::{decrypt_multi_for, encrypt_multi_for};
         use crate::keypair::Keyring;
 
         let kr = Keyring::generate();
         let entities = vec![kr.public_key_bundle()];
         let msg = b"secret data";
-        let ct = encrypt_multi(msg, b"aad", &entities).expect("multi encrypt should succeed");
-        let pt = decrypt_multi(&ct, b"aad", &kr).expect("multi decrypt should succeed");
+        let ct = encrypt_multi_for(encryption_type, 7, msg, &entities)
+            .expect("multi encrypt should succeed");
+        let pt = decrypt_multi_for(&ct, 7, &kr).expect("multi decrypt should succeed");
         assert_eq!(pt, msg);
+    }
+
+    #[cfg(all(
+        feature = "mlkem-tls",
+        feature = "hkdf",
+        feature = "ml-dsa",
+        feature = "ed25519-dalek",
+        feature = "chacha20poly1305"
+    ))]
+    #[test]
+    fn chacha20_multi_envelope_roundtrip() {
+        multi_envelope_roundtrip(EncryptionType::MlKemChaCha20Poly1305);
+    }
+
+    #[cfg(all(
+        feature = "mlkem-tls",
+        feature = "hkdf",
+        feature = "ml-dsa",
+        feature = "ed25519-dalek",
+        feature = "aes-gcm"
+    ))]
+    #[test]
+    fn aes_gcm_multi_envelope_roundtrip() {
+        multi_envelope_roundtrip(EncryptionType::MlKemAes256Gcm);
     }
 }

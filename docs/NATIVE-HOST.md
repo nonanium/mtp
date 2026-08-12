@@ -157,10 +157,9 @@ let get_existing_client = |id: u64, _description: Option<String>| {
 
 ### guest_id_generator
 
-Optional callback that controls how unauthenticated connections receive their client ID.  When `None` (the default), the host generates a random 48-bit ID and checks it against `get_existing_client` to avoid collisions.
+Optional callback that controls how unauthenticated connections receive their client ID. When `None` (the default), the host generates a random full-width `u64` ID and checks it against `get_existing_client` to avoid collisions.
 
-Return `Some(id)` to accept the guest with that ID, or `None` to reject the connection.  The ID must fit in 48 bits (`id <= mtp_codec::MAX_WIRE_ID`);
-values outside that range are rejected automatically and fall back to the built-in generator.
+Return `Some(id)` to accept the guest with that full-width `u64` ID, or `None` to reject the connection.
 
 ```rust
 use std::sync::atomic::{AtomicU64, Ordering};

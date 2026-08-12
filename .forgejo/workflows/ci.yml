@@ -41,6 +41,9 @@ jobs:
             pnpm --filter mtp-web-client run build
 
             node test/e2ee.mjs
+            pnpm run test:secrets
+            pnpm run test:types
+            pnpm run check:boundary
 
             (
               cd example

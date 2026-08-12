@@ -67,7 +67,10 @@ pub(crate) async fn run_driver(
                 let host_config = host_config.clone();
                 let auth_semaphore = auth_semaphore.clone();
                 connection_tasks.spawn(async move {
-                    let _permit = permit;
+                    // The permit normally lives for this HTTP/3 connection.
+                    // For an MTP session it is moved into the resulting
+                    // connection so the limit covers the session lifetime.
+                    let mut connection_permit = Some(permit);
                     let connect_start = std::time::Instant::now();
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -149,27 +152,41 @@ pub(crate) async fn run_driver(
                                 remote_addr,
                             ));
                             let mtp_tx = mtp_tx.clone();
+                            let mtp_queue_permit = match mtp_tx.clone().try_reserve_owned() {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    tracing::debug!(
+                                        "rejecting MTP session because the application queue is full"
+                                    );
+                                    connection.close(
+                                        quinn::VarInt::from_u32(0),
+                                        b"mtp application queue is full",
+                                    );
+                                    return;
+                                }
+                            };
                             let auth_semaphore = auth_semaphore.clone();
                             let host_config = host_config.clone();
+                            let connection_guard = connection_permit.take();
                             let connection = connection.clone();
+                            let close_connection = connection.clone();
                             tokio::spawn(async move {
-                                let result =
-                                    accept_web_connection(session, mtp_path, connection, send_pongs, policy, host_config, auth_semaphore)
-                                        .await;
-                                match mtp_tx.try_send(result) {
-                                    Ok(()) => {}
-                                    Err(tokio::sync::mpsc::error::TrySendError::Full(result)) => {
-                                        tracing::warn!("MTP connection backlog is full; dropping connection");
-                                        if let Ok(connection) = result {
-                                            connection.sender.close();
-                                        }
-                                    }
-                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(result)) => {
-                                        if let Ok(connection) = result {
-                                            connection.sender.close();
-                                        }
-                                    }
+                                let result = accept_web_connection(
+                                    session,
+                                    mtp_path,
+                                    connection,
+                                    send_pongs,
+                                    policy,
+                                    host_config,
+                                    auth_semaphore,
+                                    connection_guard,
+                                )
+                                .await;
+                                if result.is_err() {
+                                    close_connection
+                                        .close(quinn::VarInt::from_u32(0), b"mtp handshake failed");
                                 }
+                                mtp_queue_permit.send(result);
                             });
                             return;
                         }

@@ -1,7 +1,13 @@
 use std::net::IpAddr;
 
 #[cfg(feature = "crypto")]
+use std::collections::HashMap;
+#[cfg(feature = "crypto")]
+use std::collections::HashSet;
+#[cfg(feature = "crypto")]
 use std::pin::Pin;
+#[cfg(feature = "crypto")]
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "crypto")]
 use tokio::time::Duration;
 
@@ -26,23 +32,44 @@ pub type GetExistingClient = Box<
 
 /// Callback that assigns a guest (unauthenticated) client ID.
 ///
-/// Return `Some(id)` to accept the guest with the given ID, or `None` to reject
-/// the connection.  The returned ID must fit in 48 bits
-/// (`id <= mtp_codec::MAX_WIRE_ID`); values outside that range are rejected
-/// automatically.
+/// Return `Some(id)` to accept the guest with the given full-width `u64` ID, or
+/// `None` to reject the connection.
 ///
 /// When set to `None` on `HostConfig`, the built-in generator produces a random
-/// 48-bit ID that avoids collisions with registered clients.
+/// full-width non-zero ID that avoids collisions with registered clients and
+/// currently connected guests.
 #[cfg(feature = "crypto")]
 pub type GuestIdGenerator =
     Box<dyn Fn() -> Pin<Box<dyn std::future::Future<Output = Option<u64>> + Send>> + Send + Sync>;
 
 #[cfg(feature = "crypto")]
+/// Callback that commits a new registration and returns its non-zero ID.
+///
+/// The host serializes registration commits and remembers successful identity
+/// assignments for the lifetime of the host. Applications that need retry
+/// recovery across a host restart should also configure [`FindRegisteredClient`]
+/// to look up the public identity in persistent storage.
 pub type CompleteRegister = Box<
     dyn Fn(
             mtp_crypto::PublicKeyBundle,
             Option<String>,
         ) -> Pin<Box<dyn std::future::Future<Output = u64> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Callback that recovers an existing registration by its public identity.
+///
+/// Returning an ID makes a registration retry idempotent: the host can send
+/// the same final response when the original response was lost after the
+/// application committed the registration. Returning `None` asks the host to
+/// invoke [`CompleteRegister`] for a new registration.
+#[cfg(feature = "crypto")]
+pub type FindRegisteredClient = Box<
+    dyn Fn(
+            mtp_crypto::PublicKeyBundle,
+            Option<String>,
+        ) -> Pin<Box<dyn std::future::Future<Output = Option<u64>> + Send>>
         + Send
         + Sync,
 >;
@@ -75,9 +102,17 @@ pub struct HostConfig {
     #[cfg(feature = "crypto")]
     pub get_existing_client: GetExistingClient,
     #[cfg(feature = "crypto")]
+    pub(crate) active_guest_ids: Arc<Mutex<HashSet<u64>>>,
+    #[cfg(feature = "crypto")]
+    pub(crate) registration_ids: Arc<Mutex<HashMap<Vec<u8>, u64>>>,
+    #[cfg(feature = "crypto")]
+    pub(crate) registration_lock: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(feature = "crypto")]
     pub guest_id_generator: Option<GuestIdGenerator>,
     #[cfg(feature = "crypto")]
     pub complete_register: CompleteRegister,
+    #[cfg(feature = "crypto")]
+    pub find_registered_client: Option<FindRegisteredClient>,
 }
 
 impl HostConfig {
@@ -107,9 +142,17 @@ impl HostConfig {
             #[cfg(feature = "crypto")]
             get_existing_client: Box::new(|_, _| Box::pin(async { None })),
             #[cfg(feature = "crypto")]
+            active_guest_ids: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(feature = "crypto")]
+            registration_ids: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "crypto")]
+            registration_lock: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(feature = "crypto")]
             guest_id_generator: None,
             #[cfg(feature = "crypto")]
             complete_register: Box::new(|_, _| Box::pin(async { 0 })),
+            #[cfg(feature = "crypto")]
+            find_registered_client: None,
         }
     }
 
@@ -158,6 +201,13 @@ impl HostConfig {
     #[cfg(feature = "crypto")]
     pub fn with_guest_id_generator(mut self, generator: GuestIdGenerator) -> Self {
         self.guest_id_generator = Some(generator);
+        self
+    }
+
+    /// Configure the lookup used to make registration retries idempotent.
+    #[cfg(feature = "crypto")]
+    pub fn with_registration_lookup(mut self, lookup: FindRegisteredClient) -> Self {
+        self.find_registered_client = Some(lookup);
         self
     }
 }

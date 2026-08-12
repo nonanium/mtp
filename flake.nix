@@ -40,7 +40,7 @@
           name = "mtp-clippy";
           runtimeInputs = [rustToolchain];
           text = ''
-            export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example-type-maps.yaml}"
+            export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example/type-maps.yaml}"
             cargo clippy --workspace --exclude mtp-wasm --all-targets --all-features -- -D warnings -W unreachable-pub
           '';
         };
@@ -57,7 +57,7 @@
           name = "mtp-build-all";
           runtimeInputs = [rustToolchain pkgs.cargo-deny pkgs.wasm-pack pkgs.pnpm pkgs.coreutils clippyCheck macheteCheck];
           text = ''
-            export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example-type-maps.yaml}"
+            export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example/type-maps.yaml}"
 
             timeout 60s pnpm install --frozen-lockfile
             cargo fmt --all --check
@@ -69,6 +69,11 @@
             mtp-machete
             pnpm run dup
             pnpm run build
+            RUSTFLAGS="--cfg web_sys_unstable_apis" wasm-pack test --node wasm
+            pnpm run test:e2e
+            pnpm run test:secrets
+            pnpm run test:types
+            pnpm run check:boundary
             pnpm --filter mtp-web-client run build
           '';
         };
@@ -96,7 +101,7 @@
               openssl
             ];
 
-            MTP_TYPE_MAPS = "${toString ./example-type-maps.yaml}";
+            MTP_TYPE_MAPS = "${toString ./example/type-maps.yaml}";
 
             shellHook = ''
               repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"

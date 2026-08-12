@@ -20,6 +20,9 @@ const GENERATE_KEYPAIR = document.getElementById(
   "generate-keypair",
 ) as HTMLButtonElement;
 const CONNECT = document.getElementById("connect") as HTMLButtonElement;
+const CONNECT_UNAUTHENTICATED = document.getElementById(
+  "connect-unauthenticated",
+) as HTMLButtonElement;
 const CLEAR_KEYS = document.getElementById("clear-keys") as HTMLButtonElement;
 const STREAM_MIC = document.getElementById("stream-mic") as HTMLButtonElement;
 const STOP_MIC = document.getElementById("stop-mic") as HTMLButtonElement;
@@ -32,7 +35,6 @@ const HOST_PUBLIC_KEY_KEY = "mtp-web-client-host-public-key";
 type SavedKeys = {
   clientId: string | null;
   keyring?: number[];
-  keyringBytes?: number[];
   hostPublicKey?: number[];
 };
 
@@ -290,7 +292,7 @@ function loadKeys() {
 
   const data = JSON.parse(raw) as SavedKeys;
   clientId = data.clientId ? BigInt(data.clientId) : null;
-  const keyringLength = (data.keyring ?? data.keyringBytes ?? []).length;
+  const keyringLength = (data.keyring ?? []).length;
   CLIENT_CREDENTIALS.value = renderStructured({
     clientId: data.clientId,
     keyringBytes: keyringLength,
@@ -352,6 +354,7 @@ async function initWasm() {
   const supported = MTPClient.isSupported();
   log(`WASM loaded. WebTransport supported: ${supported}`);
   CONNECT.disabled = !supported;
+  CONNECT_UNAUTHENTICATED.disabled = !supported;
 }
 
 async function createClient() {
@@ -440,6 +443,39 @@ async function connect() {
     log(`Request response: ${formatParsedFrame(response)}`, "received");
 
     log("\nClient running. Waiting for incoming messages...");
+    STREAM_MIC.disabled = false;
+    log("\nPipe demo ready. Click 'Stream Microphone' to start.", "pipe");
+    updateMetrics();
+  } catch (error) {
+    log(`[error] ${error}`, "error");
+  }
+}
+
+async function connectUnauthenticated() {
+  STATUS.textContent = "";
+  PIPE_STATUS.textContent = "";
+
+  if (!MTPClient.isSupported()) {
+    log("WebTransport is not supported in this browser.", "error");
+    return;
+  }
+  saveHostPublicKey();
+
+  try {
+    const client = await createClient();
+    activeClient = client;
+    const storedIdentity = client.credentials?.clientId;
+    await client.connectUnauthenticated();
+
+    clientId = storedIdentity ?? clientId;
+    loadKeys();
+    log(
+      `Connected over an unauthenticated transport (guest connection). Stored protection identity ${storedIdentity == null ? "not registered" : `${storedIdentity} retained`}.`,
+    );
+    log(
+      "The explicit connectUnauthenticated() path did not delete or replace stored credentials.",
+      "state",
+    );
     STREAM_MIC.disabled = false;
     log("\nPipe demo ready. Click 'Stream Microphone' to start.", "pipe");
     updateMetrics();
@@ -715,6 +751,13 @@ CONNECT.addEventListener("click", () => {
       `[fatal context] clientId=${clientId?.toString() ?? "unregistered"}, server=${SERVER_URL.value.trim()}, hostPkChars=${HOST_PUBLIC_KEY.value.replace(/[^0-9a-fA-F]/g, "").length}, hasStoredCredentials=${localStorage.getItem(CREDENTIALS_KEY) ? "yes" : "no"}, certHash=${devCertHash || "none"}`,
       "error",
     );
+    console.error(e);
+  });
+});
+
+CONNECT_UNAUTHENTICATED.addEventListener("click", () => {
+  connectUnauthenticated().catch((e) => {
+    log(`Unauthenticated connection failed: ${e}`, "error");
     console.error(e);
   });
 });

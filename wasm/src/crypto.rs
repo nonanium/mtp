@@ -1,13 +1,67 @@
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
+use mtp_codec::{
+    DataValue, MtpProtectionPurpose, PROTOCOL_VERSION, ProtectionPolicy, ProtectionPurpose,
+    SealedRelayBuilder, SignaturePolicy, TypeMap,
+};
 use mtp_crypto::{
-    AeadDecrypt, AeadEncrypt, ChaCha20Poly1305, Ed25519Signer, HybridKem, KemPrivateKey,
-    KemPublicKey, Keyring, PublicKeyBundle, SignaturePqPrivateKey, SignaturePqPublicKey,
-    SignaturePrivateKey, SignaturePublicKey, SignatureScheme, sha256, sha256_double,
+    AeadDecrypt, AeadEncrypt, DualSigner, Ed25519Signer, HybridKem, KemPrivateKey, KemPublicKey,
+    Keyring, PublicKeyBundle, SignaturePqPrivateKey, SignaturePqPublicKey, SignaturePrivateKey,
+    SignaturePublicKey, SignatureScheme, XChaCha20Poly1305, sha256, sha256_double,
 };
 
-use crate::error::js_error;
+use crate::error::{from_protection_error, js_error};
+use crate::relay::{decode_frame, relay_error, structured_error};
+
+fn decode_data_value(value: &[u8]) -> Result<DataValue, JsValue> {
+    DataValue::from_bytes(value).ok_or_else(|| js_error("invalid DataValue"))
+}
+
+fn decode_public_key_bundle(
+    bytes: &[u8],
+    index: Option<usize>,
+) -> Result<PublicKeyBundle, JsValue> {
+    PublicKeyBundle::from_bytes(bytes).map_err(|e| {
+        let prefix = index
+            .map(|index| format!("recipient {index}: "))
+            .unwrap_or_default();
+        js_error(format!("{prefix}public bundle initialization failed: {e}"))
+    })
+}
+
+pub(crate) fn public_key_bundles_from_js(value: &JsValue) -> Result<Vec<PublicKeyBundle>, JsValue> {
+    if js_sys::Uint8Array::instanceof(value) {
+        return Ok(vec![decode_public_key_bundle(
+            &js_sys::Uint8Array::new(value).to_vec(),
+            None,
+        )?]);
+    }
+
+    if !js_sys::Array::is_array(value) {
+        return Err(js_error(
+            "recipient public key bundles must be a Uint8Array or an array of Uint8Arrays",
+        ));
+    }
+
+    let array = js_sys::Array::from(value);
+    if array.length() == 0 {
+        return Err(js_error(
+            "at least one recipient public key bundle is required",
+        ));
+    }
+
+    array
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if !js_sys::Uint8Array::instanceof(&value) {
+                return Err(js_error(format!("recipient {index} must be a Uint8Array")));
+            }
+            decode_public_key_bundle(&js_sys::Uint8Array::new(&value).to_vec(), Some(index))
+        })
+        .collect()
+}
 
 // ===========================================================================
 // Keyring
@@ -40,6 +94,25 @@ impl WasmKeyring {
         WasmPublicKeyBundle {
             inner: self.inner.public_key_bundle(),
         }
+    }
+
+    /// Validate that all full-suite public/private components correspond.
+    /// Role-specific browser keyrings may intentionally fail this check.
+    #[wasm_bindgen]
+    pub fn validate_full(&self) -> Result<(), JsValue> {
+        self.inner
+            .validate_full()
+            .map_err(|e| js_error(format!("Keyring::validate_full: {e}")))
+    }
+
+    /// Validate the KEM public/private pair without requiring PQ signing
+    /// material. This is the invariant needed by envelope recipients and
+    /// sealed-relay clients that explicitly choose Ed25519 signatures.
+    #[wasm_bindgen]
+    pub fn validate_encryption(&self) -> Result<(), JsValue> {
+        self.inner
+            .validate_encryption()
+            .map_err(|e| js_error(format!("Keyring::validate_encryption: {e}")))
     }
 }
 
@@ -109,6 +182,16 @@ impl WasmPublicKeyBundle {
             .map_err(|e| js_error(format!("PublicKeyBundle::from_bytes: {}", e)))?;
         Ok(Self { inner })
     }
+
+    /// Deserialise an explicitly partial bundle for development-only key
+    /// material. Protocol encryption and signature verification use the
+    /// strict `from_bytes` parser above.
+    #[wasm_bindgen]
+    pub fn from_bytes_unvalidated(bytes: &[u8]) -> Result<WasmPublicKeyBundle, JsValue> {
+        let inner = PublicKeyBundle::from_bytes_unvalidated(bytes)
+            .map_err(|e| js_error(format!("PublicKeyBundle::from_bytes_unvalidated: {}", e)))?;
+        Ok(Self { inner })
+    }
 }
 
 // ===========================================================================
@@ -124,6 +207,36 @@ impl WasmPublicKeyBundle {
 pub struct WasmEncapsulated {
     inner_shared_secret: Zeroizing<Vec<u8>>,
     inner_ciphertext: Vec<u8>,
+}
+
+/// A short-lived ephemeral hybrid-KEM keypair for the forward-secure pipe
+/// handshake. The secret is zeroized when the object is freed.
+#[wasm_bindgen]
+pub struct WasmKemKeypair {
+    secret: Zeroizing<Vec<u8>>,
+    public: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl WasmKemKeypair {
+    #[wasm_bindgen(getter)]
+    pub fn public_key(&self) -> Vec<u8> {
+        self.public.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn secret_key(&self) -> Vec<u8> {
+        self.secret.to_vec()
+    }
+}
+
+#[wasm_bindgen]
+pub fn wasm_kem_generate_keypair() -> WasmKemKeypair {
+    let (secret, public) = HybridKem::generate_keypair();
+    WasmKemKeypair {
+        secret: Zeroizing::new(secret.as_bytes().to_vec()),
+        public: public.as_bytes().to_vec(),
+    }
 }
 
 #[wasm_bindgen]
@@ -178,7 +291,7 @@ pub fn wasm_kem_decapsulate(
 
 #[wasm_bindgen]
 pub struct WasmChaCha20Poly1305 {
-    inner: ChaCha20Poly1305,
+    inner: XChaCha20Poly1305,
 }
 
 #[wasm_bindgen]
@@ -192,7 +305,7 @@ impl WasmChaCha20Poly1305 {
         let mut k = [0u8; 32];
         k.copy_from_slice(&key);
         Ok(Self {
-            inner: ChaCha20Poly1305::new(k),
+            inner: XChaCha20Poly1305::new(k),
         })
     }
 
@@ -339,6 +452,401 @@ pub fn wasm_derive_encryption_key(
         .map_err(|e| js_error(format!("derive_encryption_key failed: {}", e)))
 }
 
+/// Signature suites accepted by high-level protected-value APIs.
+pub const PROTECTION_SIGNATURE_SUITE_ED25519: u8 = 0x01;
+pub const PROTECTION_SIGNATURE_SUITE_DUAL: u8 = 0x03;
+
+pub(crate) fn protection_policy_from_suite(suite: u8) -> Result<ProtectionPolicy, JsValue> {
+    let signature = match suite {
+        0 => SignaturePolicy::AnySupported,
+        PROTECTION_SIGNATURE_SUITE_ED25519 => SignaturePolicy::Ed25519,
+        PROTECTION_SIGNATURE_SUITE_DUAL => SignaturePolicy::Dual,
+        _ => {
+            return Err(js_error(format!(
+                "unknown protection signature suite: {suite}"
+            )));
+        }
+    };
+    Ok(ProtectionPolicy { signature })
+}
+
+pub(crate) enum RelaySigner {
+    Ed25519(Ed25519Signer),
+    Dual(DualSigner),
+}
+
+impl SignatureScheme for RelaySigner {
+    fn algorithm(&self) -> u8 {
+        match self {
+            Self::Ed25519(signer) => signer.algorithm(),
+            Self::Dual(signer) => signer.algorithm(),
+        }
+    }
+
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, mtp_crypto::CryptoError> {
+        match self {
+            Self::Ed25519(signer) => signer.sign(message),
+            Self::Dual(signer) => signer.sign(message),
+        }
+    }
+
+    fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), mtp_crypto::CryptoError> {
+        match self {
+            Self::Ed25519(signer) => signer.verify(message, signature),
+            Self::Dual(signer) => signer.verify(message, signature),
+        }
+    }
+}
+
+pub(crate) fn relay_signer_from_keyring(
+    keyring: &Keyring,
+    suite: u8,
+) -> Result<RelaySigner, JsValue> {
+    match suite {
+        PROTECTION_SIGNATURE_SUITE_ED25519 => {
+            keyring
+                .validate_ed25519_signing()
+                .map_err(|e| js_error(format!("signing key validation failed: {e}")))?;
+            Ed25519Signer::new(&keyring.sig_cl_secret_key)
+                .map(RelaySigner::Ed25519)
+                .map_err(|e| js_error(format!("signer initialization failed: {e}")))
+        }
+        PROTECTION_SIGNATURE_SUITE_DUAL => {
+            keyring
+                .validate_dual_signing()
+                .map_err(|e| js_error(format!("dual signing key validation failed: {e}")))?;
+            DualSigner::new(
+                &keyring.sig_cl_secret_key,
+                &keyring.sig_pq_secret_key,
+                &keyring.sig_pq_public_key,
+            )
+            .map(RelaySigner::Dual)
+            .map_err(|e| js_error(format!("dual signer initialization failed: {e}")))
+        }
+        _ => Err(js_error(format!(
+            "unknown protection signature suite: {suite}"
+        ))),
+    }
+}
+
+/// Sign a serialized `DataValue` using the selected suite from a serialized
+/// keyring.
+#[wasm_bindgen]
+pub fn sign_data_value_with_keyring(
+    value: &[u8],
+    signer_id: u64,
+    purpose: u8,
+    keyring: &[u8],
+    signature_suite: u8,
+) -> Result<Vec<u8>, JsValue> {
+    let value = decode_data_value(value)?;
+    let keyring = Keyring::from_bytes(keyring)
+        .map_err(|e| js_error(format!("keyring initialization failed: {e}")))?;
+    let signer = relay_signer_from_keyring(&keyring, signature_suite)?;
+    value
+        .sign(signer_id, ProtectionPurpose::from(purpose), &signer)
+        .map_err(from_protection_error)?
+        .to_bytes()
+        .map_err(|e| js_error(format!("sign failed: {e}")))
+}
+
+/// Verify a serialized `Signed<Value>` wrapper while enforcing the receiver's
+/// required signature suite. `0` retains the legacy any-supported behavior;
+/// new protocol callers should pass one of the exported suite constants.
+#[wasm_bindgen]
+pub fn verify_data_value_with_policy(
+    value: &[u8],
+    public_key_bundle: &[u8],
+    expected_signer_id: u64,
+    expected_purpose: u8,
+    signature_suite: u8,
+) -> Result<(), JsValue> {
+    let value = decode_data_value(value)?;
+    let bundle = decode_public_key_bundle(public_key_bundle, None)?;
+    let result = if signature_suite == 0 {
+        value.verify(
+            expected_signer_id,
+            &bundle,
+            ProtectionPurpose::from(expected_purpose),
+        )
+    } else {
+        value.verify_with_policy(
+            expected_signer_id,
+            &bundle,
+            ProtectionPurpose::from(expected_purpose),
+            protection_policy_from_suite(signature_suite)?,
+        )
+    };
+    result.map_err(from_protection_error)
+}
+
+/// Encrypt a serialized `DataValue` for one recipient using the canonical
+/// multi-recipient envelope.
+#[wasm_bindgen]
+pub fn encrypt_data_value(
+    value: &[u8],
+    recipient_public_key_bundle: &[u8],
+    purpose: u8,
+) -> Result<Vec<u8>, JsValue> {
+    let value = decode_data_value(value)?;
+    let recipient = decode_public_key_bundle(recipient_public_key_bundle, None)?;
+    let encrypted = value
+        .encrypt_for(&[recipient], ProtectionPurpose::from(purpose))
+        .map_err(from_protection_error)?;
+    encrypted
+        .to_bytes()
+        .map_err(|e| js_error(format!("encryption failed: {e}")))
+}
+
+/// Encrypt a serialized `DataValue` for one or more recipients.
+///
+/// `recipient_public_key_bundles` may be a single `Uint8Array` for the common
+/// case or an array of serialized public-key bundles. The array form uses the
+/// same canonical envelope as native multi-recipient encryption.
+#[wasm_bindgen]
+pub fn encrypt_data_value_for_recipients(
+    value: &[u8],
+    recipient_public_key_bundles: JsValue,
+    purpose: u8,
+) -> Result<Vec<u8>, JsValue> {
+    let value = decode_data_value(value)?;
+    let recipients = public_key_bundles_from_js(&recipient_public_key_bundles)?;
+    value
+        .encrypt_for(&recipients, ProtectionPurpose::from(purpose))
+        .map_err(from_protection_error)?
+        .to_bytes()
+        .map_err(|e| js_error(format!("encryption failed: {e}")))
+}
+
+/// Decrypt a serialized `Encrypted<Value>` wrapper with a serialized keyring.
+/// The expected purpose is supplied by the protocol caller, not taken from
+/// the untrusted encrypted wrapper.
+#[wasm_bindgen]
+pub fn decrypt_data_value(
+    value: &[u8],
+    keyring: &[u8],
+    expected_purpose: u8,
+) -> Result<Vec<u8>, JsValue> {
+    let value = decode_data_value(value)?;
+    let keyring = Keyring::from_bytes(keyring)
+        .map_err(|e| js_error(format!("keyring initialization failed: {e}")))?;
+    let opened = value
+        .decrypt(&keyring, ProtectionPurpose::from(expected_purpose))
+        .map_err(from_protection_error)?;
+    opened
+        .to_bytes()
+        .map_err(|e| js_error(format!("decryption failed: {e}")))
+}
+
+/// Decrypt using a caller-supplied local key history. Recipient key
+/// identifiers remain absent from the serialized envelope.
+#[wasm_bindgen]
+pub fn decrypt_data_value_with_keyrings(
+    value: &[u8],
+    keyrings: JsValue,
+    expected_purpose: u8,
+) -> Result<Vec<u8>, JsValue> {
+    let value = decode_data_value(value)?;
+    let keyrings = keyrings_from_js(&keyrings)?;
+    let references: Vec<&Keyring> = keyrings.iter().collect();
+    value
+        .decrypt_with_keyrings(&references, ProtectionPurpose::from(expected_purpose))
+        .map_err(from_protection_error)?
+        .to_bytes()
+        .map_err(|e| js_error(format!("decryption failed: {e}")))
+}
+
+pub(crate) fn keyrings_from_js(value: &JsValue) -> Result<Vec<Keyring>, JsValue> {
+    let keyring_bytes: Vec<Vec<u8>> = if js_sys::Uint8Array::instanceof(value) {
+        vec![js_sys::Uint8Array::new(value).to_vec()]
+    } else if js_sys::Array::is_array(value) {
+        let array = js_sys::Array::from(value);
+        array
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if !js_sys::Uint8Array::instanceof(&value) {
+                    return Err(js_error(format!("keyring {index} must be a Uint8Array")));
+                }
+                Ok(js_sys::Uint8Array::new(&value).to_vec())
+            })
+            .collect::<Result<_, _>>()?
+    } else {
+        return Err(js_error(
+            "keyrings must be a Uint8Array or an array of Uint8Arrays",
+        ));
+    };
+    if keyring_bytes.is_empty() {
+        return Err(js_error("at least one keyring is required"));
+    }
+    keyring_bytes
+        .iter()
+        .map(|bytes| {
+            Keyring::from_bytes(bytes)
+                .map_err(|e| js_error(format!("keyring initialization failed: {e}")))
+        })
+        .collect()
+}
+
+/// Protection purposes used by the generic browser relay envelope.
+///
+/// The outer encryption purpose is intentionally generic: the actual
+/// application operation is inside the encrypted metadata container.
+pub const RELAY_METADATA_ENCRYPTION_PURPOSE: u8 =
+    MtpProtectionPurpose::RelayMetadataEncryption.value();
+pub const RELAY_CONTENT_SIGNATURE_PURPOSE: u8 = MtpProtectionPurpose::RelayContentSignature.value();
+pub const RELAY_CONTENT_ENCRYPTION_PURPOSE: u8 =
+    MtpProtectionPurpose::RelayContentEncryption.value();
+pub const RELAY_METADATA_SIGNATURE_PURPOSE: u8 =
+    MtpProtectionPurpose::RelayMetadataSignature.value();
+
+/// Return the canonical MTP relay metadata-encryption purpose.
+#[wasm_bindgen]
+pub fn mtp_relay_metadata_encryption_purpose() -> u8 {
+    MtpProtectionPurpose::RelayMetadataEncryption.value()
+}
+
+/// Return the canonical MTP relay content-signature purpose.
+#[wasm_bindgen]
+pub fn mtp_relay_content_signature_purpose() -> u8 {
+    MtpProtectionPurpose::RelayContentSignature.value()
+}
+
+/// Return the canonical MTP relay content-encryption purpose.
+#[wasm_bindgen]
+pub fn mtp_relay_content_encryption_purpose() -> u8 {
+    MtpProtectionPurpose::RelayContentEncryption.value()
+}
+
+/// Return the canonical MTP relay metadata-signature purpose.
+#[wasm_bindgen]
+pub fn mtp_relay_metadata_signature_purpose() -> u8 {
+    MtpProtectionPurpose::RelayMetadataSignature.value()
+}
+
+/// Return the canonical MTP pipe-session signature purpose.
+#[wasm_bindgen]
+pub fn mtp_pipe_session_signature_purpose() -> u8 {
+    MtpProtectionPurpose::PipeSessionSignature.value()
+}
+
+/// Return the canonical MTP pipe-session encryption purpose.
+#[wasm_bindgen]
+pub fn mtp_pipe_session_encryption_purpose() -> u8 {
+    MtpProtectionPurpose::PipeSessionEncryption.value()
+}
+
+#[wasm_bindgen]
+pub fn mtp_protection_signature_suite_ed25519() -> u8 {
+    PROTECTION_SIGNATURE_SUITE_ED25519
+}
+
+#[wasm_bindgen]
+pub fn mtp_protection_signature_suite_dual() -> u8 {
+    PROTECTION_SIGNATURE_SUITE_DUAL
+}
+
+/// Forward a sealed relay frame to another clear next hop without opening or
+/// re-encoding its authenticated encrypted payload.
+#[wasm_bindgen]
+pub fn forward_encrypted_relay_frame(
+    frame: &[u8],
+    next_hop_receiver_id: u64,
+) -> Result<Vec<u8>, JsValue> {
+    let frame = decode_frame(frame)?;
+    mtp_codec::forward_relay_frame(&frame, next_hop_receiver_id)
+        .map_err(relay_error)?
+        .to_bytes()
+        .map_err(|e| structured_error("invalid-frame", format!("relay frame encoding failed: {e}")))
+}
+
+/// Convert browser values and build a sealed relay frame through the native
+/// codec builder. The builder owns the protected relay layout so native and
+/// browser callers cannot silently diverge.
+#[allow(clippy::too_many_arguments)]
+fn build_encrypted_relay_frame_impl(
+    message_type: &str,
+    data: JsValue,
+    signer_id: u64,
+    final_recipient_id: u64,
+    next_hop_id: u64,
+    message_id: &str,
+    created_at: u64,
+    encoded_metadata: Option<Vec<u8>>,
+    signer: &dyn SignatureScheme,
+    metadata_recipient_public_key_bundles: JsValue,
+    content_recipient_public_key_bundles: JsValue,
+) -> Result<Vec<u8>, JsValue> {
+    let tm = TypeMap::new(PROTOCOL_VERSION);
+    let application_content = crate::frame::js_to_data_value(&data, &tm)?;
+    let application_metadata = encoded_metadata
+        .as_deref()
+        .map(decode_data_value)
+        .transpose()?;
+    let content_recipients = public_key_bundles_from_js(&content_recipient_public_key_bundles)?;
+    let metadata_recipients = public_key_bundles_from_js(&metadata_recipient_public_key_bundles)?;
+
+    let builder = SealedRelayBuilder::new(
+        message_type,
+        application_content,
+        signer_id,
+        final_recipient_id,
+        next_hop_id,
+        signer,
+    )
+    .message_id(message_id)
+    .created_at(created_at)
+    .metadata_recipients(metadata_recipients)
+    .content_recipients(content_recipients)
+    .type_map(&tm);
+    let builder = match application_metadata {
+        Some(metadata) => builder.metadata(metadata),
+        None => builder,
+    };
+
+    builder
+        .build()
+        .map_err(relay_error)?
+        .to_bytes()
+        .map_err(|e| js_error(format!("relay frame encoding failed: {e}")))
+}
+
+/// Build a relay frame using an explicit Ed25519 or dual-signature policy.
+/// `created_at` is Unix epoch milliseconds.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn build_encrypted_relay_frame_with_keyring(
+    message_type: &str,
+    data: JsValue,
+    signer_id: u64,
+    final_recipient_id: u64,
+    next_hop_id: u64,
+    message_id: &str,
+    created_at: u64,
+    encoded_metadata: Option<Vec<u8>>,
+    keyring_bytes: &[u8],
+    signature_suite: u8,
+    metadata_recipient_public_key_bundles: JsValue,
+    content_recipient_public_key_bundles: JsValue,
+) -> Result<Vec<u8>, JsValue> {
+    let keyring = Keyring::from_bytes(keyring_bytes)
+        .map_err(|e| js_error(format!("keyring initialization failed: {e}")))?;
+    let signer = relay_signer_from_keyring(&keyring, signature_suite)?;
+    build_encrypted_relay_frame_impl(
+        message_type,
+        data,
+        signer_id,
+        final_recipient_id,
+        next_hop_id,
+        message_id,
+        created_at,
+        encoded_metadata,
+        &signer,
+        metadata_recipient_public_key_bundles,
+        content_recipient_public_key_bundles,
+    )
+}
+
 #[cfg(test)]
 #[cfg(target_arch = "wasm32")]
 mod tests {
@@ -384,7 +892,8 @@ mod tests {
         };
 
         let bytes = bundle.to_bytes();
-        let restored = WasmPublicKeyBundle::from_bytes(&bytes).expect("from_bytes failed");
+        let restored = WasmPublicKeyBundle::from_bytes_unvalidated(&bytes)
+            .expect("from_bytes_unvalidated failed");
         assert_eq!(restored.sig_cl_public_key(), pk);
     }
 
@@ -577,5 +1086,73 @@ mod tests {
         let key2 =
             wasm_derive_encryption_key(b"pass2", b"salt", b"context").expect("derive failed");
         assert_ne!(key, key2);
+    }
+
+    // ------------------------------------------------------------------
+    // DataValue protection
+    // ------------------------------------------------------------------
+
+    #[wasm_bindgen_test]
+    fn signed_data_value_can_be_verified_through_wasm() {
+        let keyring = Keyring::generate();
+        let value = DataValue::Str("signed through wasm".into())
+            .to_bytes()
+            .expect("value encoding failed");
+        let keyring_bytes = keyring.to_bytes();
+        let signed = sign_data_value_with_keyring(
+            &value,
+            0xfeed_beef,
+            7,
+            &keyring_bytes,
+            PROTECTION_SIGNATURE_SUITE_ED25519,
+        )
+        .expect("sign_data_value_with_keyring failed");
+        let bundle = keyring.public_key_bundle();
+
+        verify_data_value_with_policy(
+            &signed,
+            &bundle.as_bytes(),
+            0xfeed_beef,
+            7,
+            PROTECTION_SIGNATURE_SUITE_ED25519,
+        )
+        .expect("verify_data_value_with_policy failed");
+        let wrong_bundle = Keyring::generate().public_key_bundle();
+        assert!(
+            verify_data_value_with_policy(
+                &signed,
+                &wrong_bundle.as_bytes(),
+                0xfeed_beef,
+                7,
+                PROTECTION_SIGNATURE_SUITE_ED25519,
+            )
+            .is_err()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn encrypted_data_value_can_be_opened_through_wasm() {
+        let keyring = Keyring::generate();
+        let recipient = keyring.public_key_bundle();
+        let value = DataValue::Array(vec![DataValue::BoolTrue, DataValue::UnsignedNumber(42)])
+            .to_bytes()
+            .expect("value encoding failed");
+        let encrypted = encrypt_data_value(&value, &recipient.as_bytes(), 9)
+            .expect("encrypt_data_value failed");
+        let decrypted = decrypt_data_value(&encrypted, &keyring.to_bytes(), 9)
+            .expect("decrypt_data_value failed");
+
+        assert_eq!(decrypted, value);
+
+        let second_keyring = Keyring::generate();
+        let second_recipient = second_keyring.public_key_bundle();
+        let recipients = js_sys::Array::new();
+        recipients.push(&js_sys::Uint8Array::from(&recipient.as_bytes()[..]));
+        recipients.push(&js_sys::Uint8Array::from(&second_recipient.as_bytes()[..]));
+        let multi = encrypt_data_value_for_recipients(&value, recipients.into(), 9)
+            .expect("multi-recipient encryption failed");
+        let opened_by_second = decrypt_data_value(&multi, &second_keyring.to_bytes(), 9)
+            .expect("second recipient could not decrypt");
+        assert_eq!(opened_by_second, value);
     }
 }

@@ -1,8 +1,9 @@
 use std::time::{Duration, Instant};
 
 use mtp::client::MTPConnection;
+use mtp::codec::ProtectionPurpose;
 use mtp::codec::{CommunicationType, CommunicationValue, DataType, DataValue};
-use mtp::crypto::{Ed25519Signer, EncryptionType, Keyring, PublicKeyBundle, SigAlgorithm};
+use mtp::crypto::{Ed25519Signer, Keyring, PublicKeyBundle};
 use mtp::type_map::TypeMap;
 
 pub fn build_demo_message(
@@ -11,7 +12,6 @@ pub fn build_demo_message(
     server_bundle: &PublicKeyBundle,
 ) -> Result<CommunicationValue, Box<dyn std::error::Error>> {
     // Encrypt to the server's KEM public key; the server decrypts with its keyring.
-    let enc_type = EncryptionType::MlKemChaCha20Poly1305;
     let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)?;
 
     let tm = TypeMap::latest();
@@ -26,15 +26,16 @@ pub fn build_demo_message(
         (version_id, DataValue::Str("secret inner data".into())),
         (id_id, DataValue::UnsignedNumber(42)),
     ]);
-    let mut dv_enc = inner_enc;
-    dv_enc.encrypt_container(enc_type, server_bundle, b"demo-aad");
+    let dv_enc = inner_enc.encrypt_for(
+        std::slice::from_ref(server_bundle),
+        ProtectionPurpose::from(1),
+    )?;
 
     let inner_sig = DataValue::Container(vec![
         (version_id, DataValue::Str("signed by client".into())),
         (id_id, DataValue::UnsignedNumber(99)),
     ]);
-    let mut dv_sig = inner_sig;
-    dv_sig.sign_container(SigAlgorithm::ED25519, &signer);
+    let dv_sig = inner_sig.sign(client_id, ProtectionPurpose::from(2), &signer)?;
 
     let inner_sec = DataValue::Container(vec![
         (
@@ -43,18 +44,16 @@ pub fn build_demo_message(
         ),
         (id_id, DataValue::UnsignedNumber(7)),
     ]);
-    let mut dv_sec = inner_sec;
-    dv_sec.sign_and_encrypt_container(
-        SigAlgorithm::ED25519,
-        &signer,
-        enc_type,
-        server_bundle,
-        b"demo-aad",
-    );
+    let dv_sec = inner_sec
+        .sign(client_id, ProtectionPurpose::from(3), &signer)?
+        .encrypt_for(
+            std::slice::from_ref(server_bundle),
+            ProtectionPurpose::from(4),
+        )?;
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
+        .as_millis();
 
     let msg = CommunicationValue::new(CommunicationType::Ping)
         .add_typed_default(
@@ -101,7 +100,10 @@ pub async fn send_and_receive(
         Ok(resp) => {
             let roundtrip = start.elapsed();
             println!("Received: {resp}");
-            println!("Message round-trip: {:.3}ms", roundtrip.as_secs_f64() * 1000.0);
+            println!(
+                "Message round-trip: {:.3}ms",
+                roundtrip.as_secs_f64() * 1000.0
+            );
             Ok(roundtrip)
         }
         Err(e) => {

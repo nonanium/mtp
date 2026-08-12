@@ -124,7 +124,7 @@ let mut server = MTPWebServer::new(host_config, web).await?;
 while let Some(connection) = server.accept().await? {
     // connection: WebMTPConnection
     while let Ok(message) = connection.receive().await {
-        println!("received MTP message {}", message.get_id());
+        println!("received MTP message {:?}", message.id());
     }
 }
 ```
@@ -146,7 +146,7 @@ With port `0` and TCP enabled, construction binds TCP first and binds UDP to the
 
 | Policy | Behavior |
 |--------|----------|
-| `Unauthenticated` (default) | No authentication handshake is performed. The connection has `AuthState::Unauthenticated` and a random 48-bit client ID. `guest_id_generator` is not used by this adapter. |
+| `Unauthenticated` (default) | No authentication handshake is performed. The connection has `AuthState::Unauthenticated` and a random full-width `u64` client ID. `guest_id_generator` is not used by this adapter. |
 | `AllowAuthentication` | The server accepts the first message. If it is an `Identification` or `Register` message, a full challenge-response handshake is performed. If it is an ordinary opening message, the connection remains unauthenticated. |
 | `ForceAuthentication` | The server requires a valid `Identification` or `Register` message as the first frame and performs the challenge-response handshake. Any other opening message is rejected. |
 

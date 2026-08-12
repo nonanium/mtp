@@ -124,6 +124,6 @@ See [Protocol Reference](PROTOCOL-REFERENCE.md#protocol-keepalive).
 
 ## Protocol Version Changes
 
-Add a protocol version by adding its type-map entry and `protocol_version` to the YAML configuration, then rebuild both peers. The type-map build script generates a version-specific `TypeMap` and keeps the enum as the union of all configured type names.
+Add a protocol version by adding its type-map entry and `protocol_version` to the YAML configuration, then rebuild both peers. The type-map build script generates a version-specific `TypeMap`. Native hosts built with the registry feature keep an enum union across configured versions; a browser client and its generated `mtp/type-map` declarations use only the map selected by that client's `protocol_version`, plus reserved names.
 
 For a backward-compatible change, keep existing communication and data IDs stable and add new types with the new version. For a breaking change, add a new version and register both versions on the host while clients migrate. A client compiles one protocol version; it can connect only when that version is present in the host registry. Remove an old version only after its clients no longer connect, because the host closes connections whose version is unsupported.

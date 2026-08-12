@@ -22,6 +22,10 @@ impl PipeWriter {
 }
 
 impl<S: tokio::io::AsyncWrite + Send + Unpin> PipeWriter<S> {
+    pub fn into_inner(self) -> S {
+        self.stream
+    }
+
     pub async fn finish_async(mut self) -> Result<(), mtp_common::CommunicationError> {
         tokio::io::AsyncWriteExt::shutdown(&mut self)
             .await
@@ -58,6 +62,10 @@ pub struct PipeReader<R = wtransport::RecvStream> {
 }
 
 impl<R> PipeReader<R> {
+    pub fn into_inner(self) -> R {
+        self.stream
+    }
+
     pub fn description(&self) -> &str {
         &self.description
     }

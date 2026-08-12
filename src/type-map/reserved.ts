@@ -1,16 +1,13 @@
-export const RESERVED_COMMUNICATION_TYPES = [
-  "Identification", "IdentificationResponse", "Register", "RegisterResponse",
-  "Challenge", "ChallengeResponse", "Ping", "Pong", "Disconnect", "Redirect",
-  "Shutdown", "Error", "ErrorParsing", "ErrorBadVersion", "BadRequest",
-  "Unauthorized", "Forbidden", "NotFound", "TooManyRequests", "InternalServerError",
-  "BadGateway", "ServiceUnavailable", "GatewayTimeout", "PipeRequest", "PipeResponse",
-  "PipeAbort",
-] as const;
+import reserved from "../../type-map/reserved.json" with { type: "json" };
 
-export const RESERVED_DATA_TYPES = [
-  "Version", "Id", "ClientNonce", "ServerNonce", "PublicKeys", "Signature",
-  "PqSignature", "Description", "Connected", "Timestamp", "Error", "ErrorParsing",
-  "ErrorMessage", "Accepted", "RequirePq",
-] as const;
-
-export const FIRST_USER_TYPE_ID = 32;
+export const FIRST_USER_TYPE_ID = reserved.firstUserTypeId;
+export const RESERVED_COMMUNICATION_TYPES = reserved.communication.map(
+  ({ name }) => name,
+);
+export const RESERVED_DATA_TYPES = reserved.data.map(({ name }) => name);
+export const RESERVED_COMMUNICATION_TYPE_IDS = Object.fromEntries(
+  reserved.communication.map(({ name, id }) => [name, id]),
+);
+export const RESERVED_DATA_TYPE_IDS = Object.fromEntries(
+  reserved.data.map(({ name, id }) => [name, id]),
+);

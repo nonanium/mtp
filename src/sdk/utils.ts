@@ -13,6 +13,11 @@ export function utf8Encode(text: string): Uint8Array {
   return bytes.subarray(0, len);
 }
 
+/** Return the current Unix time in milliseconds for MTP protocol fields. */
+export function unixTimeMillis(): bigint {
+  return BigInt(Date.now());
+}
+
 export function writeU64BE(value: bigint): Uint8Array {
   if (value < 0n || value > 0xffff_ffff_ffff_ffffn) throw new Error("u64 value out of range");
   const out = new Uint8Array(8);

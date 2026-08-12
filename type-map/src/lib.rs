@@ -92,6 +92,51 @@ impl TypeMap {
 
 include!(concat!(env!("OUT_DIR"), "/types.rs"));
 
+#[cfg(test)]
+mod tests {
+    use super::{DataType, TypeMap};
+
+    #[test]
+    fn current_relay_reserved_fields_use_generic_layout() {
+        let type_map = TypeMap::latest();
+
+        assert_eq!(
+            DataType::MessageId.try_to_id(&type_map).map(|id| id.0),
+            Some(15)
+        );
+        assert_eq!(
+            DataType::FinalRecipientId
+                .try_to_id(&type_map)
+                .map(|id| id.0),
+            Some(18)
+        );
+        assert_eq!(
+            DataType::CreatedAt.try_to_id(&type_map).map(|id| id.0),
+            Some(21)
+        );
+        assert_eq!(
+            DataType::MessageType.try_to_id(&type_map).map(|id| id.0),
+            Some(22)
+        );
+        assert_eq!(
+            DataType::Content.try_to_id(&type_map).map(|id| id.0),
+            Some(23)
+        );
+        assert_eq!(
+            DataType::Metadata.try_to_id(&type_map).map(|id| id.0),
+            Some(24)
+        );
+        assert_eq!(
+            DataType::RelayVersion.try_to_id(&type_map).map(|id| id.0),
+            Some(25)
+        );
+
+        for tombstoned_id in [16, 17, 19, 20] {
+            assert_eq!(type_map.data_type_name(tombstoned_id), None);
+        }
+    }
+}
+
 /* ============================= REGISTRY ============================= */
 #[cfg(feature = "registry")]
 pub use registry::*;
@@ -169,9 +214,17 @@ mod registry {
         use super::*;
 
         #[test]
-        fn builtin_contains_versions() {
+        fn builtin_registers_only_the_current_codec_version() {
             let r = Registry::builtin();
-            assert!(r.supports(&Version(0, 0)));
+            assert!(r.supports(&Version(3, 0)));
+            for removed_version in [Version(0, 0), Version(1, 0), Version(2, 0)] {
+                assert!(!r.supports(&removed_version));
+                assert_eq!(r.negotiate(&[removed_version]), None);
+            }
+            assert_eq!(
+                r.negotiate(&[Version(3, 0), Version(2, 0)]),
+                Some(Version(3, 0))
+            );
         }
 
         #[test]

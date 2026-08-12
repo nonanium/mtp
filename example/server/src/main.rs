@@ -6,7 +6,7 @@ mod tls;
 #[path = "web-server.rs"]
 mod web_server;
 
-use mtp::host::HostConfig;
+use mtp::host::{AuthenticationPolicy, AuthState, HostConfig};
 use mtp::type_map::TypeMap;
 use std::future::Future;
 use std::path::Path;
@@ -136,7 +136,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         host_keyring,
         Box::new(get_existing_client),
         Box::new(complete_register),
-    );
+    )
+    .with_authentication_policy(AuthenticationPolicy::AllowAuthentication);
 
     let mut host = mtp::webserver::MTPWebServer::new(config, web_server::config()?).await?;
     println!("Server listening on https://{}", host.local_addr());
@@ -158,9 +159,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let decrypt_keyring = Arc::clone(&decrypt_keyring);
         let metrics = Arc::clone(&metrics);
+        let registered_clients = Arc::clone(&clients);
         metrics.record_connection_version(&conn.version.to_string());
         tokio::spawn(async move {
             let desc = conn.description.as_deref().unwrap_or("(no description)");
+            let connection_state = match &conn.auth_state {
+                AuthState::Authenticated => "authenticated client",
+                AuthState::Unauthenticated => "unauthenticated client",
+                AuthState::Pending => "pending client",
+                AuthState::Failed => "failed client",
+            };
             println!(
                 "\n--- New connection (version {}, remote: {}, description: {desc}) ---",
                 conn.version,
@@ -168,7 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|addr| addr.to_string())
                     .unwrap_or_else(|| "unknown".into())
             );
-            println!("Client ID: {}", conn.client_id);
+            println!("Connection state: {connection_state}; MTP ID: {}", conn.client_id);
 
             let mut session = metrics.start_session(conn.client_id, desc.to_string());
 
@@ -177,6 +185,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Waiting for messages / pipe requests ...");
             let mut pipe_open = true;
             let mut message_open = true;
+            let mut accepted_direct_messages = mtp::codec::InMemoryReplayGuard::default();
+            let mut accepted_relay_messages = mtp::codec::InMemoryReplayGuard::default();
             let mut exit_reason = "normal".to_string();
 
             while pipe_open || message_open {
@@ -215,11 +225,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(message) => {
                                     println!("Received: {message}");
                                     let msg_start = std::time::Instant::now();
+                                    let registered_clients = registered_clients
+                                        .lock()
+                                        .map(|clients| clients.clone())
+                                        .unwrap_or_default();
                                     let result = handlers::process_and_respond(
                                         &message,
                                         tm,
                                         conn.client_public_key.as_ref(),
+                                        &registered_clients,
                                         &decrypt_keyring,
+                                        &mut accepted_direct_messages,
+                                        &mut accepted_relay_messages,
                                     );
                                     let latency = msg_start.elapsed();
                                     let ok = result.is_ok();

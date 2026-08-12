@@ -61,7 +61,7 @@ function devServerPath(root: string, filePath: string) {
   return `/${relativePath.split(path.sep).join("/")}`;
 }
 
-async function hashPackageInputs() {
+export async function hashPackageInputs(root = packageRoot) {
   const hash = crypto.createHash("sha256");
   const inputs = [
     "wasm/Cargo.toml",
@@ -74,11 +74,12 @@ async function hashPackageInputs() {
     "crypto/src",
     "type-map/Cargo.toml",
     "type-map/build.rs",
+    "type-map/reserved.json",
     "type-map/src",
   ];
 
   async function addPath(relativePath) {
-    const absolutePath = path.join(packageRoot, relativePath);
+    const absolutePath = path.join(root, relativePath);
     const stat = await fs.stat(absolutePath).catch(() => null);
     if (!stat) {
       return;
@@ -109,7 +110,7 @@ function quoteList(values: string[]): string {
     : values.map((value) => JSON.stringify(value)).join(" | ");
 }
 
-function parseTypeMapYaml(source: string, filePath: string) {
+export function parseTypeMapYaml(source: string, filePath: string) {
   const document = YAML.parseDocument(source, { prettyErrors: false });
   if (document.errors.length) {
     const error = document.errors[0];
@@ -120,27 +121,80 @@ function parseTypeMapYaml(source: string, filePath: string) {
     throw new Error(`${filePath}:${line}: ${error.message}`);
   }
   const root = document.toJS() as {
-    type_maps?: Record<
-      string,
-      {
-        CommunicationTypes?: Record<string, unknown>;
-        DataTypes?: Record<string, unknown>;
-      }
-    >;
+    protocol_version?: unknown;
+    type_maps?: unknown;
   };
+  if (
+    root === null ||
+    typeof root !== "object" ||
+    Array.isArray(root) ||
+    typeof root.protocol_version !== "string" ||
+    !/^\d+\.\d+$/.test(root.protocol_version)
+  ) {
+    throw new Error(
+      `${filePath}: protocol_version must be a string matching '<major>.<minor>'`,
+    );
+  }
+  if (
+    root.type_maps === null ||
+    typeof root.type_maps !== "object" ||
+    Array.isArray(root.type_maps)
+  ) {
+    throw new Error(`${filePath}: type_maps must be a mapping`);
+  }
+  const typeMaps = root.type_maps as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(typeMaps, root.protocol_version)) {
+    throw new Error(
+      `${filePath}: protocol_version '${root.protocol_version}' is not defined in type_maps`,
+    );
+  }
+
+  const reservedCommunicationTypes = new Set(RESERVED_COMMUNICATION_TYPES);
+  const reservedDataTypes = new Set(RESERVED_DATA_TYPES);
   const communicationTypes = new Set<string>(RESERVED_COMMUNICATION_TYPES);
   const dataTypes = new Set<string>(RESERVED_DATA_TYPES);
-  for (const [version, map] of Object.entries(root.type_maps ?? {})) {
+  for (const [version, rawMap] of Object.entries(typeMaps)) {
     if (!/^\d+\.\d+$/.test(version))
       throw new Error(`${filePath}: unparseable type-map version '${version}'`);
-    for (const [section, target] of [
-      ["CommunicationTypes", communicationTypes],
-      ["DataTypes", dataTypes],
-    ] as const) {
+    if (
+      rawMap === null ||
+      typeof rawMap !== "object" ||
+      Array.isArray(rawMap)
+    ) {
+      throw new Error(`${filePath}: ${version} must be a mapping`);
+    }
+    const map = rawMap as {
+      CommunicationTypes?: unknown;
+      DataTypes?: unknown;
+    };
+    for (const { section, reserved, selected } of [
+      {
+        section: "CommunicationTypes",
+        reserved: reservedCommunicationTypes,
+        selected: communicationTypes,
+      },
+      {
+        section: "DataTypes",
+        reserved: reservedDataTypes,
+        selected: dataTypes,
+      },
+    ]) {
+      const sectionValue = map[section as "CommunicationTypes" | "DataTypes"];
+      if (
+        sectionValue !== undefined &&
+        (sectionValue === null ||
+          typeof sectionValue !== "object" ||
+          Array.isArray(sectionValue))
+      ) {
+        throw new Error(`${filePath}: ${version}.${section} must be a mapping`);
+      }
       const ids = new Map<number, string>();
-      for (const [name, value] of Object.entries(
-        map[section as "CommunicationTypes" | "DataTypes"] ?? {},
-      )) {
+      for (const [name, value] of Object.entries(sectionValue ?? {})) {
+        if (reserved.has(name)) {
+          throw new Error(
+            `${filePath}: ${version}.${section}.${name} uses a reserved type name`,
+          );
+        }
         if (!Number.isInteger(value) || (value as number) < FIRST_USER_TYPE_ID)
           throw new Error(
             `${filePath}: ${version}.${section}.${name} must use an integer id >= ${FIRST_USER_TYPE_ID}`,
@@ -152,7 +206,9 @@ function parseTypeMapYaml(source: string, filePath: string) {
             `${filePath}: duplicate type id ${id} in ${section} (${previous} and ${name})`,
           );
         ids.set(id, name);
-        target.add(name);
+        if (version === root.protocol_version) {
+          selected.add(name);
+        }
       }
     }
   }
@@ -162,7 +218,7 @@ function parseTypeMapYaml(source: string, filePath: string) {
   };
 }
 
-function generateTypeMapModule(metadata: {
+export function generateTypeMapModule(metadata: {
   communicationTypes: string[];
   dataTypes: string[];
 }) {
@@ -171,7 +227,7 @@ function generateTypeMapModule(metadata: {
   return { js, dts };
 }
 
-async function writeTypeMapModule(outDir, typeMapsPath) {
+export async function writeTypeMapModule(outDir, typeMapsPath) {
   const source = await fs.readFile(typeMapsPath, "utf8").catch((error) => {
     throw new Error(
       `Failed to read type map '${typeMapsPath}': ${error.message}`,
@@ -186,7 +242,7 @@ async function writeTypeMapModule(outDir, typeMapsPath) {
   return source;
 }
 
-async function copyWasmBuildInputs(buildRoot) {
+export async function copyWasmBuildInputs(buildRoot) {
   const inputs = [
     "Cargo.lock",
     "wasm",
@@ -416,18 +472,19 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
         });
       }
 
-      const sourceWatchDirs = [
+      const sourceWatchPaths = [
         "wasm/src",
         "common/src",
         "codec/src",
         "crypto/src",
         "type-map/src",
+        "type-map/reserved.json",
       ].map((rel) => path.join(packageRoot, rel));
 
       server.watcher.add(state.typeMapsPath);
-      for (const dir of sourceWatchDirs) {
-        if (await pathExists(dir)) {
-          server.watcher.add(dir);
+      for (const sourcePath of sourceWatchPaths) {
+        if (await pathExists(sourcePath)) {
+          server.watcher.add(sourcePath);
         }
       }
 
@@ -435,8 +492,10 @@ export function mtp(options: MTPVitePluginOptions): VitePlugin {
       const scheduleRebuild = (changedPath: string) => {
         const resolved = path.resolve(changedPath);
         const isTypeMap = resolved === state.typeMapsPath;
-        const isSource = sourceWatchDirs.some((dir) =>
-          resolved.startsWith(`${dir}${path.sep}`),
+        const isSource = sourceWatchPaths.some(
+          (sourcePath) =>
+            resolved === sourcePath ||
+            resolved.startsWith(`${sourcePath}${path.sep}`),
         );
         if (!isTypeMap && !isSource) {
           return;

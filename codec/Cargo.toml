@@ -10,6 +10,7 @@ mtp-crypto = { version = "0.2.0", path = "../crypto", optional = true }
 base64 = "0.22"
 byteorder = "1.5"
 rand = { version = "0.10.1", features = ["std", "std_rng"] }
+thiserror = "2.0.18"
 
 [features]
 registry = ["mtp-type-map/registry"]
