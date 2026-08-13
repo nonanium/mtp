@@ -9,16 +9,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const wasmPath = path.resolve(__dirname, "../wasm/pkg/mtp_wasm_bg.wasm");
 const wasmBytes = fs.readFileSync(wasmPath);
 const wasmModule = new WebAssembly.Module(wasmBytes);
-initSync(wasmModule);
+initSync({ module: wasmModule });
 
-const relayFixtureCreatedAtMillis = BigInt(
-  fs
-    .readFileSync(
-      path.resolve(__dirname, "../fixtures/relay-created-at-ms.txt"),
-      "utf8",
-    )
-    .trim(),
-);
+const relayCreatedAtMillis = 1720000000123n;
 
 const sdk = await import("../dist/sdk/index.js");
 const { MTPRatchet } = await import("../dist/sdk/ratchet.js");
@@ -2383,7 +2376,7 @@ await describe("Relay API invariants", async () => {
     assert.equal(content.data.ExampleType, "inherited-policy");
   });
 
-  await it("reports the shared relay CreatedAt fixture as bigint", async () => {
+  await it("preserves relay CreatedAt milliseconds as bigint", async () => {
     const senderKeyring = sdk.crypto.generateKeyring();
     const recipientKeyring = sdk.crypto.generateKeyring();
     const frame = sdk.codec.decode(
@@ -2394,7 +2387,7 @@ await describe("Relay API invariants", async () => {
         42n,
         42n,
         "message-generic",
-        relayFixtureCreatedAtMillis,
+        relayCreatedAtMillis,
         bindings.encode_data_value({ ExampleType: "opaque-to-content-only-relays" }),
         senderKeyring,
         bindings.mtp_protection_signature_suite_dual(),
@@ -2418,7 +2411,7 @@ await describe("Relay API invariants", async () => {
     assert.equal(metadata.signerId, 11n);
     assert.equal(metadata.finalRecipientId, 42n);
     assert.equal(metadata.messageId, "message-generic");
-    assert.equal(metadata.createdAt, relayFixtureCreatedAtMillis);
+    assert.equal(metadata.createdAt, relayCreatedAtMillis);
     assert.deepEqual(metadata.metadata, {
       ExampleType: "opaque-to-content-only-relays",
     });
@@ -2430,7 +2423,7 @@ await describe("Relay API invariants", async () => {
       signerId: 11n,
       finalRecipientId: 42n,
       messageId: "message-generic",
-      createdAt: relayFixtureCreatedAtMillis,
+      createdAt: relayCreatedAtMillis,
       metadata: { ExampleType: "opaque-to-content-only-relays" },
     });
   });

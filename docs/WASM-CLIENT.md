@@ -120,6 +120,7 @@ The `storage` option supplies the credential adapter. The adapter stores the cli
 
 `sessionStorage` and `encryptedSecretProvider` are separate caller-managed
 stores. The latter exchanges `MTPEncryptedSecretRecord` values through
+`set`, `get`, and `delete`; the `MTPClient` convenience methods are named
 `setEncryptedSecret`, `getEncryptedSecret`, and `deleteEncryptedSecret`.
 `MTPSessionManager` does not automatically route session state through the
 provider. If session material must be encrypted at rest, the caller must make
@@ -637,12 +638,40 @@ config.free();
 Raw callbacks receive parsed frames, not application-specific SDK objects:
 
 ```typescript
+interface ParsedEncryptedValue {
+  kind: "encrypted";
+  encryptionType: number;
+  purpose: number;
+  recipientCount: number;
+  encoded: Uint8Array;
+}
+
+interface ParsedSignedValue {
+  kind: "signed";
+  signatureType: number;
+  purpose: number;
+  signerId: bigint;
+  value: ParsedDataValue;
+}
+
+type ParsedDataValue =
+  | boolean
+  | number
+  | bigint
+  | string
+  | Uint8Array
+  | ParsedDataValue[]
+  | { [key: string]: ParsedDataValue }
+  | ParsedEncryptedValue
+  | ParsedSignedValue
+  | null;
+
 interface ParsedFrame {
   id?: number;
   type: string;
   sender?: bigint;
   receiver?: bigint;
-  data: Record<string, unknown>;
+  data: ParsedDataValue;
   raw: Uint8Array;
 }
 ```

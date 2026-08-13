@@ -64,7 +64,9 @@ function devServerPath(root: string, filePath: string) {
 export async function hashPackageInputs(root = packageRoot) {
   const hash = crypto.createHash("sha256");
   const inputs = [
+    "Cargo.lock",
     "wasm/Cargo.toml",
+    "wasm/.cargo/config.toml",
     "wasm/src",
     "common/Cargo.toml",
     "common/src",

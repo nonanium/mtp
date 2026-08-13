@@ -1,5 +1,5 @@
 [env]
-MTP_TYPE_MAPS = { value = "example-type-maps.yaml", relative = true }
+MTP_TYPE_MAPS = { value = "example/type-maps.yaml", relative = true }
 
 # web-sys's WebTransport* bindings are behind unstable APIs, gated by this cfg.
 # Scoped to the wasm32 target so it applies to the wasm crate however cargo is

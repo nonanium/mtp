@@ -1,12 +1,12 @@
 [package]
 name = "mtp-files"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
 # Only the plain key types (`Keyring`, `PublicKeyBundle`, `CryptoError`) are
 # needed here; those are always compiled, so no crypto features are required.
-mtp-crypto = { version = "0.2.0", path = "../crypto", default-features = false, features = ["chacha20poly1305", "hkdf"] }
+mtp-crypto = { version = "0.3.0", path = "../crypto", default-features = false, features = ["chacha20poly1305", "hkdf"] }
 argon2 = "0.5"
 rand = "0.10.2"
 
@@ -16,3 +16,8 @@ zeroize = "1.9"
 [features]
 # Plain private-key files are only needed by migration tooling and tests.
 raw = []
+
+[dev-dependencies]
+# Enable suite implementations for bundle-loading tests without adding them to
+# the normal files-library dependency surface.
+mtp-crypto = { version = "0.3.0", path = "../crypto", features = ["mlkem-tls"] }

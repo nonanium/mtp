@@ -643,13 +643,6 @@ mod tests {
         Ed25519Signer::new(&keyring.sig_cl_secret_key).expect("Ed25519 signer")
     }
 
-    fn relay_fixture_created_at_millis() -> u64 {
-        include_str!("../../fixtures/relay-created-at-ms.txt")
-            .trim()
-            .parse()
-            .expect("relay timestamp fixture must be an unsigned integer")
-    }
-
     fn relay_frame_with_version(
         version: Option<u64>,
         include_v1_fields: bool,
@@ -780,20 +773,20 @@ mod tests {
     }
 
     #[test]
-    fn relay_fixture_encodes_created_at_as_exact_milliseconds() {
+    fn relay_created_at_preserves_exact_milliseconds() {
         let sender = Keyring::generate();
         let recipient = Keyring::generate();
         let signer = ed_signer(&sender);
-        let created_at = relay_fixture_created_at_millis();
+        let created_at = 1_720_000_000_123;
         let frame = SealedRelayBuilder::new(
             "ProtectedMessage",
-            DataValue::Str("fixture content".into()),
+            DataValue::Str("timestamp content".into()),
             11,
             42,
             42,
             &signer,
         )
-        .message_id("relay-created-at-ms-fixture")
+        .message_id("relay-created-at-millis")
         .created_at(created_at)
         .metadata_recipients(vec![recipient.public_key_bundle()])
         .content_recipients(vec![recipient.public_key_bundle()])

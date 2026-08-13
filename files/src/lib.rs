@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn bundle_save_load_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let path = temp_path(BUNDLE_EXTENSION);
-        let bundle = sample_keyring().public_key_bundle();
+        let bundle = Keyring::generate().public_key_bundle();
         save_public_key_bundle(&bundle, &path)?;
         let loaded = load_public_key_bundle(&path)?;
         assert_eq!(bundle.as_bytes(), loaded.as_bytes());
@@ -358,7 +358,8 @@ mod tests {
     #[test]
     fn loading_bundle_as_keyring_fails_on_magic() -> Result<(), Box<dyn std::error::Error>> {
         let path = temp_path(BUNDLE_EXTENSION);
-        save_public_key_bundle(&sample_keyring().public_key_bundle(), &path)?;
+        let bundle = Keyring::generate().public_key_bundle();
+        save_public_key_bundle(&bundle, &path)?;
         assert!(matches!(
             load_keyring(&path, b"passphrase"),
             Err(FileError::BadMagic { .. })

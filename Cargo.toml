@@ -45,24 +45,24 @@ resolver = "3"
 # =============================================================================
 [package]
 name = "mtp"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
 # --- always-on core ---
-mtp-common = { version = "0.2.0", path = "common" }
-mtp-type-map = { version = "0.2.0", path = "type-map" }
-mtp-codec = { version = "0.2.0", path = "codec" }
+mtp-common = { version = "0.3.0", path = "common" }
+mtp-type-map = { version = "0.3.0", path = "type-map" }
+mtp-codec = { version = "0.3.0", path = "codec" }
 # --- optional, behind features ---
-mtp-crypto = { version = "0.2.0", path = "crypto", optional = true, features = [
+mtp-crypto = { version = "0.3.0", path = "crypto", optional = true, features = [
     "serde",
     "mlkem-tls",
 ] }
-mtp-host = { version = "0.2.0", path = "host", optional = true }
-mtp-client = { version = "0.2.0", path = "client", optional = true }
-mtp-files = { version = "0.2.0", path = "files", optional = true }
-mtp-webserver = { version = "0.2.0", path = "mtp-webserver", optional = true }
-mtp-transport = { version = "0.2.0", path = "transport", optional = true }
+mtp-host = { version = "0.3.0", path = "host", optional = true }
+mtp-client = { version = "0.3.0", path = "client", optional = true }
+mtp-files = { version = "0.3.0", path = "files", optional = true }
+mtp-webserver = { version = "0.3.0", path = "mtp-webserver", optional = true }
+mtp-transport = { version = "0.3.0", path = "transport", optional = true }
 
 [features]
 # Serialization

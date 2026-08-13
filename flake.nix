@@ -73,7 +73,7 @@
             pnpm run test:e2e
             pnpm run test:secrets
             pnpm run test:types
-            pnpm run check:boundary
+            pnpm run test:boundary
             pnpm --filter mtp-web-client run build
           '';
         };

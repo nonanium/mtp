@@ -13,6 +13,11 @@ export interface DisposableWasmObject {
 export type StateChangeCallback = (state: ConnectionState) => void;
 export type MessageCallback = (frame: ParsedFrame) => void;
 export type ErrorCallback = (error: string) => void;
+export interface PipeRequest {
+  pipeId: number;
+  description: string;
+}
+export type PipeRequestCallback = (request: PipeRequest) => void;
 
 export interface Ed25519GenerateResult {
   signer: WasmEd25519Signer;
@@ -104,6 +109,34 @@ export class WasmChaCha20Poly1305 implements DisposableWasmObject {
   encrypt(plaintext: Uint8Array, aad: Uint8Array): Uint8Array;
 }
 
+export class PipeReader implements DisposableWasmObject {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  read(): Promise<Uint8Array | null>;
+  pipe_id(): number;
+  description(): string;
+}
+
+export class PipeWriter implements DisposableWasmObject {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  write(data: Uint8Array): Promise<void>;
+  close(): Promise<void>;
+  abort(): void;
+  pipe_id(): number;
+}
+
+export class WasmPipeHandle implements DisposableWasmObject {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  wait(): Promise<PipeWriter | null>;
+  readonly pipe_id: number;
+  readonly description: string;
+}
+
 export interface KemEncapsulateResult {
   shared_secret: Uint8Array;
   ciphertext: Uint8Array;
@@ -126,12 +159,13 @@ export class WasmKemKeypair implements DisposableWasmObject {
 
 export class WasmClient implements DisposableWasmObject {
   constructor(
-    on_state_change: StateChangeCallback,
-    on_message: MessageCallback,
-    on_error: ErrorCallback,
+    on_state_change?: StateChangeCallback | null,
+    on_message?: MessageCallback | null,
+    on_error?: ErrorCallback | null,
   );
   free(): void;
   [Symbol.dispose](): void;
+  accept_pipe(pipe_id: number): Promise<PipeReader>;
   auth_connect(
     config: ConnectionConfig,
     host_public_key_bytes: Uint8Array,
@@ -145,6 +179,9 @@ export class WasmClient implements DisposableWasmObject {
   ): Promise<bigint>;
   connect(config: ConnectionConfig): Promise<void>;
   disconnect(): void;
+  create_pipe(description: string): Promise<WasmPipeHandle>;
+  deny_pipe(pipe_id: number): Promise<void>;
+  set_on_pipe_request(callback?: PipeRequestCallback): void;
   request(
     frame: Uint8Array,
     response_type?: string | null,
@@ -176,6 +213,7 @@ export class WasmKeyring implements DisposableWasmObject {
   static from_bytes(bytes: Uint8Array): WasmKeyring;
   public_key_bundle(): WasmPublicKeyBundle;
   to_bytes(): Uint8Array;
+  validate_encryption(): void;
   validate_full(): void;
 }
 
