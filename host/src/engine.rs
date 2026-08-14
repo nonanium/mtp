@@ -344,7 +344,7 @@ impl HandshakeEngine {
         // Authenticated clients include PublicKeys in Identification as an
         // intent marker; this avoids acknowledging the opening as a guest
         // connection and leaving the client waiting for a Challenge.
-        if Some(first_msg.get_type()) == CommunicationType::Register.try_to_id(&tm)
+        if Some(first_msg.get_type()) == CommunicationType::Register.try_to_id(tm)
             || first_msg.get_data(DataType::PublicKeys).is_some()
         {
             send_rejection_generic(
@@ -400,7 +400,7 @@ impl HandshakeEngine {
         let tm = codec.type_map();
 
         // Register frames always go through full authentication
-        if Some(first_msg.get_type()) == CommunicationType::Register.try_to_id(&tm) {
+        if Some(first_msg.get_type()) == CommunicationType::Register.try_to_id(tm) {
             let bundle = match extract_register_bundle(&first_msg) {
                 Ok(bundle) => bundle,
                 Err(error) => {
@@ -425,7 +425,7 @@ impl HandshakeEngine {
         }
 
         // Identification: try lookup, fall back to guest
-        if Some(first_msg.get_type()) == CommunicationType::Identification.try_to_id(&tm) {
+        if Some(first_msg.get_type()) == CommunicationType::Identification.try_to_id(tm) {
             let cid = match first_msg.get_data(DataType::Id) {
                 Some(DataValue::UnsignedNumber(n)) => u64::try_from(*n).unwrap_or(0),
                 _ => 0,
@@ -504,7 +504,7 @@ impl HandshakeEngine {
         let tm = codec.type_map();
 
         let (flow, response_type) = if Some(first_msg.get_type())
-            == CommunicationType::Identification.try_to_id(&tm)
+            == CommunicationType::Identification.try_to_id(tm)
         {
             let cid = match first_msg.get_data(DataType::Id) {
                 Some(DataValue::UnsignedNumber(n)) => match u64::try_from(*n) {
@@ -545,7 +545,7 @@ impl HandshakeEngine {
                 Flow::Login { id: cid, bundle },
                 CommunicationType::IdentificationResponse,
             )
-        } else if Some(first_msg.get_type()) == CommunicationType::Register.try_to_id(&tm) {
+        } else if Some(first_msg.get_type()) == CommunicationType::Register.try_to_id(tm) {
             let bundle = match extract_register_bundle(&first_msg) {
                 Ok(bundle) => bundle,
                 Err(error) => {
@@ -710,7 +710,7 @@ impl HandshakeEngine {
             sender.close();
             AcceptError::Receive(e)
         })?;
-        if Some(proof.get_type()) != CommunicationType::ChallengeResponse.try_to_id(&tm) {
+        if Some(proof.get_type()) != CommunicationType::ChallengeResponse.try_to_id(tm) {
             let error = AcceptError::AuthenticationFailed("missing challenge response".into());
             reject_error_generic(sender, &error, tm).await;
             return Err(error);
@@ -1041,8 +1041,8 @@ impl HandshakeSender for mtp_transport::Sender {
     ) -> impl std::future::Future<Output = Result<(), CommunicationError>> + Send {
         mtp_transport::Sender::finish_stream(self)
     }
-    fn set_type_map(&self, type_map: &TypeMap) -> impl std::future::Future<Output = ()> + Send {
-        async move { self.set_type_map(type_map).await }
+    async fn set_type_map(&self, type_map: &TypeMap) {
+        self.set_type_map(type_map).await;
     }
     fn close(&self) {
         let sender = self.clone();
@@ -1058,8 +1058,8 @@ impl HandshakeReceiver for mtp_transport::Receiver {
         mtp_transport::Receiver::receive(self)
     }
 
-    fn set_type_map(&self, type_map: &TypeMap) -> impl std::future::Future<Output = ()> + Send {
-        async move { self.set_type_map(type_map).await }
+    async fn set_type_map(&self, type_map: &TypeMap) {
+        self.set_type_map(type_map).await;
     }
 }
 
@@ -1075,8 +1075,8 @@ impl<C: mtp_transport::TransportConnection> HandshakeSender for mtp_transport::G
     ) -> impl std::future::Future<Output = Result<(), CommunicationError>> + Send {
         mtp_transport::GenericSender::finish_stream(self)
     }
-    fn set_type_map(&self, type_map: &TypeMap) -> impl std::future::Future<Output = ()> + Send {
-        async move { self.set_type_map(type_map).await }
+    async fn set_type_map(&self, type_map: &TypeMap) {
+        self.set_type_map(type_map).await;
     }
     fn close(&self) {
         mtp_transport::GenericSender::close(self);
@@ -1093,8 +1093,8 @@ impl<C: mtp_transport::TransportConnection> HandshakeReceiver
         mtp_transport::GenericReceiver::receive(self)
     }
 
-    fn set_type_map(&self, type_map: &TypeMap) -> impl std::future::Future<Output = ()> + Send {
-        async move { self.set_type_map(type_map).await }
+    async fn set_type_map(&self, type_map: &TypeMap) {
+        self.set_type_map(type_map).await;
     }
 }
 

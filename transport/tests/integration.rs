@@ -342,13 +342,17 @@ async fn test_max_frames_per_stream_enforced() -> Result<(), Box<dyn std::error:
     let tm = TypeMap::latest();
     client_tx
         .send(&numbered_message(CommunicationType::Ping, 1, &tm))
-        .await?;
-    let first = host_rx.receive().await?;
+        .await
+        .expect("first frame should be sent");
+    let first = host_rx
+        .receive()
+        .await
+        .expect("first frame should be received");
     assert_numbered_message(&first, CommunicationType::Ping, 1, &tm);
 
-    client_tx
+    let _ = client_tx
         .send(&numbered_message(CommunicationType::Ping, 2, &tm))
-        .await?;
+        .await;
     let second = host_rx.receive().await;
     assert!(second.is_err(), "stream should be closed after frame limit");
 

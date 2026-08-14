@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use mtp::codec::{
     CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue, InMemoryReplayGuard,
-    ProtectionPolicy, ProtectionPurpose, SignaturePolicy, TypeMap,
+    ProtectedOpenOptions, ProtectionPolicy, ProtectionPurpose, SignaturePolicy, TypeMap,
     forward_relay_frame, open_protected_with, open_relay_content, open_relay_metadata_with,
 };
 use mtp::crypto::{Keyring, PublicKeyBundle};
@@ -70,10 +70,12 @@ fn process_direct_protected(
         std::slice::from_ref(&host_keyring),
         None,
         |signer_id| resolve_signer_key(signer_id, registered_clients).map(|key| vec![key]),
-        Some(DIRECT_DESTINATION_ID),
-        ProtectionPurpose::from(DIRECT_SIGNATURE_PURPOSE),
-        ProtectionPurpose::from(DIRECT_ENCRYPTION_PURPOSE),
-        SIGNATURE_POLICY,
+        ProtectedOpenOptions::new(
+            Some(DIRECT_DESTINATION_ID),
+            ProtectionPurpose::from(DIRECT_SIGNATURE_PURPOSE),
+            ProtectionPurpose::from(DIRECT_ENCRYPTION_PURPOSE),
+            SIGNATURE_POLICY,
+        ),
         Some(accepted_messages),
     )
     .map_err(|e| format!("direct protected message could not be authenticated: {e}"))?;

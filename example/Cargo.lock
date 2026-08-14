@@ -1404,7 +1404,6 @@ dependencies = [
  "mtp-host",
  "mtp-transport",
  "quinn",
- "rand",
  "rustls",
  "thiserror 2.0.20",
  "tokio",

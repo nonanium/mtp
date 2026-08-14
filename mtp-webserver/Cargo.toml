@@ -25,7 +25,6 @@ rustls = "0.23"
 tracing = "0.1"
 thiserror = "2"
 async-trait = "0.1"
-rand = { version = "0.10.1", optional = true }
 
 [dev-dependencies]
 rcgen = "0.14"
@@ -33,5 +32,5 @@ hyper = { version = "1", features = ["client", "http2"] }
 
 [features]
 default = []
-crypto = ["mtp-host/crypto", "dep:rand"]
+crypto = ["mtp-host/crypto"]
 pipes = ["mtp-host/pipes", "mtp-transport/pipes"]

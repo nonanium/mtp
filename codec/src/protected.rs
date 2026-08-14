@@ -247,6 +247,35 @@ pub struct VerifiedProtectedMessage {
     pub matched_signer_key_index: usize,
 }
 
+/// Options that control verification of a direct protected message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProtectedOpenOptions {
+    /// Require the protected frame to be addressed to this receiver when set.
+    pub expected_receiver_id: Option<u64>,
+    /// Purpose used to verify the protected envelope signature.
+    pub signature_purpose: ProtectionPurpose,
+    /// Purpose used to decrypt the protected envelope.
+    pub encryption_purpose: ProtectionPurpose,
+    /// Signature algorithms accepted by the receiver.
+    pub policy: ProtectionPolicy,
+}
+
+impl ProtectedOpenOptions {
+    pub const fn new(
+        expected_receiver_id: Option<u64>,
+        signature_purpose: ProtectionPurpose,
+        encryption_purpose: ProtectionPurpose,
+        policy: ProtectionPolicy,
+    ) -> Self {
+        Self {
+            expected_receiver_id,
+            signature_purpose,
+            encryption_purpose,
+            policy,
+        }
+    }
+}
+
 fn protected_field_id(
     data_type: DataType,
     type_map: &TypeMap,
@@ -385,10 +414,7 @@ pub fn open_protected_with<F>(
     keyrings: &[&Keyring],
     expected_signer_id: Option<u64>,
     resolve_signer_keys: F,
-    expected_receiver_id: Option<u64>,
-    signature_purpose: ProtectionPurpose,
-    encryption_purpose: ProtectionPurpose,
-    policy: ProtectionPolicy,
+    options: ProtectedOpenOptions,
     replay_guard: Option<&mut dyn ReplayGuard>,
 ) -> Result<VerifiedProtectedMessage, ProtectedError>
 where
@@ -396,7 +422,7 @@ where
 {
     validate_protected_frame(frame)?;
     let type_map = frame.type_map().cloned().unwrap_or_else(TypeMap::latest);
-    let decrypted = decrypt_protected_payload(frame, keyrings, encryption_purpose)?;
+    let decrypted = decrypt_protected_payload(frame, keyrings, options.encryption_purpose)?;
     let signed = decrypted
         .as_signed()
         .ok_or(ProtectedError::PayloadNotSigned)?;
@@ -411,16 +437,7 @@ where
     }
     let signer_keys = resolve_signer_keys(signed.signer_id)
         .ok_or(ProtectionError::SignerKeyNotFound(signed.signer_id))?;
-    open_decrypted_protected(
-        frame,
-        type_map,
-        signed,
-        &signer_keys,
-        expected_receiver_id,
-        signature_purpose,
-        policy,
-        replay_guard,
-    )
+    open_decrypted_protected(frame, type_map, signed, &signer_keys, options, replay_guard)
 }
 
 /// Open a direct protected message against already resolved trusted signer
@@ -431,14 +448,11 @@ pub fn open_protected_with_keys(
     keyrings: &[&Keyring],
     expected_signer_id: u64,
     signer_public_keys: &[PublicKeyBundle],
-    expected_receiver_id: Option<u64>,
-    signature_purpose: ProtectionPurpose,
-    encryption_purpose: ProtectionPurpose,
-    policy: ProtectionPolicy,
+    options: ProtectedOpenOptions,
     replay_guard: Option<&mut dyn ReplayGuard>,
 ) -> Result<VerifiedProtectedMessage, ProtectedError> {
     let type_map = validate_protected_frame(frame)?;
-    let decrypted = decrypt_protected_payload(frame, keyrings, encryption_purpose)?;
+    let decrypted = decrypt_protected_payload(frame, keyrings, options.encryption_purpose)?;
     let signed = decrypted
         .as_signed()
         .ok_or(ProtectedError::PayloadNotSigned)?;
@@ -454,9 +468,7 @@ pub fn open_protected_with_keys(
         type_map,
         signed,
         signer_public_keys,
-        expected_receiver_id,
-        signature_purpose,
-        policy,
+        options,
         replay_guard,
     )
 }
@@ -468,21 +480,15 @@ pub fn open_protected(
     keyring: &Keyring,
     expected_signer_id: u64,
     signer_public_key: &PublicKeyBundle,
-    expected_receiver_id: Option<u64>,
-    signature_purpose: ProtectionPurpose,
-    encryption_purpose: ProtectionPurpose,
-    policy: ProtectionPolicy,
+    options: ProtectedOpenOptions,
     replay_guard: Option<&mut dyn ReplayGuard>,
 ) -> Result<VerifiedProtectedMessage, ProtectedError> {
     open_protected_with_keys(
         frame,
         std::slice::from_ref(&keyring),
         expected_signer_id,
-        std::slice::from_ref(&signer_public_key),
-        expected_receiver_id,
-        signature_purpose,
-        encryption_purpose,
-        policy,
+        std::slice::from_ref(signer_public_key),
+        options,
         replay_guard,
     )
 }
@@ -492,19 +498,20 @@ fn open_decrypted_protected(
     type_map: TypeMap,
     signed: &crate::SignedValue,
     signer_public_keys: &[PublicKeyBundle],
-    expected_receiver_id: Option<u64>,
-    signature_purpose: ProtectionPurpose,
-    policy: ProtectionPolicy,
+    options: ProtectedOpenOptions,
     mut replay_guard: Option<&mut dyn ReplayGuard>,
 ) -> Result<VerifiedProtectedMessage, ProtectedError> {
     let matched_signer_key_index = signed.verify_with_key_history_index(
         signed.signer_id,
         signer_public_keys,
-        signature_purpose,
-        policy,
+        options.signature_purpose,
+        options.policy,
     )?;
     let receiver_id = frame.receiver().ok_or(ProtectedError::MissingReceiver)?;
-    if expected_receiver_id.is_some_and(|expected| expected != receiver_id) {
+    if options
+        .expected_receiver_id
+        .is_some_and(|expected| expected != receiver_id)
+    {
         return Err(ProtectedError::ExpectedReceiverMismatch);
     }
     if frame
@@ -567,6 +574,15 @@ mod tests {
 
     const SIGNATURE_PURPOSE: ProtectionPurpose = ProtectionPurpose(0x40);
     const ENCRYPTION_PURPOSE: ProtectionPurpose = ProtectionPurpose(0x41);
+
+    fn open_options(expected_receiver_id: Option<u64>) -> ProtectedOpenOptions {
+        ProtectedOpenOptions::new(
+            expected_receiver_id,
+            SIGNATURE_PURPOSE,
+            ENCRYPTION_PURPOSE,
+            ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+        )
+    }
 
     #[derive(Default)]
     struct RecordingReplayGuard {
@@ -720,10 +736,7 @@ mod tests {
             &recipient,
             7,
             &sender.public_key_bundle(),
-            Some(42),
-            SIGNATURE_PURPOSE,
-            ENCRYPTION_PURPOSE,
-            ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+            open_options(Some(42)),
             Some(&mut guard),
         )
         .expect("protected message should open");
@@ -737,10 +750,7 @@ mod tests {
                 &recipient,
                 7,
                 &sender.public_key_bundle(),
-                Some(42),
-                SIGNATURE_PURPOSE,
-                ENCRYPTION_PURPOSE,
-                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+                open_options(Some(42)),
                 Some(&mut guard),
             ),
             Err(ProtectedError::Replay)
@@ -777,10 +787,7 @@ mod tests {
             &recipient,
             7,
             &sender.public_key_bundle(),
-            Some(42),
-            SIGNATURE_PURPOSE,
-            ENCRYPTION_PURPOSE,
-            ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+            open_options(Some(42)),
             None,
         )
         .expect("outer fields should verify");
@@ -813,10 +820,7 @@ mod tests {
                 &recipient,
                 7,
                 &sender.public_key_bundle(),
-                Some(42),
-                SIGNATURE_PURPOSE,
-                ENCRYPTION_PURPOSE,
-                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+                open_options(Some(42)),
                 None,
             ),
             Err(ProtectedError::MissingProtectedVersion)
@@ -844,10 +848,7 @@ mod tests {
                 &recipient,
                 7,
                 &sender.public_key_bundle(),
-                Some(42),
-                SIGNATURE_PURPOSE,
-                ENCRYPTION_PURPOSE,
-                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+                open_options(Some(42)),
                 None,
             ),
             Err(ProtectedError::UnsupportedProtectedVersion(2))
@@ -897,10 +898,7 @@ mod tests {
                 &recipient,
                 7,
                 &sender.public_key_bundle(),
-                None,
-                SIGNATURE_PURPOSE,
-                ENCRYPTION_PURPOSE,
-                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+                open_options(None),
                 None,
             ),
             Err(ProtectedError::MessageTypeMismatch)
@@ -913,10 +911,7 @@ mod tests {
                 &recipient,
                 7,
                 &sender.public_key_bundle(),
-                None,
-                SIGNATURE_PURPOSE,
-                ENCRYPTION_PURPOSE,
-                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+                open_options(None),
                 None,
             ),
             Err(ProtectedError::FinalRecipientMismatch)
@@ -944,10 +939,7 @@ mod tests {
                 &recipient,
                 7,
                 &sender.public_key_bundle(),
-                None,
-                SIGNATURE_PURPOSE,
-                ENCRYPTION_PURPOSE,
-                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+                open_options(None),
                 None,
             ),
             Err(ProtectedError::FinalRecipientMismatch)
@@ -959,10 +951,7 @@ mod tests {
                 &recipient,
                 7,
                 &sender.public_key_bundle(),
-                Some(43),
-                SIGNATURE_PURPOSE,
-                ENCRYPTION_PURPOSE,
-                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+                open_options(Some(43)),
                 None,
             ),
             Err(ProtectedError::ExpectedReceiverMismatch)
@@ -994,10 +983,7 @@ mod tests {
             &recipient,
             7,
             &sender.public_key_bundle(),
-            Some(42),
-            SIGNATURE_PURPOSE,
-            ENCRYPTION_PURPOSE,
-            ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+            open_options(Some(42)),
             None,
         )
         .expect("matching exposed sender");
@@ -1007,10 +993,7 @@ mod tests {
                 &recipient,
                 7,
                 &sender.public_key_bundle(),
-                Some(42),
-                SIGNATURE_PURPOSE,
-                ENCRYPTION_PURPOSE,
-                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+                open_options(Some(42)),
                 None,
             ),
             Err(ProtectedError::SenderMismatch)
@@ -1049,10 +1032,7 @@ mod tests {
                 &recipient,
                 7,
                 &sender.public_key_bundle(),
-                Some(42),
-                SIGNATURE_PURPOSE,
-                ENCRYPTION_PURPOSE,
-                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+                open_options(Some(42)),
                 None,
             ),
             Err(ProtectedError::PayloadNotEncrypted)
@@ -1066,10 +1046,7 @@ mod tests {
                 &recipient,
                 7,
                 &sender.public_key_bundle(),
-                Some(42),
-                SIGNATURE_PURPOSE,
-                ENCRYPTION_PURPOSE,
-                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+                open_options(Some(42)),
                 None,
             ),
             Err(ProtectedError::PayloadNotSigned)
@@ -1090,10 +1067,7 @@ mod tests {
                 resolver_calls += 1;
                 Some(vec![sender.public_key_bundle()])
             },
-            Some(42),
-            SIGNATURE_PURPOSE,
-            ENCRYPTION_PURPOSE,
-            ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+            open_options(Some(42)),
             None,
         );
         assert!(matches!(
@@ -1138,10 +1112,7 @@ mod tests {
                 current_sender.public_key_bundle(),
                 old_sender.public_key_bundle(),
             ],
-            Some(42),
-            SIGNATURE_PURPOSE,
-            ENCRYPTION_PURPOSE,
-            ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+            open_options(Some(42)),
             None,
         )
         .expect("key history should open");
@@ -1167,10 +1138,7 @@ mod tests {
             &recipient,
             7,
             &sender.public_key_bundle(),
-            Some(42),
-            SIGNATURE_PURPOSE,
-            ENCRYPTION_PURPOSE,
-            ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+            open_options(Some(42)),
             None,
         )
         .expect("arbitrary application value should open");

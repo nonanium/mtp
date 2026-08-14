@@ -220,6 +220,7 @@ pub type WebMtpReceiver = GenericReceiver<H3TransportConnection>;
 pub type WebMTPConnection =
     mtp_host::MTPConnection<WebMtpSender, WebMtpReceiver, H3TransportReceiver>;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn accept_web_connection(
     session: Arc<Session>,
     path: String,
@@ -268,6 +269,7 @@ pub(crate) async fn accept_web_connection(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn accept_web_connection_inner(
     session: Arc<Session>,
     path: String,

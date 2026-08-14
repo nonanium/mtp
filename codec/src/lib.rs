@@ -16,8 +16,8 @@ pub use mtp_common::{CodecError, TimeError, unix_time_millis};
 #[cfg(feature = "crypto")]
 pub use protected::{
     CURRENT_PROTECTED_VERSION, InMemoryReplayGuard, ProtectedError, ProtectedMessageBuilder,
-    ReplayError, ReplayGuard, VerifiedProtectedMessage, open_protected, open_protected_with,
-    open_protected_with_keys, protected_claimed_signer_id,
+    ProtectedOpenOptions, ReplayError, ReplayGuard, VerifiedProtectedMessage, open_protected,
+    open_protected_with, open_protected_with_keys, protected_claimed_signer_id,
 };
 #[cfg(feature = "crypto")]
 pub use relay::{

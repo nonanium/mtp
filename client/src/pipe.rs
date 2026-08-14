@@ -200,14 +200,13 @@ pub(crate) async fn expire_pending_request(
         let mut expired = dispatcher.expired_requests.lock().await;
         let now = Instant::now();
         expired.retain(|_, expires_at| *expires_at > now);
-        if expired.len() >= MAX_EXPIRED_REQUEST_TOMBSTONES {
-            if let Some(oldest) = expired
+        if expired.len() >= MAX_EXPIRED_REQUEST_TOMBSTONES
+            && let Some(oldest) = expired
                 .iter()
                 .min_by_key(|(_, expires_at)| **expires_at)
                 .map(|(id, _)| *id)
-            {
-                expired.remove(&oldest);
-            }
+        {
+            expired.remove(&oldest);
         }
         expired.insert(request_id, now + EXPIRED_REQUEST_TOMBSTONE_TTL);
     }

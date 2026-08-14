@@ -1078,18 +1078,12 @@ impl Receiver {
     #[instrument(skip(self), level = "trace")]
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
         let mut close_rx = self.inner.handle.subscribe_close();
-        if close_rx.borrow().is_some() {
-            return Err(self
-                .inner
-                .handle
-                .close_reason()
-                .unwrap_or(CommunicationError::StreamClosed));
-        }
 
         #[cfg(feature = "pipes")]
         {
             let mut rx = self.inner.msg_rx.lock().await;
             let result = tokio::select! {
+                biased;
                 message = rx.recv() => message,
                 _ = close_rx.changed() => return Err(close_rx
                     .borrow()
@@ -1113,6 +1107,7 @@ impl Receiver {
         {
             let mut rx = self.inner.rx.lock().await;
             let result = tokio::select! {
+                biased;
                 message = rx.recv() => message,
                 _ = close_rx.changed() => return Err(close_rx
                     .borrow()
@@ -1136,17 +1131,11 @@ impl Receiver {
     #[cfg(feature = "pipes")]
     #[instrument(skip(self), level = "trace")]
     pub async fn receive_event(&self) -> Result<TransportEvent, CommunicationError> {
-        if self.inner.handle.is_closed() {
-            return Err(self
-                .inner
-                .handle
-                .close_reason()
-                .unwrap_or(CommunicationError::StreamClosed));
-        }
-
+        let mut close_rx = self.inner.handle.subscribe_close();
         let mut msg_rx = self.inner.msg_rx.lock().await;
         let mut pipe_rx = self.inner.pipe_rx.lock().await;
         tokio::select! {
+            biased;
             msg = msg_rx.recv() => {
                 match msg {
                     Some(Ok(val)) => {
@@ -1174,6 +1163,10 @@ impl Receiver {
                         .unwrap_or(CommunicationError::StreamClosed)),
                 }
             }
+            _ = close_rx.changed() => Err(close_rx
+                .borrow()
+                .clone()
+                .unwrap_or(CommunicationError::StreamClosed)),
         }
     }
 

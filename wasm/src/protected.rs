@@ -1,8 +1,8 @@
 use wasm_bindgen::prelude::*;
 
 use mtp_codec::{
-    DataValue, ProtectedError, ProtectedMessageBuilder, ProtectionError, ProtectionPurpose,
-    VerifiedProtectedMessage,
+    DataValue, ProtectedError, ProtectedMessageBuilder, ProtectedOpenOptions, ProtectionError,
+    ProtectionPurpose, VerifiedProtectedMessage,
 };
 
 use crate::crypto::{
@@ -273,10 +273,12 @@ pub fn open_protected_with_keyrings(
         &references,
         expected_signer_id,
         &signer_public_keys,
-        expected_receiver_id,
-        ProtectionPurpose::from(signature_purpose),
-        ProtectionPurpose::from(encryption_purpose),
-        policy,
+        ProtectedOpenOptions::new(
+            expected_receiver_id,
+            ProtectionPurpose::from(signature_purpose),
+            ProtectionPurpose::from(encryption_purpose),
+            policy,
+        ),
         None,
     )
     .map_err(protected_error)?;
