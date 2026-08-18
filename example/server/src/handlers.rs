@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use mtp::codec::{
     CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue, InMemoryReplayGuard,
-    ProtectedOpenOptions, ProtectionPolicy, ProtectionPurpose, SignaturePolicy, TypeMap,
+    ProtectedOpenOptions, ProtectionPolicy, ProtectionPurpose, RelayOpenOptions, SignaturePolicy,
+    TypeMap,
     forward_relay_frame, open_protected_with_checked,
     open_relay_content_with_limits_without_replay,
     open_relay_metadata_with_checked,
@@ -142,7 +143,7 @@ fn process_sealed_relay(
         |signer_id| {
             resolve_signer_key(signer_id, registered_clients).map(|key| vec![key])
         },
-        SIGNATURE_POLICY,
+        RelayOpenOptions::new(SIGNATURE_POLICY),
         accepted_messages,
     )
     .map_err(|e| format!("metadata relay could not authenticate metadata: {e}"))?;
@@ -164,11 +165,11 @@ fn process_sealed_relay(
 
     let content_result = open_relay_content_with_limits_without_replay(
         &metadata,
-        host_keyring,
-        &resolve_signer_key(metadata.signer_id(), registered_clients)
-            .ok_or("metadata signer key disappeared")?,
-        FINAL_RECIPIENT_ID,
-        SIGNATURE_POLICY,
+        &[host_keyring],
+        &[resolve_signer_key(metadata.signer_id(), registered_clients)
+            .ok_or("metadata signer key disappeared")?],
+        Some(FINAL_RECIPIENT_ID),
+        RelayOpenOptions::new(SIGNATURE_POLICY),
     );
     if content_result.is_ok() {
         return Err("metadata relay unexpectedly decrypted final-recipient content".into());
@@ -309,12 +310,22 @@ pub fn process_and_respond(
             let signer_id = sig.as_signed().map(|signed| signed.signer_id);
             if let Some(signer_id) = signer_id
                 && sig
-                    .verify(signer_id, pk_bundle, mtp::codec::ProtectionPurpose::from(2))
+                    .verify_with_policy(
+                        signer_id,
+                        pk_bundle,
+                        mtp::codec::ProtectionPurpose::from(2),
+                        SIGNATURE_POLICY,
+                    )
                     .is_ok()
             {
                 let dv = sig
                     .clone()
-                    .into_verified(signer_id, pk_bundle, mtp::codec::ProtectionPurpose::from(2))
+                    .into_verified_with_policy(
+                        signer_id,
+                        pk_bundle,
+                        mtp::codec::ProtectionPurpose::from(2),
+                        SIGNATURE_POLICY,
+                    )
                     .ok();
                 if let Some(entries) = dv.and_then(|value| value.as_container()) {
                     println!("  Verified SignedPayload: {:?}", entries);
@@ -335,16 +346,22 @@ pub fn process_and_respond(
             if let Ok(opened) = secure.decrypt(host_keyring, mtp::codec::ProtectionPurpose::from(4))
                 && let Some(signed) = opened.as_signed()
                 && opened
-                    .verify(
+                    .verify_with_policy(
                         signed.signer_id,
                         pk_bundle,
                         mtp::codec::ProtectionPurpose::from(3),
+                        SIGNATURE_POLICY,
                     )
                     .is_ok()
             {
                 let signer_id = signed.signer_id;
                 let dv = opened
-                    .into_verified(signer_id, pk_bundle, mtp::codec::ProtectionPurpose::from(3))
+                    .into_verified_with_policy(
+                        signer_id,
+                        pk_bundle,
+                        mtp::codec::ProtectionPurpose::from(3),
+                        SIGNATURE_POLICY,
+                    )
                     .ok();
                 if let Some(entries) = dv.and_then(|value| value.as_container()) {
                     println!("  Verified SecurePayload: {:?}", entries);

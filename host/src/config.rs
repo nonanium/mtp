@@ -227,10 +227,11 @@ impl AuthenticationAttemptLimiter for InMemoryAuthenticationAttemptLimiter {
         }
 
         for key in keys {
-            if !attempts.contains_key(&key) && attempts.len() >= self.max_keys {
-                if let Some(oldest) = attempts.keys().next().cloned() {
-                    attempts.remove(&oldest);
-                }
+            if !attempts.contains_key(&key)
+                && attempts.len() >= self.max_keys
+                && let Some(oldest) = attempts.keys().next().cloned()
+            {
+                attempts.remove(&oldest);
             }
             attempts.entry(key).or_default().push_back(now);
         }

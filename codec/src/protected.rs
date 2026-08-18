@@ -133,6 +133,10 @@ impl InMemoryReplayGuard {
     pub fn len(&self) -> usize {
         self.accepted.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.accepted.is_empty()
+    }
 }
 
 impl ReplayGuard for InMemoryReplayGuard {

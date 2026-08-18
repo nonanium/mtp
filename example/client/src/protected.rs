@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use mtp::client::MTPConnection;
 use mtp::codec::{
     CommunicationType, DataType, DataValue, ProtectionPolicy, ProtectedMessageBuilder,
-    ProtectionPurpose, SealedRelayBuilder, SignaturePolicy, TypeMap,
+    ProtectionPurpose, RelayOpenOptions, SealedRelayBuilder, SignaturePolicy, TypeMap,
     open_relay_content_with_limits_without_replay,
     open_relay_metadata_without_replay,
 };
@@ -165,17 +165,17 @@ pub async fn send_sealed_relay(
         &final_recipient_keyring,
         signer_id,
         &signer_keyring.public_key_bundle(),
-        RELAY_SIGNATURE_POLICY,
+        RelayOpenOptions::new(RELAY_SIGNATURE_POLICY),
     )?;
     let application_metadata = metadata
         .metadata()
         .ok_or("forwarded relay metadata was missing")?;
     let content = open_relay_content_with_limits_without_replay(
         &metadata,
-        &final_recipient_keyring,
-        &signer_keyring.public_key_bundle(),
-        FINAL_RECIPIENT_ID,
-        RELAY_SIGNATURE_POLICY,
+        &[&final_recipient_keyring],
+        &[signer_keyring.public_key_bundle()],
+        Some(FINAL_RECIPIENT_ID),
+        RelayOpenOptions::new(RELAY_SIGNATURE_POLICY),
     )?;
     if content.message_type != "ProtectedMessage" {
         return Err(format!("unexpected relay message type: {}", content.message_type).into());

@@ -916,9 +916,19 @@ mod tests {
 
         let mut signer_public_keys = recipient.public_key_bundle();
         signer_public_keys.sig_cl_public_key = signer_public_key;
-        signed.verify(SENDER_ID, &signer_public_keys, ProtectionPurpose::from(1))?;
+        signed.verify_with_policy(
+            SENDER_ID,
+            &signer_public_keys,
+            ProtectionPurpose::from(1),
+            crate::ProtectionPolicy::any_supported(),
+        )?;
         assert_eq!(
-            signed.into_verified(SENDER_ID, &signer_public_keys, ProtectionPurpose::from(1))?,
+            signed.into_verified_with_policy(
+                SENDER_ID,
+                &signer_public_keys,
+                ProtectionPurpose::from(1),
+                crate::ProtectionPolicy::any_supported(),
+            )?,
             clear_payload
         );
         Ok(())

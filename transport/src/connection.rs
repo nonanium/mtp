@@ -1460,9 +1460,11 @@ mod tests {
 
     #[test]
     fn runtime_policy_normalizes_zero_channel_and_task_limits() {
-        let mut policy = Policy::default();
-        policy.receiver_queue_capacity = 0;
-        policy.max_concurrent_stream_tasks = 0;
+        let policy = Policy {
+            receiver_queue_capacity: 0,
+            max_concurrent_stream_tasks: 0,
+            ..Policy::default()
+        };
 
         let runtime = RuntimePolicy::from_public(&policy);
 

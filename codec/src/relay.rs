@@ -1022,6 +1022,18 @@ mod tests {
         Ed25519Signer::new(&keyring.sig_cl_secret_key).expect("Ed25519 signer")
     }
 
+    fn content_open_options(
+        metadata: &VerifiedRelayMetadata,
+        policy: ProtectionPolicy,
+    ) -> RelayOpenOptions {
+        RelayOpenOptions {
+            policy,
+            decode_limits: metadata.decode_limits,
+            encode_limits: metadata.encode_limits,
+            protected_limits: metadata.protected_limits,
+        }
+    }
+
     // Test-only compatibility shims keep older fixture setup readable while
     // routing every invocation to an explicit replay choice in production.
     fn open_relay_metadata(
@@ -1345,12 +1357,12 @@ mod tests {
         )
         .expect("final recipient metadata");
         assert_eq!(final_metadata.metadata(), Some(&application_metadata));
-        let final_content = open_relay_content(
+        let final_content = open_relay_content_with_limits_without_replay(
             &final_metadata,
-            &final_recipient,
-            &sender.public_key_bundle(),
-            42,
-            policy,
+            &[&final_recipient],
+            std::slice::from_ref(&sender.public_key_bundle()),
+            Some(42),
+            content_open_options(&final_metadata, policy),
         )
         .expect("final recipient content");
         assert_eq!(final_content.content, DataValue::Str("hello".into()));
@@ -1393,22 +1405,22 @@ mod tests {
         ));
 
         assert!(
-            open_relay_content(
+            open_relay_content_with_limits_without_replay(
                 &metadata,
-                &metadata_recipient,
-                &sender.public_key_bundle(),
-                42,
-                policy,
+                &[&metadata_recipient],
+                std::slice::from_ref(&sender.public_key_bundle()),
+                Some(42),
+                content_open_options(&metadata, policy),
             )
             .is_err()
         );
 
-        let content = open_relay_content(
+        let content = open_relay_content_with_limits_without_replay(
             &metadata,
-            &final_recipient,
-            &sender.public_key_bundle(),
-            42,
-            policy,
+            &[&final_recipient],
+            std::slice::from_ref(&sender.public_key_bundle()),
+            Some(42),
+            content_open_options(&metadata, policy),
         )
         .expect("content");
         assert_eq!(content.signer_id, 7);
@@ -1416,12 +1428,12 @@ mod tests {
         assert_eq!(content.message_type, "ProtectedMessage");
         assert_eq!(content.content, DataValue::Str("hello".into()));
         assert!(matches!(
-            open_relay_content(
+            open_relay_content_with_limits_without_replay(
                 &metadata,
-                &final_recipient,
-                &sender.public_key_bundle(),
-                43,
-                policy,
+                &[&final_recipient],
+                std::slice::from_ref(&sender.public_key_bundle()),
+                Some(43),
+                content_open_options(&metadata, policy),
             ),
             Err(RelayError::NotFinalRecipient)
         ));
@@ -1512,7 +1524,12 @@ mod tests {
         .expect("relay frame");
 
         assert_eq!(
-            relay_metadata_claimed_signer_id(&frame, &[&recipient]).expect("signer ID"),
+            relay_metadata_claimed_signer_id_with_limits(
+                &frame,
+                &[&recipient],
+                DecodeLimits::default(),
+            )
+            .expect("signer ID"),
             7
         );
         let metadata = open_relay_metadata_with_keys(
@@ -1523,12 +1540,15 @@ mod tests {
             ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
         )
         .expect("relay metadata");
-        let content = open_relay_content_with_keyrings(
+        let content = open_relay_content_with_limits_without_replay(
             &metadata,
             &[&recipient],
             &[sender.public_key_bundle()],
             Some(42),
-            ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+            content_open_options(
+                &metadata,
+                ProtectionPolicy::from(crate::SignaturePolicy::Ed25519),
+            ),
         )
         .expect("relay content");
 
@@ -1571,12 +1591,12 @@ mod tests {
         )
         .expect("relay metadata");
 
-        let content = open_relay_content_with_keyrings(
+        let content = open_relay_content_with_limits_without_replay(
             &metadata,
             &[&current_content_recipient, &previous_content_recipient],
             &[sender.public_key_bundle()],
             Some(42),
-            policy,
+            content_open_options(&metadata, policy),
         )
         .expect("previous content recipient key should decrypt");
 
@@ -1680,12 +1700,12 @@ mod tests {
         )
         .expect("metadata signed by a previous key should verify");
         assert_eq!(metadata.matched_signer_key_index(), 1);
-        let content = open_relay_content_with_keys(
+        let content = open_relay_content_with_limits_without_replay(
             &metadata,
-            &recipient,
+            &[&recipient],
             &[current_signer_public, old_signer_public],
-            42,
-            policy,
+            Some(42),
+            content_open_options(&metadata, policy),
         )
         .expect("content signed by a previous key should verify");
         assert_eq!(content.message_type, "ProtectedMessage");

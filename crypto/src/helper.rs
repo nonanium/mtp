@@ -129,7 +129,7 @@ impl<'a> MultiEncryptedMessageRef<'a> {
         &self.bytes[self.ciphertext_start..]
     }
 
-    pub fn to_owned(&self) -> MultiEncryptedMessage {
+    pub fn to_owned(self) -> MultiEncryptedMessage {
         let recipients = (0..self.count)
             .filter_map(|index| {
                 let (kem_ciphertext, encrypted_key) = self.recipient(index)?;

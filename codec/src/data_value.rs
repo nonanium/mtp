@@ -2391,10 +2391,11 @@ mod tests {
         assert_eq!(&encoded[15 + signature_len..], inner);
 
         let decoded = DataValue::from_bytes(&encoded).ok_or("signed value did not decode")?;
-        decoded.verify(
+        decoded.verify_with_policy(
             0x0102_0304_0506_0708,
             &public_keys,
             ProtectionPurpose::from(0xA5),
+            ProtectionPolicy::any_supported(),
         )?;
         assert!(matches!(
             decoded.clone().into_verified_with_policy(
@@ -2406,16 +2407,18 @@ mod tests {
             Err(ProtectionError::SignaturePolicyMismatch { .. })
         ));
         // Verification is non-consuming, so it can safely be repeated.
-        decoded.verify(
+        decoded.verify_with_policy(
             0x0102_0304_0506_0708,
             &public_keys,
             ProtectionPurpose::from(0xA5),
+            ProtectionPolicy::any_supported(),
         )?;
         assert_eq!(
-            decoded.clone().into_verified(
+            decoded.clone().into_verified_with_policy(
                 0x0102_0304_0506_0708,
                 &public_keys,
                 ProtectionPurpose::from(0xA5),
+                ProtectionPolicy::any_supported(),
             )?,
             original
         );
@@ -2424,10 +2427,11 @@ mod tests {
             return Err("expected signed value".into());
         };
         assert_eq!(
-            wrapper.into_verified(
+            wrapper.into_verified_with_policy(
                 0x0102_0304_0506_0708,
                 &public_keys,
                 ProtectionPurpose::from(0xA5),
+                ProtectionPolicy::any_supported(),
             )?,
             original
         );
@@ -2503,7 +2507,12 @@ mod tests {
         };
         wrong_purpose.purpose ^= 1;
         assert!(matches!(
-            wrong_purpose.verify(41, &public_keys, ProtectionPurpose::from(7)),
+            wrong_purpose.verify_with_policy(
+                41,
+                &public_keys,
+                ProtectionPurpose::from(7),
+                ProtectionPolicy::any_supported(),
+            ),
             Err(ProtectionError::PurposeMismatch { .. })
         ));
 
@@ -2512,7 +2521,12 @@ mod tests {
         };
         wrong_signer_id.signer_id ^= 1;
         assert!(matches!(
-            wrong_signer_id.verify(41, &public_keys, ProtectionPurpose::from(7)),
+            wrong_signer_id.verify_with_policy(
+                41,
+                &public_keys,
+                ProtectionPurpose::from(7),
+                ProtectionPolicy::any_supported(),
+            ),
             Err(ProtectionError::SignerIdMismatch { .. })
         ));
 
@@ -2521,7 +2535,12 @@ mod tests {
         };
         wrong_signature.signature[0] ^= 1;
         assert!(matches!(
-            wrong_signature.verify(41, &public_keys, ProtectionPurpose::from(7)),
+            wrong_signature.verify_with_policy(
+                41,
+                &public_keys,
+                ProtectionPurpose::from(7),
+                ProtectionPolicy::any_supported(),
+            ),
             Err(ProtectionError::InvalidSignature)
         ));
 
@@ -2530,7 +2549,12 @@ mod tests {
         };
         *wrong_value.value = DataValue::Str("replacement".into());
         assert!(matches!(
-            wrong_value.verify(41, &public_keys, ProtectionPurpose::from(7)),
+            wrong_value.verify_with_policy(
+                41,
+                &public_keys,
+                ProtectionPurpose::from(7),
+                ProtectionPolicy::any_supported(),
+            ),
             Err(ProtectionError::InvalidSignature)
         ));
         Ok(())
@@ -2593,9 +2617,19 @@ mod tests {
         let opened = decoded.decrypt(&keyring, ProtectionPurpose::from(2))?;
         let mut public_keys = keyring.public_key_bundle();
         public_keys.sig_cl_public_key = signer_public;
-        opened.verify(7, &public_keys, ProtectionPurpose::from(1))?;
+        opened.verify_with_policy(
+            7,
+            &public_keys,
+            ProtectionPurpose::from(1),
+            ProtectionPolicy::any_supported(),
+        )?;
         assert_eq!(
-            opened.into_verified(7, &public_keys, ProtectionPurpose::from(1))?,
+            opened.into_verified_with_policy(
+                7,
+                &public_keys,
+                ProtectionPurpose::from(1),
+                ProtectionPolicy::any_supported(),
+            )?,
             value
         );
         Ok(())
@@ -2629,8 +2663,18 @@ mod tests {
             return Err("expected signed outer wrapper".into());
         };
         assert_eq!(signed.signer_id, 7);
-        signed.verify(7, &public_keys, ProtectionPurpose::from(1))?;
-        let encrypted = signed.into_verified(7, &public_keys, ProtectionPurpose::from(1))?;
+        signed.verify_with_policy(
+            7,
+            &public_keys,
+            ProtectionPurpose::from(1),
+            ProtectionPolicy::any_supported(),
+        )?;
+        let encrypted = signed.into_verified_with_policy(
+            7,
+            &public_keys,
+            ProtectionPurpose::from(1),
+            ProtectionPolicy::any_supported(),
+        )?;
         assert!(matches!(encrypted, DataValue::Encrypted(_)));
         assert_eq!(
             encrypted.decrypt(&keyring, ProtectionPurpose::from(2))?,
@@ -2680,10 +2724,11 @@ mod tests {
 
         let mut signer_keys = outer_recipient.public_key_bundle();
         signer_keys.sig_cl_public_key = signer_public;
-        let middle = outer_signed.into_verified(
+        let middle = outer_signed.into_verified_with_policy(
             OUTER_SIGNER_ID,
             &signer_keys,
             ProtectionPurpose::from(1),
+            ProtectionPolicy::any_supported(),
         )?;
         let DataValue::Container(entries) = middle else {
             return Err("expected container inside outer signature".into());
@@ -2700,10 +2745,11 @@ mod tests {
         };
         assert_eq!(inner_wrapper.signer_id, INNER_SIGNER_ID);
         assert_eq!(
-            inner_signed.into_verified(
+            inner_signed.into_verified_with_policy(
                 INNER_SIGNER_ID,
                 &signer_keys,
                 ProtectionPurpose::from(3),
+                ProtectionPolicy::any_supported(),
             )?,
             leaf
         );
@@ -2861,11 +2907,21 @@ mod tests {
         let public_keys = keyring.public_key_bundle();
 
         assert!(matches!(
-            DataValue::Null.verify(1, &public_keys, ProtectionPurpose::from(1)),
+            DataValue::Null.verify_with_policy(
+                1,
+                &public_keys,
+                ProtectionPurpose::from(1),
+                ProtectionPolicy::any_supported(),
+            ),
             Err(ProtectionError::NotSigned)
         ));
         assert!(matches!(
-            DataValue::Null.into_verified(1, &public_keys, ProtectionPurpose::from(1)),
+            DataValue::Null.into_verified_with_policy(
+                1,
+                &public_keys,
+                ProtectionPurpose::from(1),
+                ProtectionPolicy::any_supported(),
+            ),
             Err(ProtectionError::NotSigned)
         ));
         assert!(matches!(
@@ -2909,7 +2965,12 @@ mod tests {
         };
         signed.signature[0] ^= 1;
         assert!(matches!(
-            DataValue::Signed(signed).verify(1, &signing_keys, ProtectionPurpose::from(1)),
+            DataValue::Signed(signed).verify_with_policy(
+                1,
+                &signing_keys,
+                ProtectionPurpose::from(1),
+                ProtectionPolicy::any_supported(),
+            ),
             Err(ProtectionError::InvalidSignature)
         ));
 
