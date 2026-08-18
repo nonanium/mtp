@@ -63,10 +63,11 @@
     "dup": "jscpd --pattern '**/*.{rs,ts}' --ignore 'target/**' --ignore 'wasm/pkg/**' --ignore '.git/**' --min-lines 8 --min-tokens 80 --threshold 4 --reporters console --noTips .",
     "test:e2e": "tsc && node test/e2ee.mjs",
     "test:secrets": "tsc && node --test --test-isolation=none test/encrypted-secret.mjs",
+    "test:wasm-init": "tsc && node --test test/wasm-init.mjs",
     "test:types": "tsc -p tsconfig.type-tests.json --noEmit",
     "test:vite": "tsc && node test/vite-type-map.mjs",
     "test:boundary": "node --test test/package-boundary.mjs",
-    "test": "pnpm run test:e2e && pnpm run test:secrets && pnpm run test:types && pnpm run test:vite && pnpm run test:boundary"
+    "test": "pnpm run test:e2e && pnpm run test:secrets && pnpm run test:wasm-init && pnpm run test:types && pnpm run test:vite && pnpm run test:boundary"
   },
   "devDependencies": {
     "@types/node": "^26.0.1",

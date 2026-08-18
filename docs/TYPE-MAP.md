@@ -1,6 +1,8 @@
 # Type Map
 
 This file documents the Type Map & Registry configuration used by the MTP protocol. It will assume you are working with the [example-type-maps.yaml](./../example-type-maps.yaml).
+A type musn't be the version of MTP, it stays independant.
+MTP version defines the codec. The Type-Map version defines the available Types.
 
 ## Binary Frame Format
 
@@ -84,6 +86,15 @@ Encrypted
 The envelope length counts the bytes after the length field. A recipient entry is an unlabeled fixed-size KEM ciphertext and wrapped content-encryption key; both lengths are determined by the selected suite. The encrypted bytes are the AEAD output for the complete serialized inner `DataValue`.
 
 Protection nesting directly represents both signer-visibility choices: `Encrypted(Signed(Container))` keeps signer metadata private, while `Signed(Encrypted(Container))` exposes it. A frame with no outer sender and an `Encrypted(Signed(Container))` payload uses sealed sender. Sealed sender adds no flag or distinct wire type.
+
+### Container ordering and signatures
+
+Container entries are ordered sequences in the current format. Insertion order
+is therefore semantic: two containers with the same field/value pairs in a
+different order have different serialized bytes and different signatures. The
+decoder rejects duplicate field IDs. Applications that need map semantics must
+canonicalize their own input before signing; a future canonical map encoding
+requires a protocol-format version and cannot be inferred by a receiver.
 
 ## TypeMap & Compile-Time Type Safety
 
@@ -175,16 +186,32 @@ mtp = { path = "..", features = ["host"] }
 
 ```rust
 use mtp::codec::registry::{Registry, VersionedCodec};
+use mtp::codec::{CommunicationType, CommunicationValue, DataValue};
+use mtp_type_map::Version;
 
 let registry = Registry::builtin();
-let codec = VersionedCodec::new(registry);
+let codec = VersionedCodec::for_version(registry, Version(3, 0)).unwrap();
+let value = CommunicationValue::new_with_type_map(
+    CommunicationType::Ping,
+    codec.type_map(),
+).with_payload(DataValue::Null);
 
-// Encode with a specific version
-let bytes = codec.encode(&value, Version(3, 0)).unwrap();
+// The value must retain the negotiated map used to construct it.
+let bytes = codec.encode(&value).unwrap();
 
-// Decode with a specific version
-let decoded = codec.decode(&bytes, Version(3, 0)).unwrap();
+let decoded = codec.decode(&bytes).unwrap();
+
+// A clear value can be migrated explicitly when the application has chosen
+// that behavior. Protected values are not silently remapped.
+let migrated = codec.encode_migrating(&value).unwrap();
 ```
+
+`VersionedCodec::encode` compares the retained map identity (its protocol
+version) and returns `CodecError::MissingTypeMap` or
+`CodecError::TypeMapMismatch` on failure. `reply_to` retains the request's
+map, while `try_merge` rejects frames from different maps before copying any
+fields. The deprecated `merge` method records the error for compatibility; new
+code should migrate to `try_merge` and handle the result.
 
 ## Customizing Type Maps in Downstream Projects
 

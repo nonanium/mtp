@@ -1,6 +1,20 @@
 use crate::{Policy, TransportSendStream};
-use mtp_codec::CommunicationValue;
+use mtp_codec::{CommunicationValue, EncodeLimits};
 use mtp_common::CommunicationError;
+
+/// Classifies failures that may be recovered by replacing a persistent
+/// application stream. Encoding and frame-size failures are deterministic and
+/// must reach the caller without opening more streams.
+pub(crate) struct RetryClassifier;
+
+impl RetryClassifier {
+    pub(crate) fn retry_persistent_stream(error: &CommunicationError) -> bool {
+        matches!(
+            error,
+            CommunicationError::StreamError | CommunicationError::StreamClosed
+        )
+    }
+}
 
 /// Writes the canonical self-framed MTP value used by every transport.
 ///
@@ -12,7 +26,11 @@ pub(crate) async fn write_frame<S: TransportSendStream>(
     value: &CommunicationValue,
     policy: &Policy,
 ) -> Result<(), CommunicationError> {
-    let bytes = value.to_bytes().map_err(|_| CommunicationError::Encode)?;
+    let bytes = value
+        .to_bytes_with_limits(EncodeLimits::for_transport_message_size(
+            policy.max_message_size,
+        ))
+        .map_err(|_| CommunicationError::Encode)?;
     if bytes.len() as u64 > policy.max_message_size
         || bytes.len() as u64 >= policy.close_frame_len as u64
     {

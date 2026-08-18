@@ -27,7 +27,7 @@ pub async fn export_host_public_keys(
     save_public_key_bundle(&bundle, "host.mpkb")?;
 
     /* The web client fetches the bundle as hex over HTTP. */
-    let bundle_hex = hex::encode(bundle.as_bytes());
+    let bundle_hex = hex::encode(bundle.try_as_bytes()?);
     fs::write("host_public_key_bundle.hex", &bundle_hex).await?;
     fs::create_dir_all("web-client/public").await?;
     fs::write("web-client/public/host_public_key_bundle.hex", &bundle_hex).await?;

@@ -160,6 +160,14 @@ process boundaries. A guard should atomically record a new ID before
 dispatching application content. Transport frame IDs must not be used for
 this purpose.
 
+Native message-processing boundaries require a replay guard through the
+checked opening APIs. Reopening stored or forensic frames without a guard is
+available only through an explicitly named `without_replay` API. The reference
+in-memory guard is bounded and FIFO-evicts old entries, so it is a duplicate
+suppression cache rather than durable replay protection. A durable deployment
+must use an atomic insert-if-absent operation keyed by `(signer ID, MessageId)`;
+a separate read followed by insert is race-prone.
+
 `VerifiedRelayMetadata` is an authenticated capability rather than a caller
 constructed data transfer object. Rust fields are private and the browser
 implementation keeps authenticated state behind a branded class. Content
@@ -174,9 +182,11 @@ fallback.
 Verification takes a receiver-side `SignaturePolicy`/`ProtectionPolicy`.
 `AnySupported` is useful for compatibility at the low-level codec boundary,
 but protocol receivers should select `Ed25519` or `Dual`. The browser SDK uses
-an explicit `ed25519` default and permits an operation or client override. It
-never derives receive policy from the recipient keyring. The sender's
-signature suite remains a separate choice. Signature policy must be applied
+an explicit `ed25519` default and permits an operation or client override. Its
+`MTPSecurityProfile` resolves protected-message sender/receiver suites,
+encrypted-pipe suites, and the authentication PQ requirement together;
+`any-supported` remains an explicit compatibility value. It never derives
+receive policy from the recipient keyring. Signature policy must be applied
 independently to relay metadata, relay content, and pipe session establishment.
 
 ### Key history and rotation
@@ -261,16 +271,43 @@ to proceed with an invalid local decryption key.
 Applications remain responsible for storage at rest. The `files` feature writes passphrase-protected keyrings to `.mk` files and public bundles to `.mpkb` files. Protected `.mk` files store the Argon2id identifier, parameters, salt, and AEAD ciphertext; they do not derive their key with HKDF. On Unix, keyring files are created with owner-only `0600` permissions.
 Restrict those files to the owning account and protect backups. Browser applications should treat the configured credential storage as sensitive application data.
 
+Key-material parsing is explicit in the SDK: use the hex, Base64, or byte
+helpers for encoded key material. Arbitrary strings are no longer treated as
+passphrases by the compatibility `secretKeyFromString` helper. Applications
+migrating data written by the old implicit-HKDF behavior can use the explicitly
+named, deprecated `legacySecretKeyFromStringV1` helper only for that migration;
+new data must not use it. Passwords must use the explicit Argon2id passphrase
+API with a stored per-record salt and versioned parameters. The SDK's
+`deriveKeyFromPassphrase` uses a worker when browser workers are available;
+the explicitly named `deriveKeyFromPassphraseSync` form is for workers and
+command-line migrations. HKDF helpers are for high-entropy key material and
+are not password-hardening functions.
+
 ## Resource Limits and Operational Controls
 
 `Policy::default()` sets a 16 MiB application message limit and a 64 KiB handshake message limit. It also sets a 30 second read timeout, a 30 second maximum idle timeout, a receiver queue capacity of 1000, and a maximum of 128 concurrent stream tasks. Tune these values for the deployment and peer trust level.
 
 The recursive codec applies additional defaults while parsing untrusted values:
 maximum nesting depth 64, 65,536 value nodes, 16 MiB per blob or envelope,
-and 64 encrypted recipients. Decrypted values are parsed with the same limits.
+64 encrypted recipients, and a 64 MiB cumulative decoder allocation budget.
+Decrypted values are parsed with the same limits. Transport derives the blob,
+allocation, and encoder output budgets from its admitted frame size rather than
+serializing an unrestricted recursive value first. The default transport
+allocation budget is four times the admitted frame size to cover conservative
+owned-copy and crypto-buffer accounting; deployments may choose another
+factor with `DecodeLimits::for_transport_message_size_with_allocation_factor`.
 
-The host does not provide a general authentication-attempt rate limiter.
-Deploy authentication endpoints behind a rate-limiting proxy or add admission control through the host callbacks, including `GuestIdGenerator` where guest connections are permitted.
+The host applies an authentication-attempt limiter before storage lookups,
+public-key validation, challenge signing, and registration callbacks. The
+default limiter is a bounded in-memory sliding window; configure a durable or
+distributed limiter when limits must coordinate across host instances. Unknown
+client IDs are sent through a fixed dummy challenge/proof path by default, so
+they receive a generic authentication failure instead of an enumeration hint.
+Deployments that intentionally publish client IDs can disable this concealment.
+
+Keepalive Pong observation is bounded and accepts only the currently pending
+ping ID. Unsolicited Pongs are dropped before they can consume application
+receiver capacity.
 
 ## Security Limitations
 

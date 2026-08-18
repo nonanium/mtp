@@ -142,7 +142,7 @@ let conn = MTPClient::auth_register(config, &keyring, &host_pk).await?;
 
 // Save for next session
 let id = conn.client_id;
-let keyring_bytes = keyring.to_bytes();
+let keyring_bytes = keyring.try_to_bytes()?;
 ```
 
 When callers already know whether a saved client ID exists, the convenience helper uses `Some(id)` for login and `None` for registration:
@@ -175,7 +175,7 @@ pub struct Keyring {
 }
 ```
 
-- Serialise: `keyring.to_bytes()` -> `Vec<u8>`
+- Serialise: `keyring.try_to_bytes()` -> `Result<Zeroizing<Vec<u8>>, CryptoError>`
 - Deserialise: `Keyring::from_bytes(&bytes)` -> `Result<Keyring, CryptoError>`
 - Get public half: `keyring.public_key_bundle()` -> `PublicKeyBundle`
 

@@ -1,8 +1,8 @@
 use wasm_bindgen::prelude::*;
 
 use mtp_codec::{
-    CommunicationValue, DataValue, ProtectionError, RelayError, VerifiedRelayContent,
-    VerifiedRelayMetadata,
+    CommunicationValue, DataValue, DecodeLimits, EncodeLimits, ProtectedLimits, ProtectionError,
+    ProtectionPolicy, RelayError, RelayOpenOptions, VerifiedRelayContent, VerifiedRelayMetadata,
 };
 
 use crate::crypto::{keyrings_from_js, protection_policy_from_suite, public_key_bundles_from_js};
@@ -14,6 +14,28 @@ pub(crate) fn structured_error(code: &str, message: impl Into<String>) -> JsValu
     let value: JsValue = error.into();
     let _ = js_sys::Reflect::set(&value, &JsValue::from_str("code"), &JsValue::from_str(code));
     value
+}
+
+pub(crate) fn decode_error(error: mtp_codec::DecodeError, context: &str) -> JsValue {
+    let value = structured_error("invalid-frame", format!("{context}: {error}"));
+    let _ = js_sys::Reflect::set(
+        &value,
+        &JsValue::from_str("decodeCode"),
+        &JsValue::from_str(decode_error_code(&error)),
+    );
+    value
+}
+
+pub(crate) fn decode_error_code(error: &mtp_codec::DecodeError) -> &'static str {
+    match error {
+        mtp_codec::DecodeError::MalformedEncoding => "malformed-encoding",
+        mtp_codec::DecodeError::DepthLimit => "depth-limit",
+        mtp_codec::DecodeError::ValueCountLimit => "value-count-limit",
+        mtp_codec::DecodeError::BlobLimit => "blob-limit",
+        mtp_codec::DecodeError::AllocationLimit => "allocation-limit",
+        mtp_codec::DecodeError::RecipientLimit => "recipient-limit",
+        mtp_codec::DecodeError::DuplicateField => "duplicate-field",
+    }
 }
 
 fn wrapped_input_error(code: &str, error: JsValue) -> JsValue {
@@ -54,6 +76,7 @@ fn relay_error_code(error: &RelayError) -> &'static str {
         RelayError::UnsupportedRelayVersion(_) => "unsupported-relay-version",
         RelayError::NotFinalRecipient => "not-final-recipient",
         RelayError::Replay => "replay",
+        RelayError::ResourceLimit(_) => "resource-limit",
         RelayError::ReservedApplicationType(_) => "reserved-application-type",
         RelayError::ReplayGuard(_) => "replay-guard-error",
         RelayError::Protection(error) => match error {
@@ -63,6 +86,7 @@ fn relay_error_code(error: &RelayError) -> &'static str {
             ProtectionError::PurposeMismatch { .. } => "purpose-mismatch",
             ProtectionError::SignerIdMismatch { .. } => "signer-id-mismatch",
             ProtectionError::SignerKeyNotFound(_) => "signer-key-not-found",
+            ProtectionError::ResourceLimit(_) => "resource-limit",
             ProtectionError::Crypto(mtp_crypto::CryptoError::InvalidSignature)
             | ProtectionError::Crypto(mtp_crypto::CryptoError::VerificationFailed) => {
                 "invalid-signature"
@@ -73,12 +97,15 @@ fn relay_error_code(error: &RelayError) -> &'static str {
 }
 
 pub(crate) fn decode_frame(frame: &[u8]) -> Result<CommunicationValue, JsValue> {
-    CommunicationValue::from_bytes(frame).map_err(|error| {
-        structured_error(
-            "invalid-frame",
-            format!("relay frame decoding failed: {error}"),
-        )
-    })
+    decode_frame_with_limits(frame, DecodeLimits::default())
+}
+
+pub(crate) fn decode_frame_with_limits(
+    frame: &[u8],
+    limits: DecodeLimits,
+) -> Result<CommunicationValue, JsValue> {
+    CommunicationValue::try_from_bytes_with_limits(frame, limits)
+        .map_err(|error| decode_error(error, "relay frame decoding failed"))
 }
 
 fn optional_u64(value: &JsValue, name: &str) -> Result<Option<u64>, JsValue> {
@@ -111,6 +138,79 @@ fn optional_u64(value: &JsValue, name: &str) -> Result<Option<u64>, JsValue> {
         "invalid-option",
         format!("{name} must be a number or bigint"),
     ))
+}
+
+fn limit_usize(options: &JsValue, key: &str, default: usize) -> Result<usize, JsValue> {
+    if options.is_null() || options.is_undefined() {
+        return Ok(default);
+    }
+    let value = js_sys::Reflect::get(options, &JsValue::from_str(key))?;
+    if value.is_null() || value.is_undefined() {
+        return Ok(default);
+    }
+    let Some(number) = value.as_f64() else {
+        return Err(structured_error(
+            "invalid-limit",
+            format!("{key} must be a number"),
+        ));
+    };
+    if !number.is_finite() || number.fract() != 0.0 || number < 0.0 {
+        return Err(structured_error(
+            "invalid-limit",
+            format!("{key} must be a non-negative integer"),
+        ));
+    }
+    usize::try_from(number as u64)
+        .map_err(|_| structured_error("invalid-limit", format!("{key} is out of range")))
+}
+
+pub(crate) fn relay_open_options(
+    policy: mtp_codec::ProtectionPolicy,
+    limits: &JsValue,
+) -> Result<RelayOpenOptions, JsValue> {
+    let decode_defaults = DecodeLimits::default();
+    let encode_defaults = EncodeLimits::default();
+    let protected_defaults = ProtectedLimits::default();
+    let options = RelayOpenOptions::new(policy).with_limits(
+        DecodeLimits {
+            max_depth: limit_usize(limits, "maxDepth", decode_defaults.max_depth)?,
+            max_values: limit_usize(limits, "maxValues", decode_defaults.max_values)?,
+            max_blob_size: limit_usize(limits, "maxBlobSize", decode_defaults.max_blob_size)?,
+            max_recipients: limit_usize(limits, "maxRecipients", decode_defaults.max_recipients)?,
+            max_allocated_bytes: limit_usize(
+                limits,
+                "maxAllocatedBytes",
+                decode_defaults.max_allocated_bytes,
+            )?,
+        },
+        ProtectedLimits {
+            max_message_id_bytes: limit_usize(
+                limits,
+                "maxMessageIdBytes",
+                protected_defaults.max_message_id_bytes,
+            )?,
+            max_metadata_encoded_bytes: limit_usize(
+                limits,
+                "maxMetadataEncodedBytes",
+                protected_defaults.max_metadata_encoded_bytes,
+            )?,
+            max_signer_key_history: limit_usize(
+                limits,
+                "maxSignerKeyHistory",
+                protected_defaults.max_signer_key_history,
+            )?,
+            max_decryption_key_history: limit_usize(
+                limits,
+                "maxDecryptionKeyHistory",
+                protected_defaults.max_decryption_key_history,
+            )?,
+        },
+    );
+    Ok(options.with_encode_limits(EncodeLimits {
+        max_depth: limit_usize(limits, "maxDepth", encode_defaults.max_depth)?,
+        max_values: limit_usize(limits, "maxValues", encode_defaults.max_values)?,
+        max_output_size: limit_usize(limits, "maxOutputSize", encode_defaults.max_output_size)?,
+    }))
 }
 
 fn serialize_data_value(value: &DataValue) -> Result<Vec<u8>, JsValue> {
@@ -196,19 +296,49 @@ impl WasmVerifiedRelayContent {
 /// versioned relay metadata parser in the JavaScript SDK. The caller must bind
 /// this value as the expected signer during the subsequent verification call.
 #[wasm_bindgen]
+#[deprecated(note = "use relay_metadata_claimed_signer_id_with_limits")]
 pub fn relay_metadata_claimed_signer_id(frame: &[u8], keyrings: JsValue) -> Result<u64, JsValue> {
-    let frame = decode_frame(frame)?;
-    let keyrings = keyrings_from_js(&keyrings)
-        .map_err(|error| wrapped_input_error("invalid-recipient-keyrings", error))?;
-    let references: Vec<&mtp_crypto::Keyring> = keyrings.iter().collect();
-    mtp_codec::relay_metadata_claimed_signer_id(&frame, &references).map_err(relay_error)
+    relay_metadata_claimed_signer_id_impl(frame, keyrings, JsValue::UNDEFINED)
 }
 
-/// Open and verify relay metadata in the native codec. JavaScript resolves
-/// the trusted signing-key history before calling this function, while the
-/// codec owns all relay layout and version interpretation.
+fn relay_metadata_claimed_signer_id_impl(
+    frame: &[u8],
+    keyrings: JsValue,
+    limits: JsValue,
+) -> Result<u64, JsValue> {
+    let options = relay_open_options(ProtectionPolicy::any_supported(), &limits)?;
+    let frame = decode_frame_with_limits(frame, options.decode_limits)?;
+    let keyrings = keyrings_from_js(&keyrings)
+        .map_err(|error| wrapped_input_error("invalid-recipient-keyrings", error))?;
+    if keyrings.len() > options.protected_limits.max_decryption_key_history {
+        return Err(relay_error(RelayError::ResourceLimit(
+            "decryption key history",
+        )));
+    }
+    let references: Vec<&mtp_crypto::Keyring> = keyrings.iter().collect();
+    mtp_codec::relay_metadata_claimed_signer_id_with_options(
+        &frame,
+        &references,
+        options.decode_limits,
+        options.protected_limits,
+    )
+    .map_err(relay_error)
+}
+
 #[wasm_bindgen]
-pub fn open_relay_metadata_with_keyrings(
+pub fn relay_metadata_claimed_signer_id_with_limits(
+    frame: &[u8],
+    keyrings: JsValue,
+    limits: JsValue,
+) -> Result<u64, JsValue> {
+    relay_metadata_claimed_signer_id_impl(frame, keyrings, limits)
+}
+
+/// Open relay metadata without replay protection. This raw entry point is for
+/// stored/forwarded messages; message-processing paths should add a guard in
+/// the SDK or use the checked native API.
+#[wasm_bindgen]
+pub fn open_relay_metadata_with_keyrings_without_replay(
     frame: &[u8],
     keyrings: JsValue,
     expected_signer_id: JsValue,
@@ -225,21 +355,54 @@ pub fn open_relay_metadata_with_keyrings(
         .ok_or_else(|| structured_error("invalid-option", "expectedSignerId is required"))?;
     let policy = protection_policy_from_suite(signature_suite)
         .map_err(|error| wrapped_input_error("unsupported-signature-suite", error))?;
-    let metadata = mtp_codec::open_relay_metadata_with_keys(
+    let metadata = mtp_codec::open_relay_metadata_with_limits_without_replay(
         &frame,
         &references,
-        expected_signer_id,
-        &signer_public_keys,
-        policy,
+        Some(expected_signer_id),
+        move |_| Some(signer_public_keys),
+        RelayOpenOptions::new(policy),
     )
     .map_err(relay_error)?;
     Ok(WasmVerifiedRelayMetadata { inner: metadata })
 }
 
-/// Open and verify relay content in the native codec using recipient and
-/// signer key histories supplied by the SDK.
+/// Open bounded relay metadata without replay protection. Use the SDK's
+/// message-processing guard or a native checked API for live traffic.
 #[wasm_bindgen]
-pub fn open_relay_content_with_keyrings(
+pub fn open_relay_metadata_with_keyrings_with_limits_without_replay(
+    frame: &[u8],
+    keyrings: JsValue,
+    expected_signer_id: JsValue,
+    signer_public_key_bundles: JsValue,
+    signature_suite: u8,
+    limits: JsValue,
+) -> Result<WasmVerifiedRelayMetadata, JsValue> {
+    let keyrings = keyrings_from_js(&keyrings)
+        .map_err(|error| wrapped_input_error("invalid-recipient-keyrings", error))?;
+    let references: Vec<&mtp_crypto::Keyring> = keyrings.iter().collect();
+    let signer_public_keys = public_key_bundles_from_js(&signer_public_key_bundles)
+        .map_err(|error| wrapped_input_error("invalid-signer-keys", error))?;
+    let expected_signer_id = optional_u64(&expected_signer_id, "expectedSignerId")?
+        .ok_or_else(|| structured_error("invalid-option", "expectedSignerId is required"))?;
+    let policy = protection_policy_from_suite(signature_suite)
+        .map_err(|error| wrapped_input_error("unsupported-signature-suite", error))?;
+    let options = relay_open_options(policy, &limits)?;
+    let frame = decode_frame_with_limits(frame, options.decode_limits)?;
+    let metadata = mtp_codec::open_relay_metadata_with_limits_without_replay(
+        &frame,
+        &references,
+        Some(expected_signer_id),
+        move |_| Some(signer_public_keys),
+        options,
+    )
+    .map_err(relay_error)?;
+    Ok(WasmVerifiedRelayMetadata { inner: metadata })
+}
+
+/// Open relay content without making a second replay decision. Replay is
+/// consumed when live message processing accepts the authenticated metadata.
+#[wasm_bindgen]
+pub fn open_relay_content_with_keyrings_without_replay(
     metadata: &WasmVerifiedRelayMetadata,
     keyrings: JsValue,
     signer_public_key_bundles: JsValue,
@@ -255,12 +418,49 @@ pub fn open_relay_content_with_keyrings(
         optional_u64(&expected_final_recipient_id, "expectedFinalRecipientId")?;
     let policy = protection_policy_from_suite(signature_suite)
         .map_err(|error| wrapped_input_error("unsupported-signature-suite", error))?;
-    let content = mtp_codec::open_relay_content_with_keyrings(
+    let content = mtp_codec::open_relay_content_with_limits_without_replay(
         &metadata.inner,
         &references,
         &signer_public_keys,
         expected_final_recipient_id,
-        policy,
+        RelayOpenOptions {
+            policy,
+            decode_limits: metadata.inner.decode_limits(),
+            encode_limits: metadata.inner.encode_limits(),
+            protected_limits: metadata.inner.protected_limits(),
+        },
+    )
+    .map_err(relay_error)?;
+    Ok(WasmVerifiedRelayContent { inner: content })
+}
+
+/// Open bounded relay content without replay protection. Replay is consumed
+/// when metadata is accepted by the live SDK/native processing boundary.
+#[wasm_bindgen]
+pub fn open_relay_content_with_keyrings_with_limits_without_replay(
+    metadata: &WasmVerifiedRelayMetadata,
+    keyrings: JsValue,
+    signer_public_key_bundles: JsValue,
+    expected_final_recipient_id: JsValue,
+    signature_suite: u8,
+    limits: JsValue,
+) -> Result<WasmVerifiedRelayContent, JsValue> {
+    let keyrings = keyrings_from_js(&keyrings)
+        .map_err(|error| wrapped_input_error("invalid-recipient-keyrings", error))?;
+    let references: Vec<&mtp_crypto::Keyring> = keyrings.iter().collect();
+    let signer_public_keys = public_key_bundles_from_js(&signer_public_key_bundles)
+        .map_err(|error| wrapped_input_error("invalid-signer-keys", error))?;
+    let expected_final_recipient_id =
+        optional_u64(&expected_final_recipient_id, "expectedFinalRecipientId")?;
+    let policy = protection_policy_from_suite(signature_suite)
+        .map_err(|error| wrapped_input_error("unsupported-signature-suite", error))?;
+    let options = relay_open_options(policy, &limits)?;
+    let content = mtp_codec::open_relay_content_with_limits_without_replay(
+        &metadata.inner,
+        &references,
+        &signer_public_keys,
+        expected_final_recipient_id,
+        options,
     )
     .map_err(relay_error)?;
     Ok(WasmVerifiedRelayContent { inner: content })

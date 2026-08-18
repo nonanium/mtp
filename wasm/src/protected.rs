@@ -1,7 +1,8 @@
 use wasm_bindgen::prelude::*;
 
 use mtp_codec::{
-    DataValue, ProtectedError, ProtectedMessageBuilder, ProtectedOpenOptions, ProtectionError,
+    DataValue, DecodeLimits, EncodeLimits, ProtectedError, ProtectedLimits,
+    ProtectedMessageBuilder, ProtectedOpenOptions, ProtectionError, ProtectionPolicy,
     ProtectionPurpose, VerifiedProtectedMessage,
 };
 
@@ -9,7 +10,7 @@ use crate::crypto::{
     keyrings_from_js, protection_policy_from_suite, public_key_bundles_from_js,
     relay_signer_from_keyring,
 };
-use crate::relay::{decode_frame, structured_error};
+use crate::relay::{decode_error, decode_frame_with_limits, structured_error};
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
@@ -45,9 +46,86 @@ fn optional_u64(value: &JsValue, name: &str) -> Result<Option<u64>, JsValue> {
     ))
 }
 
-fn decode_data_value(value: &[u8]) -> Result<DataValue, JsValue> {
-    DataValue::from_bytes(value)
-        .ok_or_else(|| structured_error("invalid-data-value", "invalid DataValue"))
+fn limit_usize(options: &JsValue, key: &str, default: usize) -> Result<usize, JsValue> {
+    if options.is_null() || options.is_undefined() {
+        return Ok(default);
+    }
+    let value = js_sys::Reflect::get(options, &JsValue::from_str(key))?;
+    if value.is_null() || value.is_undefined() {
+        return Ok(default);
+    }
+    let Some(number) = value.as_f64() else {
+        return Err(structured_error(
+            "invalid-limit",
+            format!("{key} must be a number"),
+        ));
+    };
+    if !number.is_finite() || number.fract() != 0.0 || number < 0.0 {
+        return Err(structured_error(
+            "invalid-limit",
+            format!("{key} must be a non-negative integer"),
+        ));
+    }
+    usize::try_from(number as u64)
+        .map_err(|_| structured_error("invalid-limit", format!("{key} is out of range")))
+}
+
+fn protected_open_options(
+    expected_receiver_id: Option<u64>,
+    signature_purpose: u8,
+    encryption_purpose: u8,
+    policy: mtp_codec::ProtectionPolicy,
+    limits: &JsValue,
+) -> Result<ProtectedOpenOptions, JsValue> {
+    let defaults = DecodeLimits::default();
+    let encode_defaults = EncodeLimits::default();
+    let protected_defaults = ProtectedLimits::default();
+    let decode_limits = DecodeLimits {
+        max_depth: limit_usize(limits, "maxDepth", defaults.max_depth)?,
+        max_values: limit_usize(limits, "maxValues", defaults.max_values)?,
+        max_blob_size: limit_usize(limits, "maxBlobSize", defaults.max_blob_size)?,
+        max_recipients: limit_usize(limits, "maxRecipients", defaults.max_recipients)?,
+        max_allocated_bytes: limit_usize(
+            limits,
+            "maxAllocatedBytes",
+            defaults.max_allocated_bytes,
+        )?,
+    };
+    let encode_limits = EncodeLimits {
+        max_depth: limit_usize(limits, "maxDepth", encode_defaults.max_depth)?,
+        max_values: limit_usize(limits, "maxValues", encode_defaults.max_values)?,
+        max_output_size: limit_usize(limits, "maxOutputSize", encode_defaults.max_output_size)?,
+    };
+    let protected_limits = ProtectedLimits {
+        max_message_id_bytes: limit_usize(
+            limits,
+            "maxMessageIdBytes",
+            protected_defaults.max_message_id_bytes,
+        )?,
+        max_metadata_encoded_bytes: limit_usize(
+            limits,
+            "maxMetadataEncodedBytes",
+            protected_defaults.max_metadata_encoded_bytes,
+        )?,
+        max_signer_key_history: limit_usize(
+            limits,
+            "maxSignerKeyHistory",
+            protected_defaults.max_signer_key_history,
+        )?,
+        max_decryption_key_history: limit_usize(
+            limits,
+            "maxDecryptionKeyHistory",
+            protected_defaults.max_decryption_key_history,
+        )?,
+    };
+    Ok(ProtectedOpenOptions::new(
+        expected_receiver_id,
+        ProtectionPurpose::from(signature_purpose),
+        ProtectionPurpose::from(encryption_purpose),
+        policy,
+    )
+    .with_limits(decode_limits, protected_limits)
+    .with_encode_limits(encode_limits))
 }
 
 pub(crate) fn protected_error(error: ProtectedError) -> JsValue {
@@ -86,6 +164,7 @@ fn protected_error_code(error: &ProtectedError) -> &'static str {
         ProtectedError::ExpectedReceiverMismatch => "receiver-id-mismatch",
         ProtectedError::ReservedApplicationType(_) => "reserved-application-type",
         ProtectedError::Replay => "replay",
+        ProtectedError::ResourceLimit(_) => "resource-limit",
         ProtectedError::ReplayGuard(_) => "replay-guard-error",
         ProtectedError::Protection(error) => match error {
             ProtectionError::NoMatchingRecipient => "no-matching-recipient",
@@ -94,6 +173,7 @@ fn protected_error_code(error: &ProtectedError) -> &'static str {
             ProtectionError::PurposeMismatch { .. } => "purpose-mismatch",
             ProtectionError::SignerIdMismatch { .. } => "signer-id-mismatch",
             ProtectionError::SignerKeyNotFound(_) => "signer-key-not-found",
+            ProtectionError::ResourceLimit(_) => "resource-limit",
             ProtectionError::Crypto(mtp_crypto::CryptoError::InvalidSignature)
             | ProtectionError::Crypto(mtp_crypto::CryptoError::VerificationFailed) => {
                 "invalid-signature"
@@ -108,15 +188,6 @@ fn serialize_data_value(value: &DataValue) -> Result<Vec<u8>, JsValue> {
         structured_error(
             "invalid-data-value",
             format!("protected value encoding failed: {error}"),
-        )
-    })
-}
-
-fn serialize_frame(frame: &mtp_codec::CommunicationValue) -> Result<Vec<u8>, JsValue> {
-    frame.to_bytes().map_err(|error| {
-        structured_error(
-            "invalid-frame",
-            format!("protected frame encoding failed: {error}"),
         )
     })
 }
@@ -181,7 +252,58 @@ pub fn build_protected_frame_with_keyring(
     expose_sender: bool,
     recipient_public_key_bundles: JsValue,
 ) -> Result<Vec<u8>, JsValue> {
-    let content = decode_data_value(encoded_content)?;
+    build_protected_frame_with_keyring_impl(
+        message_type,
+        encoded_content,
+        signer_id,
+        final_recipient_id,
+        message_id,
+        created_at,
+        signature_purpose,
+        encryption_purpose,
+        keyring_bytes,
+        signature_suite,
+        frame_id,
+        expose_sender,
+        recipient_public_key_bundles,
+        JsValue::UNDEFINED,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_protected_frame_with_keyring_impl(
+    message_type: &str,
+    encoded_content: &[u8],
+    signer_id: u64,
+    final_recipient_id: u64,
+    message_id: &str,
+    created_at: u64,
+    signature_purpose: u8,
+    encryption_purpose: u8,
+    keyring_bytes: &[u8],
+    signature_suite: u8,
+    frame_id: Option<u32>,
+    expose_sender: bool,
+    recipient_public_key_bundles: JsValue,
+    limits: JsValue,
+) -> Result<Vec<u8>, JsValue> {
+    let encode_limits = if limits.is_null() || limits.is_undefined() {
+        EncodeLimits::default()
+    } else {
+        crate::client::encode_limits_from_js(&limits)?
+    };
+    let open_options = protected_open_options(
+        None,
+        signature_purpose,
+        encryption_purpose,
+        ProtectionPolicy::any_supported(),
+        &limits,
+    )?;
+    let content = DataValue::try_from_bytes_with_limits(
+        encoded_content,
+        DecodeLimits::for_transport_message_size(encode_limits.max_output_size as u64),
+    )
+    .map_err(|error| decode_error(error, "DataValue decoding failed"))?;
     let keyring = mtp_crypto::Keyring::from_bytes(keyring_bytes).map_err(|error| {
         structured_error(
             "invalid-keyring",
@@ -202,42 +324,149 @@ pub fn build_protected_frame_with_keyring(
     .message_id(message_id)
     .created_at(created_at)
     .recipients(recipients)
+    .encode_limits(encode_limits)
+    .protected_limits(open_options.protected_limits)
     .expose_sender(expose_sender);
     if let Some(frame_id) = frame_id {
         builder = builder.frame_id(frame_id);
     }
     let frame = builder.build().map_err(protected_error)?;
-    serialize_frame(&frame)
+    frame.to_bytes_with_limits(encode_limits).map_err(|error| {
+        structured_error(
+            "invalid-frame",
+            format!("protected frame encoding failed: {error}"),
+        )
+    })
+}
+
+/// Build a complete encrypted protected frame with explicit encoder and
+/// semantic protected-field limits.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn build_protected_frame_with_keyring_with_limits(
+    message_type: &str,
+    encoded_content: &[u8],
+    signer_id: u64,
+    final_recipient_id: u64,
+    message_id: &str,
+    created_at: u64,
+    signature_purpose: u8,
+    encryption_purpose: u8,
+    keyring_bytes: &[u8],
+    signature_suite: u8,
+    frame_id: Option<u32>,
+    expose_sender: bool,
+    recipient_public_key_bundles: JsValue,
+    limits: JsValue,
+) -> Result<Vec<u8>, JsValue> {
+    build_protected_frame_with_keyring_impl(
+        message_type,
+        encoded_content,
+        signer_id,
+        final_recipient_id,
+        message_id,
+        created_at,
+        signature_purpose,
+        encryption_purpose,
+        keyring_bytes,
+        signature_suite,
+        frame_id,
+        expose_sender,
+        recipient_public_key_bundles,
+        limits,
+    )
 }
 
 /// Read the claimed, unverified signer ID after decrypting the protected
 /// payload. The result may only select trusted keys for the same signer ID.
 #[wasm_bindgen]
+#[deprecated(note = "use protected_claimed_signer_id_with_limits")]
 pub fn protected_claimed_signer_id(
     frame: &[u8],
     keyrings: JsValue,
     encryption_purpose: u8,
 ) -> Result<u64, JsValue> {
-    let frame = decode_frame(frame)?;
+    protected_claimed_signer_id_impl(frame, keyrings, encryption_purpose, JsValue::UNDEFINED)
+}
+
+fn protected_claimed_signer_id_impl(
+    frame: &[u8],
+    keyrings: JsValue,
+    encryption_purpose: u8,
+    limits: JsValue,
+) -> Result<u64, JsValue> {
+    let options = protected_open_options(
+        None,
+        0,
+        encryption_purpose,
+        ProtectionPolicy::any_supported(),
+        &limits,
+    )?;
+    let frame = decode_frame_with_limits(frame, options.decode_limits)?;
     let keyrings = keyrings_from_js(&keyrings).map_err(|error| {
         structured_error(
             "invalid-recipient-keyrings",
             error.as_string().unwrap_or_default(),
         )
     })?;
+    if keyrings.len() > options.protected_limits.max_decryption_key_history {
+        return Err(protected_error(ProtectedError::ResourceLimit(
+            "decryption key history",
+        )));
+    }
     let references: Vec<&mtp_crypto::Keyring> = keyrings.iter().collect();
-    mtp_codec::protected_claimed_signer_id(
+    mtp_codec::protected_claimed_signer_id_with_options(
         &frame,
         &references,
         ProtectionPurpose::from(encryption_purpose),
+        options.decode_limits,
+        options.protected_limits,
     )
     .map_err(protected_error)
 }
 
-/// Open and verify a direct protected message in the native codec using
-/// trusted signer-key history supplied by the SDK.
 #[wasm_bindgen]
-pub fn open_protected_with_keyrings(
+pub fn protected_claimed_signer_id_with_limits(
+    frame: &[u8],
+    keyrings: JsValue,
+    encryption_purpose: u8,
+    limits: JsValue,
+) -> Result<u64, JsValue> {
+    let options = protected_open_options(
+        None,
+        0,
+        encryption_purpose,
+        ProtectionPolicy::any_supported(),
+        &limits,
+    )?;
+    let frame = decode_frame_with_limits(frame, options.decode_limits)?;
+    let keyrings = keyrings_from_js(&keyrings).map_err(|error| {
+        structured_error(
+            "invalid-recipient-keyrings",
+            error.as_string().unwrap_or_default(),
+        )
+    })?;
+    if keyrings.len() > options.protected_limits.max_decryption_key_history {
+        return Err(protected_error(ProtectedError::ResourceLimit(
+            "decryption key history",
+        )));
+    }
+    let references: Vec<&mtp_crypto::Keyring> = keyrings.iter().collect();
+    mtp_codec::protected_claimed_signer_id_with_options(
+        &frame,
+        &references,
+        ProtectionPurpose::from(encryption_purpose),
+        options.decode_limits,
+        options.protected_limits,
+    )
+    .map_err(protected_error)
+}
+
+/// Open a protected value without replay protection. This raw entry point is
+/// intended for stored/forensic messages; message-processing callers should
+/// apply their replay guard in the SDK or use a checked native API.
+#[wasm_bindgen]
+pub fn open_protected_with_keyrings_without_replay(
     frame: &[u8],
     keyrings: JsValue,
     expected_signer_id: JsValue,
@@ -247,7 +476,30 @@ pub fn open_protected_with_keyrings(
     encryption_purpose: u8,
     signature_suite: u8,
 ) -> Result<WasmVerifiedProtectedMessage, JsValue> {
-    let frame = decode_frame(frame)?;
+    open_protected_with_keyrings_impl(
+        frame,
+        keyrings,
+        expected_signer_id,
+        signer_public_key_bundles,
+        expected_receiver_id,
+        signature_purpose,
+        encryption_purpose,
+        signature_suite,
+        JsValue::UNDEFINED,
+    )
+}
+
+fn open_protected_with_keyrings_impl(
+    frame: &[u8],
+    keyrings: JsValue,
+    expected_signer_id: JsValue,
+    signer_public_key_bundles: JsValue,
+    expected_receiver_id: JsValue,
+    signature_purpose: u8,
+    encryption_purpose: u8,
+    signature_suite: u8,
+    limits: JsValue,
+) -> Result<WasmVerifiedProtectedMessage, JsValue> {
     let keyrings = keyrings_from_js(&keyrings).map_err(|error| {
         structured_error(
             "invalid-recipient-keyrings",
@@ -268,21 +520,51 @@ pub fn open_protected_with_keyrings(
             error.as_string().unwrap_or_default(),
         )
     })?;
-    let message = mtp_codec::open_protected_with_keys(
+    let options = protected_open_options(
+        expected_receiver_id,
+        signature_purpose,
+        encryption_purpose,
+        policy,
+        &limits,
+    )?;
+    let frame = decode_frame_with_limits(frame, options.decode_limits)?;
+    let message = mtp_codec::open_protected_with_keys_without_replay(
         &frame,
         &references,
         expected_signer_id,
         &signer_public_keys,
-        ProtectedOpenOptions::new(
-            expected_receiver_id,
-            ProtectionPurpose::from(signature_purpose),
-            ProtectionPurpose::from(encryption_purpose),
-            policy,
-        ),
-        None,
+        options,
     )
     .map_err(protected_error)?;
     Ok(WasmVerifiedProtectedMessage { inner: message })
+}
+
+/// Open a bounded protected value without replay protection. The raw WASM
+/// boundary cannot accept a native replay-guard trait, so message-processing
+/// callers must use the SDK guard or a native checked API.
+#[wasm_bindgen]
+pub fn open_protected_with_keyrings_with_limits_without_replay(
+    frame: &[u8],
+    keyrings: JsValue,
+    expected_signer_id: JsValue,
+    signer_public_key_bundles: JsValue,
+    expected_receiver_id: JsValue,
+    signature_purpose: u8,
+    encryption_purpose: u8,
+    signature_suite: u8,
+    limits: JsValue,
+) -> Result<WasmVerifiedProtectedMessage, JsValue> {
+    open_protected_with_keyrings_impl(
+        frame,
+        keyrings,
+        expected_signer_id,
+        signer_public_key_bundles,
+        expected_receiver_id,
+        signature_purpose,
+        encryption_purpose,
+        signature_suite,
+        limits,
+    )
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
@@ -358,9 +640,12 @@ mod tests {
         sender: &mtp_crypto::Keyring,
         recipient: &mtp_crypto::Keyring,
     ) -> JsValue {
-        let recipient_bytes = recipient.to_bytes();
-        let signer_bundle_bytes = sender.public_key_bundle().as_bytes();
-        match open_protected_with_keyrings(
+        let recipient_bytes = recipient.try_to_bytes().expect("recipient serialization");
+        let signer_bundle_bytes = sender
+            .public_key_bundle()
+            .try_as_bytes()
+            .expect("signer bundle serialization");
+        match open_protected_with_keyrings_without_replay(
             frame,
             js_sys::Uint8Array::from(&recipient_bytes[..]).into(),
             JsValue::bigint_from_str("7"),
@@ -379,8 +664,11 @@ mod tests {
     fn protected_builder_returns_the_complete_frame() {
         let sender = mtp_crypto::Keyring::generate();
         let recipient = mtp_crypto::Keyring::generate();
-        let sender_bytes = sender.to_bytes();
-        let recipient_bundle_bytes = recipient.public_key_bundle().as_bytes();
+        let sender_bytes = sender.try_to_bytes().expect("sender serialization");
+        let recipient_bundle_bytes = recipient
+            .public_key_bundle()
+            .try_as_bytes()
+            .expect("recipient bundle serialization");
         let content = DataValue::Str("complete-frame".into())
             .to_bytes()
             .expect("encode content");

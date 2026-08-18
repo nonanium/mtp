@@ -36,3 +36,29 @@ pub fn derive_encryption_key(
     out.copy_from_slice(&key);
     Ok(out)
 }
+
+#[cfg(feature = "password-kdf")]
+pub fn derive_password_key(
+    passphrase: &[u8],
+    salt: &[u8],
+    memory_kib: u32,
+    iterations: u32,
+    lanes: u32,
+) -> Result<[u8; 32], CryptoError> {
+    if passphrase.is_empty()
+        || salt.len() < 16
+        || !(8 * 1024..=256 * 1024).contains(&memory_kib)
+        || !(1..=10).contains(&iterations)
+        || !(1..=8).contains(&lanes)
+    {
+        return Err(CryptoError::KdfError);
+    }
+    let params = argon2::Params::new(memory_kib, iterations, lanes, Some(32))
+        .map_err(|_| CryptoError::KdfError)?;
+    let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon
+        .hash_password_into(passphrase, salt, &mut key)
+        .map_err(|_| CryptoError::KdfError)?;
+    Ok(key)
+}

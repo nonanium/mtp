@@ -5,21 +5,23 @@
 //! wrappers while the framing implementation below is shared by adapters.
 
 use crate::{
-    Policy, TransportConnection, TransportRecvStream, TransportSendStream, framing::write_frame,
+    Policy, TransportConnection, TransportRecvStream, TransportSendStream,
+    connection::{DecodeRejectionCounters, RuntimePolicy, classify_decode_error},
+    framing::{RetryClassifier, write_frame},
 };
 use mtp_codec::{CommunicationValue, DecodeLimits, TypeMap};
 use mtp_common::CommunicationError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
-use tokio::time::timeout;
+use tokio::sync::{Mutex, Notify, RwLock, Semaphore, mpsc};
+use tokio::time::{Instant, timeout, timeout_at};
 
 #[cfg(feature = "pipes")]
 use crate::pipe::{PipeReader, PipeWriter};
 
 pub struct GenericSender<C: TransportConnection> {
     connection: C,
-    policy: Arc<Policy>,
+    policy: Arc<RuntimePolicy>,
     persistent: Arc<Mutex<Option<C::SendStream>>>,
     send_lock: Arc<Mutex<()>>,
     type_map: Arc<RwLock<TypeMap>>,
@@ -39,6 +41,7 @@ impl<C: TransportConnection> Clone for GenericSender<C> {
 
 impl<C: TransportConnection> GenericSender<C> {
     pub fn new(connection: C, policy: Arc<Policy>) -> Self {
+        let policy = Arc::new(RuntimePolicy::from_public(&policy));
         Self {
             connection,
             policy,
@@ -84,20 +87,30 @@ impl<C: TransportConnection> GenericSender<C> {
                     if stream.is_none() {
                         *stream = Some(self.open().await?);
                     }
-                    let result = timeout(
-                        self.policy.write_timeout,
-                        write_frame(stream.as_mut().unwrap(), value, &self.policy),
-                    )
-                    .await
-                    .map_err(|_| CommunicationError::StreamError)
-                    .and_then(|r| r);
+                    let result = match stream.as_mut() {
+                        Some(stream) => timeout(
+                            self.policy.write_timeout,
+                            write_frame(stream, value, &self.policy),
+                        )
+                        .await
+                        .map_err(|_| CommunicationError::StreamError)
+                        .and_then(|result| result),
+                        None => Err(CommunicationError::StreamError),
+                    };
                     if result.is_ok() {
-                        return result;
+                        return Ok(());
+                    }
+                    let error = match result {
+                        Ok(()) => return Ok(()),
+                        Err(error) => error,
+                    };
+                    if !RetryClassifier::retry_persistent_stream(&error) {
+                        return Err(error);
                     }
                     *stream = None;
                     attempts += 1;
                     if attempts > self.policy.persistent_stream_max_retries {
-                        return result;
+                        return Err(error);
                     }
                     tokio::time::sleep(
                         self.policy.persistent_stream_retry_backoff * attempts as u32,
@@ -114,6 +127,7 @@ impl<C: TransportConnection> GenericSender<C> {
         pipe_id: u32,
         description: &str,
     ) -> Result<PipeWriter<C::SendStream>, CommunicationError> {
+        let _send_lock = self.send_lock.lock().await;
         if self.connection.close_reason().is_some() {
             return Err(CommunicationError::StreamClosed);
         }
@@ -179,6 +193,8 @@ pub struct GenericReceiver<C: TransportConnection> {
     ping_sender: Arc<RwLock<Option<GenericSender<C>>>>,
     max_message_size: Arc<AtomicU64>,
     type_map: Arc<RwLock<TypeMap>>,
+    queue_notify: Arc<Notify>,
+    decode_rejections: Arc<DecodeRejectionCounters>,
     _accept_task: Arc<tokio::task::JoinHandle<()>>,
 }
 
@@ -192,6 +208,8 @@ impl<C: TransportConnection> Clone for GenericReceiver<C> {
             ping_sender: self.ping_sender.clone(),
             max_message_size: self.max_message_size.clone(),
             type_map: self.type_map.clone(),
+            queue_notify: self.queue_notify.clone(),
+            decode_rejections: self.decode_rejections.clone(),
             _accept_task: self._accept_task.clone(),
         }
     }
@@ -207,6 +225,7 @@ impl<C: TransportConnection> Drop for GenericReceiver<C> {
 
 impl<C: TransportConnection> GenericReceiver<C> {
     pub fn new(connection: C, policy: Arc<Policy>) -> Self {
+        let policy = Arc::new(RuntimePolicy::from_public(&policy));
         let (tx, rx) = mpsc::channel(policy.receiver_queue_capacity);
         #[cfg(feature = "pipes")]
         let (pipe_tx, pipe_rx) = mpsc::channel(policy.receiver_queue_capacity);
@@ -222,6 +241,10 @@ impl<C: TransportConnection> GenericReceiver<C> {
         let task_max_message_size = max_message_size.clone();
         let type_map = Arc::new(RwLock::new(TypeMap::latest()));
         let task_type_map = type_map.clone();
+        let queue_notify = Arc::new(Notify::new());
+        let task_queue_notify = queue_notify.clone();
+        let decode_rejections = Arc::new(DecodeRejectionCounters::default());
+        let task_decode_rejections = decode_rejections.clone();
         let task_accept_task_tx = tx.clone();
         #[cfg(feature = "pipes")]
         let task_accept_task_pipe_tx = pipe_tx.clone();
@@ -237,8 +260,10 @@ impl<C: TransportConnection> GenericReceiver<C> {
                 #[cfg(not(feature = "pipes"))]
                 let cap_full = task_accept_task_tx.capacity() == 0;
 
+                let notified = task_queue_notify.notified();
+                tokio::pin!(notified);
                 if cap_full {
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    notified.await;
                     continue;
                 }
 
@@ -277,11 +302,12 @@ impl<C: TransportConnection> GenericReceiver<C> {
                 let ping_sender = task_ping_sender.clone();
                 let connection = task_connection.clone();
                 let type_map = task_type_map.clone();
+                let decode_rejections = task_decode_rejections.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
                     let mut stream = stream;
                     let mut frames = 0usize;
-                    loop {
+                    'stream: loop {
                         if policy
                             .max_frames_per_stream
                             .is_some_and(|max| frames >= max)
@@ -304,7 +330,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                     policy.application_close_code,
                                     b"frame header read error",
                                 );
-                                break;
+                                break 'stream;
                             }
                             Err(_) => {
                                 break;
@@ -314,6 +340,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                         if len == policy.close_frame_len {
                             break;
                         }
+                        let deadline = Instant::now() + policy.read_timeout;
                         let frame_limit = max_message_size.load(Ordering::Relaxed);
                         let body_len = len as usize;
                         let frame_len = match body_len.checked_add(4) {
@@ -330,29 +357,25 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             connection.close(policy.application_close_code, b"frame too large");
                             break;
                         }
-                        let target_len = body_len;
-                        let mut body = Vec::new();
-                        if body.try_reserve(target_len.min(16 * 1024)).is_err() {
-                            tracing::warn!(
-                                target_len,
-                                "MTP receive stream could not reserve frame body"
-                            );
+                        let mut frame = Vec::new();
+                        if frame.try_reserve_exact(frame_len).is_err() {
+                            tracing::warn!(frame_len, "MTP receive stream could not reserve frame");
                             let _ = tx.send(Err(CommunicationError::MessageTooLarge)).await;
                             connection
                                 .close(policy.application_close_code, b"frame allocation failed");
                             break;
                         }
-                        while body.len() < target_len {
-                            let chunk_len = (target_len - body.len()).min(16 * 1024);
-                            let mut chunk = [0u8; 16 * 1024];
-                            let body_read = tokio::time::timeout(
-                                policy.read_timeout,
-                                stream.read_exact(&mut chunk[..chunk_len]),
+                        frame.extend_from_slice(&len.to_be_bytes());
+                        frame.resize(frame_len, 0);
+                        let mut body_offset = 4usize;
+                        while body_offset < frame_len {
+                            let chunk_len = (frame_len - body_offset).min(16 * 1024);
+                            let body_read = timeout_at(
+                                deadline,
+                                stream.read_exact(&mut frame[body_offset..body_offset + chunk_len]),
                             )
                             .await;
-                            if !matches!(&body_read, Ok(Ok(())))
-                                || body.try_reserve(chunk_len).is_err()
-                            {
+                            if !matches!(&body_read, Ok(Ok(()))) {
                                 tracing::warn!(
                                     pipe_chunk_len = chunk_len,
                                     ?body_read,
@@ -361,24 +384,23 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                 let _ = tx.send(Err(CommunicationError::StreamError)).await;
                                 connection
                                     .close(policy.application_close_code, b"frame body read error");
-                                break;
+                                break 'stream;
                             }
-                            body.extend_from_slice(&chunk[..chunk_len]);
-                        }
-                        if body.len() != target_len {
-                            break;
+                            body_offset += chunk_len;
                         }
                         frames += 1;
-                        let mut frame = Vec::with_capacity(frame_len);
-                        frame.extend_from_slice(&len.to_be_bytes());
-                        frame.extend_from_slice(&body);
-                        let mut message = match CommunicationValue::from_bytes_with_limits(
+                        let mut message = match CommunicationValue::try_from_bytes_with_limits(
                             &frame,
                             DecodeLimits::for_transport_message_size(frame_limit),
                         ) {
                             Ok(message) => message,
-                            Err(_) => {
-                                tracing::warn!("MTP receive stream contained an invalid frame");
+                            Err(error) => {
+                                tracing::warn!(
+                                    ?error,
+                                    class = ?classify_decode_error(&error),
+                                    "MTP receive stream rejected by bounded decode"
+                                );
+                                decode_rejections.record(&error);
                                 let _ = tx
                                     .send(Err(CommunicationError::ParseCommunicationValue))
                                     .await;
@@ -463,6 +485,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
             ping_sender,
             max_message_size,
             type_map,
+            queue_notify,
+            decode_rejections,
             _accept_task: Arc::new(accept_task),
         }
     }
@@ -480,13 +504,23 @@ impl<C: TransportConnection> GenericReceiver<C> {
     pub async fn set_type_map(&self, type_map: &TypeMap) {
         *self.type_map.write().await = type_map.clone();
     }
+
+    /// Return local counts for frames rejected by the structured decoder.
+    pub fn decode_rejection_counts(&self) -> crate::DecodeRejectionCounts {
+        self.decode_rejections.snapshot()
+    }
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
-        self.incoming
+        let result = self
+            .incoming
             .lock()
             .await
             .recv()
             .await
-            .unwrap_or(Err(CommunicationError::StreamClosed))
+            .unwrap_or(Err(CommunicationError::StreamClosed));
+        if result.is_ok() {
+            self.queue_notify.notify_one();
+        }
+        result
     }
 
     #[cfg(feature = "pipes")]
@@ -498,7 +532,10 @@ impl<C: TransportConnection> GenericReceiver<C> {
         tokio::select! {
             msg = incoming.recv() => {
                 match msg {
-                    Some(Ok(val)) => Ok(crate::TransportEvent::Message(val)),
+                    Some(Ok(val)) => {
+                        self.queue_notify.notify_one();
+                        Ok(crate::TransportEvent::Message(val))
+                    }
                     Some(Err(e)) => Err(e),
                     None => Err(self
                         .connection
@@ -508,7 +545,10 @@ impl<C: TransportConnection> GenericReceiver<C> {
             }
             pipe = pipes.recv() => {
                 match pipe {
-                    Some(reader) => Ok(crate::TransportEvent::Pipe(reader)),
+                    Some(reader) => {
+                        self.queue_notify.notify_one();
+                        Ok(crate::TransportEvent::Pipe(reader))
+                    }
                     None => Err(self
                         .connection
                         .close_reason()
@@ -520,12 +560,17 @@ impl<C: TransportConnection> GenericReceiver<C> {
 
     #[cfg(feature = "pipes")]
     pub async fn receive_pipe(&self) -> Result<PipeReader<C::RecvStream>, CommunicationError> {
-        self.pipes
+        let result = self
+            .pipes
             .lock()
             .await
             .recv()
             .await
-            .ok_or(CommunicationError::StreamClosed)
+            .ok_or(CommunicationError::StreamClosed);
+        if result.is_ok() {
+            self.queue_notify.notify_one();
+        }
+        result
     }
 
     #[cfg(feature = "pipes")]
@@ -534,7 +579,10 @@ impl<C: TransportConnection> GenericReceiver<C> {
     ) -> Result<Option<PipeReader<C::RecvStream>>, CommunicationError> {
         match self.pipes.try_lock() {
             Ok(mut rx) => match rx.try_recv() {
-                Ok(reader) => Ok(Some(reader)),
+                Ok(reader) => {
+                    self.queue_notify.notify_one();
+                    Ok(Some(reader))
+                }
                 Err(mpsc::error::TryRecvError::Empty) => Ok(None),
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     Err(CommunicationError::StreamClosed)

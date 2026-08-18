@@ -7,8 +7,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::error::js_error;
-use crate::frame::parse_frame_value_with_type_map;
-use mtp_codec::TypeMap;
+use crate::frame::parse_frame_value_with_limits;
+use mtp_codec::{DecodeLimits, EncodeLimits, TypeMap};
 
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 
@@ -133,6 +133,7 @@ pub struct WasmTransport {
     /// Serializes stream creation and writes across concurrent callers.
     send_lock: Rc<AsyncMutex<()>>,
     type_map: Rc<RefCell<TypeMap>>,
+    decode_limits: Rc<RefCell<DecodeLimits>>,
 }
 
 impl WasmTransport {
@@ -140,6 +141,15 @@ impl WasmTransport {
         url: &str,
         cert_hashes: Option<Vec<String>>,
         max_message_size: u32,
+    ) -> Result<Self, JsValue> {
+        Self::connect_with_limits(url, cert_hashes, max_message_size, None).await
+    }
+
+    pub async fn connect_with_limits(
+        url: &str,
+        cert_hashes: Option<Vec<String>>,
+        max_message_size: u32,
+        configured_limits: Option<DecodeLimits>,
     ) -> Result<Self, JsValue> {
         let ctor = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("WebTransport"))?
             .dyn_into::<js_sys::Function>()
@@ -188,6 +198,10 @@ impl WasmTransport {
         JsFuture::from(ready)
             .await
             .map_err(|e| js_error(format!("WebTransport ready failed: {:?}", e)))?;
+        let transport_limits = DecodeLimits::for_transport_message_size(max_message_size as u64);
+        let decode_limits = configured_limits
+            .map(|limits| restrict_decode_limits(limits, transport_limits))
+            .unwrap_or(transport_limits);
         Ok(Self {
             inner: transport,
             max_message_size,
@@ -198,6 +212,7 @@ impl WasmTransport {
             outgoing_writer: Rc::new(RefCell::new(None)),
             send_lock: Rc::new(AsyncMutex::new(())),
             type_map: Rc::new(RefCell::new(TypeMap::latest())),
+            decode_limits: Rc::new(RefCell::new(decode_limits)),
         })
     }
 
@@ -211,6 +226,17 @@ impl WasmTransport {
 
     pub fn type_map(&self) -> TypeMap {
         self.type_map.borrow().clone()
+    }
+
+    pub fn decode_limits(&self) -> DecodeLimits {
+        *self.decode_limits.borrow()
+    }
+
+    /// Encoder policy corresponding to the transport's admitted complete
+    /// frame size. SDK builders use this before constructing a frame so an
+    /// oversized value is rejected before its serialized buffer is created.
+    pub fn encode_limits(&self) -> EncodeLimits {
+        EncodeLimits::for_transport_message_size(self.max_message_size as u64)
     }
 
     pub async fn send_frame(&self, frame: &[u8]) -> Result<(), JsValue> {
@@ -462,7 +488,7 @@ impl WasmTransport {
             match self.next_frame(self.max_message_size).await {
                 Ok(FrameOutcome::Frame(frame)) => {
                     let type_map = self.type_map();
-                    match parse_frame_value_with_type_map(&frame, &type_map) {
+                    match parse_frame_value_with_limits(&frame, &type_map, self.decode_limits()) {
                         Ok(parsed) => {
                             on_message(parsed);
                         }
@@ -498,15 +524,23 @@ impl WasmTransport {
             match self.next_frame(self.max_message_size).await {
                 Ok(FrameOutcome::Frame(frame)) => {
                     let type_map = self.type_map();
+                    let decode_limits = self.decode_limits();
                     let pipe_request_type =
                         mtp_codec::CommunicationType::PipeRequest.try_to_id(&type_map);
                     let pipe_response_type =
                         mtp_codec::CommunicationType::PipeResponse.try_to_id(&type_map);
                     let is_first = self.new_stream_frame.get();
+                    let comm =
+                        mtp_codec::CommunicationValue::try_from_bytes_with_type_map_and_limits(
+                            &frame,
+                            &type_map,
+                            decode_limits,
+                        )
+                        .ok();
+
                     if is_first {
                         self.new_stream_frame.set(false);
-                        if let Ok(comm) =
-                            mtp_codec::CommunicationValue::from_bytes_with(&frame, &type_map)
+                        if let Some(comm) = comm.as_ref()
                             && Some(comm.get_type()) == pipe_request_type
                         {
                             let Some(pipe_id) = comm.id().filter(|id| *id != 0) else {
@@ -539,8 +573,7 @@ impl WasmTransport {
                         }
                     }
 
-                    if let Ok(comm) =
-                        mtp_codec::CommunicationValue::from_bytes_with(&frame, &type_map)
+                    if let Some(comm) = comm.as_ref()
                         && Some(comm.get_type()) == pipe_response_type
                         && !matches!(comm.id(), Some(id) if id != 0)
                     {
@@ -551,8 +584,7 @@ impl WasmTransport {
                         break;
                     }
 
-                    if let Ok(comm) =
-                        mtp_codec::CommunicationValue::from_bytes_with(&frame, &type_map)
+                    if let Some(comm) = comm.as_ref()
                         && !matches!(comm.id(), Some(id) if id != 0)
                         && comm
                             .get_type_name()
@@ -565,7 +597,7 @@ impl WasmTransport {
                         break;
                     }
 
-                    match parse_frame_value_with_type_map(&frame, &type_map) {
+                    match parse_frame_value_with_limits(&frame, &type_map, decode_limits) {
                         Ok(parsed) => {
                             on_message(parsed);
                         }
@@ -664,5 +696,15 @@ impl WasmTransport {
         {
             let _ = close.call1(&self.inner, &js_sys::Object::new());
         }
+    }
+}
+
+fn restrict_decode_limits(left: DecodeLimits, right: DecodeLimits) -> DecodeLimits {
+    DecodeLimits {
+        max_depth: left.max_depth.min(right.max_depth),
+        max_values: left.max_values.min(right.max_values),
+        max_blob_size: left.max_blob_size.min(right.max_blob_size),
+        max_recipients: left.max_recipients.min(right.max_recipients),
+        max_allocated_bytes: left.max_allocated_bytes.min(right.max_allocated_bytes),
     }
 }

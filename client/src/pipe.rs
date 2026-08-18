@@ -5,6 +5,8 @@ use mtp_common::CommunicationError;
 use mtp_transport::Receiver;
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(feature = "pipes")]
+use std::sync::Mutex as StdMutex;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, Instant};
 
@@ -21,6 +23,8 @@ pub struct PipeHandle {
     pub(crate) description: String,
     pub(crate) sender: Sender,
     pub(crate) response_rx: tokio::sync::oneshot::Receiver<Result<bool, PipeError>>,
+    pub(crate) dispatcher: Arc<PipeDispatcher>,
+    pub(crate) token: Arc<()>,
 }
 
 #[cfg(feature = "pipes")]
@@ -33,9 +37,11 @@ impl PipeHandle {
         &self.description
     }
 
-    pub async fn wait(self) -> Result<Option<mtp_transport::PipeWriter>, PipeError> {
-        match self.response_rx.await {
-            Ok(Ok(true)) => {
+    pub async fn wait(mut self) -> Result<Option<mtp_transport::PipeWriter>, PipeError> {
+        let response =
+            tokio::time::timeout(self.dispatcher.policy.read_timeout, &mut self.response_rx).await;
+        match response {
+            Ok(Ok(Ok(true))) => {
                 let writer = self
                     .sender
                     .open_pipe(self.pipe_id, &self.description)
@@ -43,10 +49,27 @@ impl PipeHandle {
                     .map_err(PipeError::from)?;
                 Ok(Some(writer))
             }
-            Ok(Ok(false)) => Ok(None),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(PipeError::StreamClosed),
+            Ok(Ok(Ok(false))) => Ok(None),
+            Ok(Ok(Err(error))) => {
+                expire_pending_creation(&self.dispatcher, self.pipe_id, &self.token);
+                Err(error)
+            }
+            Ok(Err(_)) => {
+                expire_pending_creation(&self.dispatcher, self.pipe_id, &self.token);
+                Err(PipeError::StreamClosed)
+            }
+            Err(_) => {
+                expire_pending_creation(&self.dispatcher, self.pipe_id, &self.token);
+                Err(PipeError::HandshakeTimeout)
+            }
         }
+    }
+}
+
+#[cfg(feature = "pipes")]
+impl Drop for PipeHandle {
+    fn drop(&mut self) {
+        expire_pending_creation(&self.dispatcher, self.pipe_id, &self.token);
     }
 }
 
@@ -129,19 +152,143 @@ pub(crate) struct PendingRequest {
     pub(crate) sender: tokio::sync::oneshot::Sender<Result<CommunicationValue, CommunicationError>>,
 }
 
+#[cfg(feature = "pipes")]
+pub(crate) struct PendingCreation {
+    pub(crate) token: Arc<()>,
+    pub(crate) sender: tokio::sync::oneshot::Sender<Result<bool, PipeError>>,
+}
+
+#[cfg(feature = "pipes")]
+pub(crate) struct PendingCreationGuard {
+    dispatcher: Arc<PipeDispatcher>,
+    pipe_id: u32,
+    token: Arc<()>,
+    armed: bool,
+}
+
+#[cfg(feature = "pipes")]
+impl PendingCreationGuard {
+    pub(crate) fn new(dispatcher: Arc<PipeDispatcher>, pipe_id: u32, token: Arc<()>) -> Self {
+        Self {
+            dispatcher,
+            pipe_id,
+            token,
+            armed: true,
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(feature = "pipes")]
+impl Drop for PendingCreationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            expire_pending_creation(&self.dispatcher, self.pipe_id, &self.token);
+        }
+    }
+}
+
 pub(crate) struct PipeDispatcher {
     pub(crate) pending_requests: Mutex<HashMap<u32, PendingRequest>>,
     pub(crate) expired_requests: Mutex<HashMap<u32, Instant>>,
     #[cfg(feature = "pipes")]
     pub(crate) type_map: TypeMap,
     #[cfg(feature = "pipes")]
-    pub(crate) pending_creations:
-        Mutex<HashMap<u32, tokio::sync::oneshot::Sender<Result<bool, PipeError>>>>,
+    pub(crate) pending_creations: StdMutex<HashMap<u32, PendingCreation>>,
+    #[cfg(feature = "pipes")]
+    pub(crate) expired_creations: StdMutex<HashMap<u32, Instant>>,
     #[cfg(feature = "pipes")]
     pub(crate) pending_pipes:
         Mutex<HashMap<u32, tokio::sync::oneshot::Sender<mtp_transport::PipeReader>>>,
     #[cfg(feature = "pipes")]
     pub(crate) policy: Arc<Policy>,
+}
+
+#[cfg(feature = "pipes")]
+const EXPIRED_CREATION_TOMBSTONE_TTL: Duration = Duration::from_secs(60);
+#[cfg(feature = "pipes")]
+const MAX_EXPIRED_CREATION_TOMBSTONES: usize = 1024;
+
+#[cfg(feature = "pipes")]
+pub(crate) fn expire_pending_creation(dispatcher: &PipeDispatcher, pipe_id: u32, token: &Arc<()>) {
+    let removed = dispatcher
+        .pending_creations
+        .lock()
+        .ok()
+        .and_then(|mut pending| {
+            if pending
+                .get(&pipe_id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.token, token))
+            {
+                pending.remove(&pipe_id);
+                Some(())
+            } else {
+                None
+            }
+        });
+    if removed.is_none() {
+        return;
+    }
+    let Ok(mut expired) = dispatcher.expired_creations.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    expired.retain(|_, expires_at| *expires_at > now);
+    if expired.len() >= MAX_EXPIRED_CREATION_TOMBSTONES
+        && let Some(oldest) = expired
+            .iter()
+            .min_by_key(|(_, expires_at)| **expires_at)
+            .map(|(id, _)| *id)
+    {
+        expired.remove(&oldest);
+    }
+    expired.insert(pipe_id, now + EXPIRED_CREATION_TOMBSTONE_TTL);
+}
+
+#[cfg(feature = "pipes")]
+fn consume_expired_creation(dispatcher: &PipeDispatcher, pipe_id: u32) -> bool {
+    let Ok(mut expired) = dispatcher.expired_creations.lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    expired.retain(|_, expires_at| *expires_at > now);
+    expired.remove(&pipe_id).is_some()
+}
+
+#[cfg(feature = "pipes")]
+pub(crate) fn is_expired_creation(dispatcher: &PipeDispatcher, pipe_id: u32) -> bool {
+    let Ok(mut expired) = dispatcher.expired_creations.lock() else {
+        return true;
+    };
+    let now = Instant::now();
+    expired.retain(|_, expires_at| *expires_at > now);
+    expired.contains_key(&pipe_id)
+}
+
+#[cfg(feature = "pipes")]
+pub(crate) fn fail_pending_creations(dispatcher: &PipeDispatcher, error: &CommunicationError) {
+    let pending = dispatcher
+        .pending_creations
+        .lock()
+        .ok()
+        .map(|mut pending| std::mem::take(&mut *pending));
+    if let Some(pending) = pending {
+        let error = PipeError::from(error.clone());
+        for (_, pending) in pending {
+            let _ = pending.sender.send(Err(error.clone()));
+        }
+    }
+    if let Ok(mut expired) = dispatcher.expired_creations.lock() {
+        expired.clear();
+    }
+}
+
+#[cfg(feature = "pipes")]
+pub(crate) async fn fail_pending_pipes(dispatcher: &PipeDispatcher) {
+    dispatcher.pending_pipes.lock().await.clear();
 }
 
 pub(crate) async fn route_message(
@@ -283,9 +430,15 @@ pub(crate) async fn run_dispatcher(
                         continue;
                     };
                     let accepted = msg.get_bool(DataType::Accepted).unwrap_or(false);
-                    let mut pending = dispatcher.pending_creations.lock().await;
-                    if let Some(tx) = pending.remove(&pipe_id) {
-                        let _ = tx.send(Ok(accepted));
+                    let pending = dispatcher
+                        .pending_creations
+                        .lock()
+                        .ok()
+                        .and_then(|mut pending| pending.remove(&pipe_id));
+                    if let Some(entry) = pending {
+                        let _ = entry.sender.send(Ok(accepted));
+                    } else {
+                        let _ = consume_expired_creation(&dispatcher, pipe_id);
                     }
                     continue;
                 }
@@ -303,6 +456,10 @@ pub(crate) async fn run_dispatcher(
             }
             Err(e) => {
                 fail_pending_requests(&dispatcher, e.clone()).await;
+                #[cfg(feature = "pipes")]
+                fail_pending_creations(&dispatcher, &e);
+                #[cfg(feature = "pipes")]
+                fail_pending_pipes(&dispatcher).await;
                 let _ = app_tx.send(Err(e)).await;
                 break;
             }
@@ -325,6 +482,10 @@ pub(crate) async fn run_dispatcher(
             }
             Err(e) => {
                 fail_pending_requests(&dispatcher, e.clone()).await;
+                #[cfg(feature = "pipes")]
+                fail_pending_creations(&dispatcher, &e);
+                #[cfg(feature = "pipes")]
+                fail_pending_pipes(&dispatcher).await;
                 let _ = app_tx.send(Err(e)).await;
                 break;
             }

@@ -13,6 +13,10 @@ use crate::error::AuthState;
 use crate::ping::{PingSession, start_ping_session};
 #[cfg(feature = "pipes")]
 use crate::pipe::PipeRequest;
+#[cfg(feature = "pipes")]
+use crate::pipe::is_expired_creation;
+#[cfg(feature = "pipes")]
+use crate::pipe::{PendingCreation, PendingCreationGuard};
 use crate::pipe::{PendingRequest, PipeDispatcher, run_dispatcher};
 
 pub struct MTPConnection {
@@ -134,17 +138,33 @@ impl MTPConnection {
         description: &str,
     ) -> Result<crate::pipe::PipeHandle, mtp_common::PipeError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let token = Arc::new(());
         let pipe_id = {
-            let mut pending = self.pipe_dispatcher.pending_creations.lock().await;
+            let mut pending = self
+                .pipe_dispatcher
+                .pending_creations
+                .lock()
+                .map_err(|_| mtp_common::PipeError::ConnectionClosed)?;
             let pipe_id = loop {
                 let candidate = rand::random::<u32>();
-                if candidate != 0 && !pending.contains_key(&candidate) {
+                if candidate != 0
+                    && !pending.contains_key(&candidate)
+                    && !is_expired_creation(&self.pipe_dispatcher, candidate)
+                {
                     break candidate;
                 }
             };
-            pending.insert(pipe_id, tx);
+            pending.insert(
+                pipe_id,
+                PendingCreation {
+                    token: token.clone(),
+                    sender: tx,
+                },
+            );
             pipe_id
         };
+        let mut creation_guard =
+            PendingCreationGuard::new(self.pipe_dispatcher.clone(), pipe_id, token.clone());
 
         let request = CommunicationValue::new_with_type_map(
             mtp_codec::CommunicationType::PipeRequest,
@@ -154,19 +174,17 @@ impl MTPConnection {
         .add_typed_default(DataType::Description, DataValue::Str(description.into()));
 
         if let Err(error) = self.sender.send(&request).await {
-            self.pipe_dispatcher
-                .pending_creations
-                .lock()
-                .await
-                .remove(&pipe_id);
             return Err(mtp_common::PipeError::from(error));
         }
 
+        creation_guard.disarm();
         Ok(crate::pipe::PipeHandle {
             pipe_id,
             description: description.to_string(),
             sender: self.sender.clone(),
             response_rx: rx,
+            dispatcher: self.pipe_dispatcher.clone(),
+            token,
         })
     }
 
@@ -207,18 +225,19 @@ pub(crate) async fn connection_from_parts(
 
     #[cfg(feature = "pipes")]
     {
+        let receiver_queue_capacity = config.policy.receiver_queue_capacity.max(1);
         let (app_tx, app_rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(
-            config.policy.receiver_queue_capacity,
+            receiver_queue_capacity,
         );
-        let (pipe_req_tx, pipe_req_rx) =
-            mpsc::channel::<PipeRequest>(config.policy.receiver_queue_capacity);
+        let (pipe_req_tx, pipe_req_rx) = mpsc::channel::<PipeRequest>(receiver_queue_capacity);
 
         let dispatcher = Arc::new(PipeDispatcher {
             pending_requests: Mutex::new(std::collections::HashMap::new()),
             expired_requests: Mutex::new(std::collections::HashMap::new()),
             #[cfg(feature = "pipes")]
             type_map: type_map.clone(),
-            pending_creations: Mutex::new(std::collections::HashMap::new()),
+            pending_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
+            expired_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_pipes: Mutex::new(std::collections::HashMap::new()),
             policy: Arc::new(config.policy),
         });
@@ -255,8 +274,9 @@ pub(crate) async fn connection_from_parts(
 
     #[cfg(not(feature = "pipes"))]
     {
+        let receiver_queue_capacity = config.policy.receiver_queue_capacity.max(1);
         let (app_tx, app_rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(
-            config.policy.receiver_queue_capacity,
+            receiver_queue_capacity,
         );
         let dispatcher = Arc::new(PipeDispatcher {
             pending_requests: Mutex::new(std::collections::HashMap::new()),

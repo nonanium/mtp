@@ -212,7 +212,7 @@ let (kem_sk, kem_pk) = HybridKem::generate_keypair();
 let host_keyring = Keyring::new(kem_pk, kem_sk, sig_pq_pk, sig_pq_sk, sig_pk, sig_sk);
 
 // Save to disk
-let bytes = host_keyring.to_bytes();
+let bytes = host_keyring.try_to_bytes()?;
 std::fs::write("host_keys.bin", bytes)?;
 ```
 

@@ -11,7 +11,10 @@ pub mod encrypted_pipe;
 #[cfg(feature = "pipes")]
 pub mod pipe;
 
-pub use connection::{Policy, Receiver, SendMode, Sender};
+pub use connection::{
+    DecodeRejectionClass, DecodeRejectionCounters, DecodeRejectionCounts, Policy, Receiver,
+    SendMode, Sender, classify_decode_error,
+};
 pub use generic_connection::{GenericReceiver, GenericSender};
 
 #[cfg(feature = "pipes")]

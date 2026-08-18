@@ -55,8 +55,28 @@ Verified SDK results expose the authenticated `protectedVersion` and
 `finalRecipientId` alongside the application content.
 
 Native applications use the same schema through `ProtectedMessageBuilder` and
-`open_protected`; language bindings delegate envelope construction and opening
-to this codec boundary.
+the replay-explicit `open_protected_checked` or `open_protected_without_replay`
+APIs; language bindings delegate envelope construction and opening to this
+codec boundary.
+
+Message processing uses the replay-required native APIs
+`open_protected_checked` and `open_relay_metadata_checked` (or the equivalent
+browser client path). Stored-message or forensic tooling must opt into the
+explicit `*_without_replay` APIs. Native in-memory guards are bounded and
+configurable; durable guards must perform an atomic insert-if-absent on
+`(signer ID, MessageId)`.
+
+Protected identifiers have semantic limits separate from the generic codec
+blob limit. The default maximum `MessageId` is 256 UTF-8 bytes and relay
+metadata is limited to 1 MiB of encoded metadata. Deployments can provide
+stricter limits through the receive policy. Limits are checked after
+authentication and before retained values enter replay or application state.
+
+Transport-derived resource policies use a conservative decoder allocation
+factor of `4 * max_message_size`, in addition to the frame-size output limit.
+This factor accounts for owned wrapper, recipient, ciphertext, and decoded
+value copies; it is an implementation admission policy rather than a wire
+field.
 
 ## Authentication Flow
 
@@ -76,6 +96,15 @@ Client                                      Host
 ```
 
 Login proof binds the protocol version, client ID, host challenge, and client nonce. Registration proof binds the protocol version, public key bundle, host challenge, and client nonce. The host challenge is generated per connection.
+
+Authentication attempts pass through a deployment-configurable limiter before
+client lookup, key validation, challenge signing, or registration callbacks.
+The default host configuration uses a bounded in-memory window. Hosts may key
+limits by connection, peer identity, claimed client ID, or registration flow.
+When identity concealment is enabled, an unknown client ID follows a dummy
+challenge/proof path and receives the same generic authentication failure as a
+known client with an invalid proof; disabling concealment restores the legacy
+identity-specific response for deployments where IDs are public.
 
 `ForceAuthentication` requires login or registration. `AllowAuthentication` accepts authenticated and unauthenticated clients. `Unauthenticated` rejects authentication attempts. The connection states are `Pending`, `Authenticated`, `Unauthenticated`, and `Failed`.
 

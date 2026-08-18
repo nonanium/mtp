@@ -4,7 +4,7 @@
 //! and the web server's `MTPWebServer` to perform the MTP opening handshake,
 //! version negotiation, authentication, and guest assignment.
 
-use crate::config::HostConfig;
+use crate::config::{AuthenticationContext, HostConfig};
 use crate::error::AcceptError;
 use mtp_codec::{
     CommunicationType, CommunicationValue, DataType, DataValue, TypeMap, Version,
@@ -128,18 +128,31 @@ impl HandshakeEngine {
         sender: &S,
         receiver: &R,
     ) -> Result<HandshakeResult, AcceptError> {
+        self.accept_with_context(sender, receiver, AuthenticationContext::default())
+            .await
+    }
+
+    /// Run the opening handshake with transport-provided authentication
+    /// scoping information.
+    pub async fn accept_with_context<S: HandshakeSender, R: HandshakeReceiver>(
+        &self,
+        sender: &S,
+        receiver: &R,
+        context: AuthenticationContext,
+    ) -> Result<HandshakeResult, AcceptError> {
         #[cfg(feature = "crypto")]
         {
-            self.accept_until(
+            self.accept_until_with_context(
                 sender,
                 receiver,
                 tokio::time::Instant::now() + self.config.auth_timeout,
+                context,
             )
             .await
         }
         #[cfg(not(feature = "crypto"))]
         {
-            let result = self.accept_inner(sender, receiver).await;
+            let result = self.accept_inner(sender, receiver, &context).await;
             if result.is_err() {
                 sender.close();
             }
@@ -159,7 +172,22 @@ impl HandshakeEngine {
         receiver: &R,
         deadline: tokio::time::Instant,
     ) -> Result<HandshakeResult, AcceptError> {
-        match tokio::time::timeout_at(deadline, self.accept_inner(sender, receiver)).await {
+        self.accept_until_with_context(sender, receiver, deadline, AuthenticationContext::default())
+            .await
+    }
+
+    /// Run the crypto handshake until a deadline with transport-provided
+    /// authentication scoping information.
+    #[cfg(feature = "crypto")]
+    pub async fn accept_until_with_context<S: HandshakeSender, R: HandshakeReceiver>(
+        &self,
+        sender: &S,
+        receiver: &R,
+        deadline: tokio::time::Instant,
+        context: AuthenticationContext,
+    ) -> Result<HandshakeResult, AcceptError> {
+        match tokio::time::timeout_at(deadline, self.accept_inner(sender, receiver, &context)).await
+        {
             Ok(result) => {
                 if result.is_err() {
                     sender.close();
@@ -186,6 +214,7 @@ impl HandshakeEngine {
         &self,
         sender: &S,
         receiver: &R,
+        _authentication_context: &AuthenticationContext,
     ) -> Result<HandshakeResult, AcceptError> {
         let mut first_msg = receiver.receive().await.map_err(AcceptError::Receive)?;
 
@@ -257,6 +286,42 @@ impl HandshakeEngine {
 
         #[cfg(feature = "crypto")]
         {
+            let claimed_client_id = match first_msg.get_data(DataType::Id) {
+                Some(DataValue::UnsignedNumber(value)) => u64::try_from(*value).ok(),
+                _ => None,
+            };
+            let registration = Some(first_msg.get_type())
+                == CommunicationType::Register.try_to_id(codec.type_map());
+            let authentication_requested = matches!(
+                self.config.authentication_policy,
+                crate::config::AuthenticationPolicy::ForceAuthentication
+            ) || registration
+                || first_msg.get_data(DataType::PublicKeys).is_some()
+                || claimed_client_id.is_some_and(|client_id| client_id != 0);
+            if authentication_requested {
+                let attempt = crate::config::AuthenticationAttempt {
+                    peer_network_identity: _authentication_context.peer_network_identity.clone(),
+                    connection_id: _authentication_context.connection_id,
+                    claimed_client_id,
+                    registration,
+                };
+                match self.config.auth_limiter.allow(&attempt) {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => {
+                        let error =
+                            AcceptError::AuthenticationFailed("authentication rejected".into());
+                        send_rejection_generic(
+                            sender,
+                            RejectionReason::RateLimited,
+                            Some(codec.type_map()),
+                        )
+                        .await;
+                        sender.close();
+                        return Err(error);
+                    }
+                }
+            }
+
             match self.config.authentication_policy {
                 crate::config::AuthenticationPolicy::ForceAuthentication => {
                     self.force_auth_handshake(
@@ -408,7 +473,14 @@ impl HandshakeEngine {
                     return Err(error);
                 }
             };
-            let pk_bytes = bundle.as_bytes();
+            let pk_bytes = match bundle.try_as_bytes() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let error = AcceptError::AuthenticationFailed(error.to_string());
+                    reject_error_generic(sender, &error, tm).await;
+                    return Err(error);
+                }
+            };
             return self
                 .complete_auth_handshake(
                     sender,
@@ -453,6 +525,28 @@ impl HandshakeEngine {
             // Unknown or zero ID: an Identification carrying PublicKeys is an
             // explicit authentication attempt, not a guest connection.
             if first_msg.get_data(DataType::PublicKeys).is_some() {
+                if self.config.conceal_authentication_identities && cid > 0 {
+                    /* Keep an unknown authenticated ID on the same
+                    challenge/proof path as a known ID. The fixed host
+                    identity makes the eventual proof fail without
+                    disclosing whether the lookup succeeded. */
+                    return self
+                        .complete_auth_handshake(
+                            sender,
+                            receiver,
+                            Flow::Login {
+                                id: cid,
+                                bundle: self.config.host_keyring.public_key_bundle(),
+                            },
+                            CommunicationType::IdentificationResponse,
+                            &negotiated,
+                            &codec,
+                            description,
+                            version_str,
+                            client_version,
+                        )
+                        .await;
+                }
                 let error = AcceptError::AuthenticationFailed(
                     "unknown authenticated client identity".into(),
                 );
@@ -525,20 +619,29 @@ impl HandshakeEngine {
             let bundle = match (self.config.get_existing_client)(cid, description.clone()).await {
                 Some(b) => b,
                 None => {
-                    let rejection = CommunicationValue::new_with_type_map(
-                        CommunicationType::IdentificationResponse,
-                        tm,
-                    )
-                    .add_typed_default(DataType::Connected, DataValue::BoolFalse)
-                    .add_typed_default(
-                        DataType::ErrorMessage,
-                        DataValue::Str("unknown client id".into()),
-                    );
-                    let _ = sender.send(&rejection).await;
-                    sender.close();
-                    return Err(AcceptError::AuthenticationFailed(
-                        "unknown client id".into(),
-                    ));
+                    if self.config.conceal_authentication_identities {
+                        // Use a valid fixed-cost dummy identity so an unknown
+                        // client follows the same challenge/proof sequence as
+                        // a registered client. The host public bundle is
+                        // already public and the peer cannot produce its
+                        // private-key proof.
+                        self.config.host_keyring.public_key_bundle()
+                    } else {
+                        let rejection = CommunicationValue::new_with_type_map(
+                            CommunicationType::IdentificationResponse,
+                            tm,
+                        )
+                        .add_typed_default(DataType::Connected, DataValue::BoolFalse)
+                        .add_typed_default(
+                            DataType::ErrorMessage,
+                            DataValue::Str("unknown client id".into()),
+                        );
+                        let _ = sender.send(&rejection).await;
+                        sender.close();
+                        return Err(AcceptError::AuthenticationFailed(
+                            "unknown client id".into(),
+                        ));
+                    }
                 }
             };
             (
@@ -553,7 +656,14 @@ impl HandshakeEngine {
                     return Err(error);
                 }
             };
-            let pk_bytes = bundle.as_bytes();
+            let pk_bytes = match bundle.try_as_bytes() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let error = AcceptError::AuthenticationFailed(error.to_string());
+                    reject_error_generic(sender, &error, tm).await;
+                    return Err(error);
+                }
+            };
             (
                 Flow::Register { bundle, pk_bytes },
                 CommunicationType::RegisterResponse,
@@ -787,7 +897,14 @@ impl HandshakeEngine {
             Flow::Login { id, bundle } => (id, bundle),
             Flow::Register { bundle, .. } => {
                 let _registration_guard = self.config.registration_lock.lock().await;
-                let identity = bundle.as_bytes();
+                let identity = match bundle.try_as_bytes() {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        let error = AcceptError::AuthenticationFailed(error.to_string());
+                        reject_error_generic(sender, &error, tm).await;
+                        return Err(error);
+                    }
+                };
                 let cached_id = self
                     .config
                     .registration_ids

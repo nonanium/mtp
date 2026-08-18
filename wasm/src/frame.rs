@@ -1,9 +1,13 @@
 use wasm_bindgen::{JsCast, prelude::*};
 
-use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, PROTOCOL_VERSION};
+use mtp_codec::{
+    CommunicationType, CommunicationValue, DataType, DataValue, DecodeLimits, EncodeLimits,
+    PROTOCOL_VERSION,
+};
 use mtp_type_map::TypeMap;
 
 use crate::error::js_error;
+use crate::relay::decode_error;
 
 #[wasm_bindgen(typescript_custom_section)]
 const PARSED_FRAME_TS: &'static str = r#"
@@ -137,7 +141,48 @@ pub(crate) fn data_value_to_js(value: &DataValue, tm: &TypeMap) -> Result<JsValu
 }
 
 const MAX_SAFE_INT: f64 = 9007199254740991.0; // 2^53 - 1
+
+struct JsDataValueEncodeContext {
+    limits: EncodeLimits,
+    values: usize,
+}
+
+impl JsDataValueEncodeContext {
+    fn visit(&mut self, depth: usize) -> Result<(), JsValue> {
+        if depth > self.limits.max_depth {
+            return Err(js_error("MTP DataValue nesting-depth limit exceeded"));
+        }
+        self.values = self
+            .values
+            .checked_add(1)
+            .ok_or_else(|| js_error("MTP DataValue value-count limit exceeded"))?;
+        if self.values > self.limits.max_values {
+            return Err(js_error("MTP DataValue value-count limit exceeded"));
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn js_to_data_value(value: &JsValue, tm: &TypeMap) -> Result<DataValue, JsValue> {
+    js_to_data_value_with_limits(value, tm, EncodeLimits::default())
+}
+
+pub(crate) fn js_to_data_value_with_limits(
+    value: &JsValue,
+    tm: &TypeMap,
+    limits: EncodeLimits,
+) -> Result<DataValue, JsValue> {
+    let mut context = JsDataValueEncodeContext { limits, values: 0 };
+    js_to_data_value_with_context(value, tm, &mut context, 0)
+}
+
+fn js_to_data_value_with_context(
+    value: &JsValue,
+    tm: &TypeMap,
+    context: &mut JsDataValueEncodeContext,
+    depth: usize,
+) -> Result<DataValue, JsValue> {
+    context.visit(depth)?;
     if value.is_null() || value.is_undefined() {
         return Ok(DataValue::Null);
     }
@@ -152,9 +197,17 @@ pub(crate) fn js_to_data_value(value: &JsValue, tm: &TypeMap) -> Result<DataValu
     }
     if js_sys::Array::is_array(value) {
         let array = js_sys::Array::from(value);
+        if array.length() as usize > context.limits.max_values {
+            return Err(js_error("MTP DataValue value-count limit exceeded"));
+        }
         let mut values = Vec::with_capacity(array.length() as usize);
         for item in array.iter() {
-            values.push(js_to_data_value(&item, tm)?);
+            values.push(js_to_data_value_with_context(
+                &item,
+                tm,
+                context,
+                depth + 1,
+            )?);
         }
         return Ok(DataValue::Array(values));
     }
@@ -198,6 +251,9 @@ pub(crate) fn js_to_data_value(value: &JsValue, tm: &TypeMap) -> Result<DataValu
     if value.is_object() {
         let object = js_sys::Object::from(value.clone());
         let keys = js_sys::Object::keys(&object);
+        if keys.length() as usize > context.limits.max_values {
+            return Err(js_error("MTP DataValue value-count limit exceeded"));
+        }
         let mut entries = Vec::with_capacity(keys.length() as usize);
         for key in keys.iter() {
             let key = key
@@ -212,7 +268,10 @@ pub(crate) fn js_to_data_value(value: &JsValue, tm: &TypeMap) -> Result<DataValu
                     tm.version
                 ))
             })?;
-            entries.push((id, js_to_data_value(&value, tm)?));
+            entries.push((
+                id,
+                js_to_data_value_with_context(&value, tm, context, depth + 1)?,
+            ));
         }
         return Ok(DataValue::Container(entries));
     }
@@ -282,15 +341,16 @@ fn apply_frame_options(
 }
 
 pub(crate) fn parse_frame_value(frame: &[u8]) -> Result<JsValue, JsValue> {
-    parse_frame_value_with_type_map(frame, &TypeMap::latest())
+    parse_frame_value_with_limits(frame, &TypeMap::latest(), DecodeLimits::default())
 }
 
-pub(crate) fn parse_frame_value_with_type_map(
+pub(crate) fn parse_frame_value_with_limits(
     frame: &[u8],
     type_map: &TypeMap,
+    limits: DecodeLimits,
 ) -> Result<JsValue, JsValue> {
-    let comm = CommunicationValue::from_bytes_with(frame, type_map)
-        .map_err(|e| js_error(format!("parse failed: {}", e)))?;
+    let comm = CommunicationValue::try_from_bytes_with_type_map_and_limits(frame, type_map, limits)
+        .map_err(|error| decode_error(error, "parse failed"))?;
     let tm = type_map;
     let obj = js_sys::Object::new();
 
@@ -355,8 +415,8 @@ pub fn build_ping_frame(
 /// Parse an auth response frame into a JS object.
 #[wasm_bindgen(unchecked_return_type = "AuthResponse")]
 pub fn parse_auth_response(response: &[u8]) -> Result<JsValue, JsValue> {
-    let comm = CommunicationValue::from_bytes(response)
-        .map_err(|e| js_error(format!("parse failed: {}", e)))?;
+    let comm = CommunicationValue::try_from_bytes_with_limits(response, DecodeLimits::default())
+        .map_err(|error| decode_error(error, "parse failed"))?;
 
     let connected = matches!(
         comm.get_data(DataType::Connected),
@@ -418,8 +478,8 @@ pub fn parse_auth_response(response: &[u8]) -> Result<JsValue, JsValue> {
 /// Parse any MTP frame into the human-readable CommunicationValue display form.
 #[wasm_bindgen]
 pub fn format_frame(frame: &[u8]) -> Result<String, JsValue> {
-    let comm = CommunicationValue::from_bytes(frame)
-        .map_err(|e| js_error(format!("parse failed: {}", e)))?;
+    let comm = CommunicationValue::try_from_bytes_with_limits(frame, DecodeLimits::default())
+        .map_err(|error| decode_error(error, "parse failed"))?;
     Ok(comm.to_string())
 }
 
@@ -429,23 +489,63 @@ pub fn parse_frame(frame: &[u8]) -> Result<JsValue, JsValue> {
     parse_frame_value(frame)
 }
 
+/// Parse a frame with the caller's bounded receive policy. The compatibility
+/// `parse_frame` entry point retains the default policy for existing callers.
+#[wasm_bindgen(unchecked_return_type = "ParsedFrame")]
+pub fn parse_frame_with_limits(frame: &[u8], limits: JsValue) -> Result<JsValue, JsValue> {
+    let limits = crate::client::decode_limits_from_js(&limits)?;
+    parse_frame_value_with_limits(frame, &TypeMap::latest(), limits)
+}
+
 /// Parse a standalone serialized `DataValue` into the same structured form
 /// used for frame payloads. Protected values remain opaque until the caller
 /// explicitly opens and verifies them.
 #[wasm_bindgen(unchecked_return_type = "ParsedDataValue")]
 pub fn parse_data_value(value: &[u8]) -> Result<JsValue, JsValue> {
-    let value = DataValue::from_bytes(value).ok_or_else(|| js_error("invalid DataValue"))?;
+    parse_data_value_with_decode_limits(value, DecodeLimits::default())
+}
+
+fn parse_data_value_with_decode_limits(
+    value: &[u8],
+    limits: DecodeLimits,
+) -> Result<JsValue, JsValue> {
+    let value = DataValue::try_from_bytes_with_limits(value, limits)
+        .map_err(|error| decode_error(error, "decode data value failed"))?;
     let tm = TypeMap::new(PROTOCOL_VERSION);
     data_value_to_js(&value, &tm)
+}
+
+/// Parse a standalone serialized `DataValue` with the caller's bounded
+/// receive policy. The compatibility `parse_data_value` entry point retains
+/// the default policy for existing callers.
+#[wasm_bindgen(unchecked_return_type = "ParsedDataValue")]
+pub fn parse_data_value_with_limits(value: &[u8], limits: JsValue) -> Result<JsValue, JsValue> {
+    let limits = crate::client::decode_limits_from_js(&limits)?;
+    parse_data_value_with_decode_limits(value, limits)
 }
 
 /// Encode one standalone `DataValue` using the negotiated/current type map.
 #[wasm_bindgen]
 pub fn encode_data_value(value: JsValue) -> Result<Vec<u8>, JsValue> {
+    encode_data_value_with_encode_limits(value, EncodeLimits::default())
+}
+
+fn encode_data_value_with_encode_limits(
+    value: JsValue,
+    limits: EncodeLimits,
+) -> Result<Vec<u8>, JsValue> {
     let tm = TypeMap::new(PROTOCOL_VERSION);
-    js_to_data_value(&value, &tm)?
-        .to_bytes()
+    js_to_data_value_with_limits(&value, &tm, limits)?
+        .to_bytes_with_limits(limits)
         .map_err(|e| js_error(format!("encode data value failed: {e}")))
+}
+
+/// Encode one standalone `DataValue` using explicit recursion and output
+/// limits. The compatibility entry point above keeps the historical default.
+#[wasm_bindgen]
+pub fn encode_data_value_with_limits(value: JsValue, limits: JsValue) -> Result<Vec<u8>, JsValue> {
+    let limits = crate::client::encode_limits_from_js(&limits)?;
+    encode_data_value_with_encode_limits(value, limits)
 }
 
 /// Build a typed MTP frame using generated communication/data type names.
@@ -454,6 +554,15 @@ pub fn build_frame(
     message_type: &str,
     data: JsValue,
     options: JsValue,
+) -> Result<Vec<u8>, JsValue> {
+    build_frame_with_encode_limits(message_type, data, options, EncodeLimits::default())
+}
+
+fn build_frame_with_encode_limits(
+    message_type: &str,
+    data: JsValue,
+    options: JsValue,
+    limits: EncodeLimits,
 ) -> Result<Vec<u8>, JsValue> {
     let comm_type = CommunicationType::from_name(message_type)
         .ok_or_else(|| js_error(format!("unknown communication type: {message_type}")))?;
@@ -478,7 +587,7 @@ pub fn build_frame(
                 ))
             })?;
             msg = msg
-                .add_data(id, js_to_data_value(&value, &tm)?)
+                .add_data(id, js_to_data_value_with_limits(&value, &tm, limits)?)
                 .map_err(|e| js_error(format!("add data failed: {e}")))?;
         }
     } else if !data.is_null() && !data.is_undefined() {
@@ -487,8 +596,22 @@ pub fn build_frame(
         ));
     }
 
-    msg.to_bytes()
+    msg.to_bytes_with_limits(limits)
         .map_err(|e| js_error(format!("encode failed: {}", e)))
+}
+
+/// Build a typed frame with explicit recursion and complete-frame output
+/// limits. High-level SDK sends use this entry point with the transport's
+/// admitted message size.
+#[wasm_bindgen]
+pub fn build_frame_with_limits(
+    message_type: &str,
+    data: JsValue,
+    options: JsValue,
+    limits: JsValue,
+) -> Result<Vec<u8>, JsValue> {
+    let limits = crate::client::encode_limits_from_js(&limits)?;
+    build_frame_with_encode_limits(message_type, data, options, limits)
 }
 
 /// Build a typed MTP frame around a complete serialized `DataValue` payload.
@@ -502,16 +625,47 @@ pub fn build_frame_with_payload(
     serialized_payload: &[u8],
     options: JsValue,
 ) -> Result<Vec<u8>, JsValue> {
+    build_frame_with_payload_with_encode_limits(
+        message_type,
+        serialized_payload,
+        options,
+        EncodeLimits::default(),
+    )
+}
+
+fn build_frame_with_payload_with_encode_limits(
+    message_type: &str,
+    serialized_payload: &[u8],
+    options: JsValue,
+    limits: EncodeLimits,
+) -> Result<Vec<u8>, JsValue> {
     let comm_type = CommunicationType::from_name(message_type)
         .ok_or_else(|| js_error(format!("unknown communication type: {message_type}")))?;
-    let payload = DataValue::from_bytes(serialized_payload)
-        .ok_or_else(|| js_error("invalid serialized DataValue payload"))?;
+    let payload = DataValue::try_from_bytes_with_limits(
+        serialized_payload,
+        DecodeLimits::for_transport_message_size(limits.max_output_size as u64),
+    )
+    .map_err(|error| decode_error(error, "invalid serialized DataValue payload"))?;
     let message =
         apply_frame_options(CommunicationValue::new(comm_type), &options)?.with_payload(payload);
 
     message
-        .to_bytes()
+        .to_bytes_with_limits(limits)
         .map_err(|e| js_error(format!("encode failed: {e}")))
+}
+
+/// Build a typed frame around a serialized payload with explicit output
+/// limits. The payload is also parsed with a policy derived from that limit so
+/// an oversized/deep input cannot bypass the bounded builder.
+#[wasm_bindgen]
+pub fn build_frame_with_payload_with_limits(
+    message_type: &str,
+    serialized_payload: &[u8],
+    options: JsValue,
+    limits: JsValue,
+) -> Result<Vec<u8>, JsValue> {
+    let limits = crate::client::encode_limits_from_js(&limits)?;
+    build_frame_with_payload_with_encode_limits(message_type, serialized_payload, options, limits)
 }
 
 #[cfg(test)]

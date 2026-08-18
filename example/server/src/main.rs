@@ -111,8 +111,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }) as Pin<Box<dyn Future<Output = u64> + Send>>
     };
 
+    let decrypt_keyring_bytes = host_keyring.try_to_bytes()?;
     let decrypt_keyring = Arc::new(
-        match mtp::crypto::Keyring::from_bytes(&host_keyring.to_bytes()) {
+        match mtp::crypto::Keyring::from_bytes(&decrypt_keyring_bytes) {
             Ok(keyring) => keyring,
             Err(e) => {
                 return Err(format!("failed to re-load host keyring for decryption: {e}").into());

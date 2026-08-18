@@ -66,8 +66,8 @@ pub(crate) async fn start_ping_session(
         return None;
     }
 
-    let (pong_tx, mut pong_rx) = mpsc::unbounded_channel();
-    receiver.observe_pongs(pong_tx).await;
+    let (pong_tx, mut pong_rx) = mpsc::channel(1);
+    receiver.observe_pongs_bounded(pong_tx).await;
     let last_ping = Arc::new(Mutex::new(None));
     let ping_state = last_ping.clone();
     let interval = config.ping_interval;
@@ -75,6 +75,7 @@ pub(crate) async fn start_ping_session(
     let max_missed_pings = config.max_missed_pings;
     let ping_timestamp = config.ping_timestamp;
     let type_map = type_map.clone();
+    let ping_receiver = receiver.clone();
     let mut close_rx = receiver.handle().subscribe_close();
 
     let task = tokio::spawn(async move {
@@ -91,6 +92,7 @@ pub(crate) async fn start_ping_session(
                 }
                 _ = ticker.tick() => {
                     let missed_pings = tracker.begin_round();
+                    ping_receiver.set_expected_pong_id(None).await;
                     if max_missed_pings > 0 && missed_pings >= max_missed_pings {
                         sender.close().await;
                         break;
@@ -121,7 +123,9 @@ pub(crate) async fn start_ping_session(
                         sender.close().await;
                         break;
                     };
+                    ping_receiver.set_expected_pong_id(Some(id)).await;
                     if sender.send(&ping).await.is_err() {
+                        ping_receiver.set_expected_pong_id(None).await;
                         sender.close().await;
                         break;
                     }

@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use mtp::codec::{
     CommunicationType, CommunicationValue, DataType, DataTypeId, DataValue, InMemoryReplayGuard,
     ProtectedOpenOptions, ProtectionPolicy, ProtectionPurpose, SignaturePolicy, TypeMap,
-    forward_relay_frame, open_protected_with, open_relay_content, open_relay_metadata_with,
+    forward_relay_frame, open_protected_with_checked,
+    open_relay_content_with_limits_without_replay,
+    open_relay_metadata_with_checked,
 };
 use mtp::crypto::{Keyring, PublicKeyBundle};
 
@@ -65,7 +67,7 @@ fn process_direct_protected(
         ));
     }
 
-    let opened = open_protected_with(
+    let opened = open_protected_with_checked(
         msg,
         std::slice::from_ref(&host_keyring),
         None,
@@ -76,7 +78,7 @@ fn process_direct_protected(
             ProtectionPurpose::from(DIRECT_ENCRYPTION_PURPOSE),
             SIGNATURE_POLICY,
         ),
-        Some(accepted_messages),
+        accepted_messages,
     )
     .map_err(|e| format!("direct protected message could not be authenticated: {e}"))?;
     let signer_id = opened.signer_id;
@@ -133,7 +135,7 @@ fn process_sealed_relay(
         ));
     }
 
-    let metadata = open_relay_metadata_with(
+    let metadata = open_relay_metadata_with_checked(
         msg,
         std::slice::from_ref(&host_keyring),
         None,
@@ -141,7 +143,7 @@ fn process_sealed_relay(
             resolve_signer_key(signer_id, registered_clients).map(|key| vec![key])
         },
         SIGNATURE_POLICY,
-        Some(accepted_messages),
+        accepted_messages,
     )
     .map_err(|e| format!("metadata relay could not authenticate metadata: {e}"))?;
     println!(
@@ -160,7 +162,7 @@ fn process_sealed_relay(
             .len()
     );
 
-    let content_result = open_relay_content(
+    let content_result = open_relay_content_with_limits_without_replay(
         &metadata,
         host_keyring,
         &resolve_signer_key(metadata.signer_id(), registered_clients)

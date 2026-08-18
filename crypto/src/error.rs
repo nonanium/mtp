@@ -6,6 +6,8 @@ pub enum CryptoError {
     EncryptionFailed,
     #[error("decryption failed")]
     DecryptionFailed,
+    #[error("decryption output exceeds the caller's allocation limit")]
+    AllocationLimit,
     #[error("malformed encryption envelope")]
     MalformedEnvelope,
     #[error("no encryption recipients")]

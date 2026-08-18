@@ -3,8 +3,9 @@ use std::time::{Duration, Instant};
 use mtp::client::MTPConnection;
 use mtp::codec::{
     CommunicationType, DataType, DataValue, ProtectionPolicy, ProtectedMessageBuilder,
-    ProtectionPurpose, SealedRelayBuilder, SignaturePolicy, TypeMap, open_relay_content,
-    open_relay_metadata,
+    ProtectionPurpose, SealedRelayBuilder, SignaturePolicy, TypeMap,
+    open_relay_content_with_limits_without_replay,
+    open_relay_metadata_without_replay,
 };
 use mtp::common::unix_time_millis;
 use mtp::crypto::{Ed25519Signer, Keyring, PublicKeyBundle};
@@ -159,7 +160,7 @@ pub async fn send_sealed_relay(
         return Err("relay forwarding changed the sealed-sender boundary".into());
     }
 
-    let metadata = open_relay_metadata(
+    let metadata = open_relay_metadata_without_replay(
         &forwarded,
         &final_recipient_keyring,
         signer_id,
@@ -169,7 +170,7 @@ pub async fn send_sealed_relay(
     let application_metadata = metadata
         .metadata()
         .ok_or("forwarded relay metadata was missing")?;
-    let content = open_relay_content(
+    let content = open_relay_content_with_limits_without_replay(
         &metadata,
         &final_recipient_keyring,
         &signer_keyring.public_key_bundle(),

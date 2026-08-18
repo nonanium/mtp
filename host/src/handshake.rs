@@ -11,7 +11,7 @@ use std::time::Instant;
 #[cfg(feature = "pipes")]
 use tokio::sync::mpsc;
 
-use crate::config::HostConfig;
+use crate::config::{AuthenticationContext, HostConfig};
 use crate::connection::MTPConnection;
 use crate::engine::HandshakeEngine;
 use crate::error::AcceptError;
@@ -135,7 +135,16 @@ impl HandshakeContext {
         receiver: Receiver,
     ) -> Result<Option<MTPConnection>, AcceptError> {
         let engine = HandshakeEngine::new(self.registry.clone(), self.config.clone());
-        let result = engine.accept(&sender, &receiver).await?;
+        let authentication_context = AuthenticationContext {
+            peer_network_identity: sender
+                .handle()
+                .remote_addr()
+                .map(|address| address.to_string()),
+            connection_id: sender.handle().connection_id(),
+        };
+        let result = engine
+            .accept_with_context(&sender, &receiver, authentication_context)
+            .await?;
         #[cfg(feature = "crypto")]
         {
             Ok(Some(self.connection_from_handshake_result(
@@ -171,12 +180,13 @@ impl HandshakeContext {
                 receiver.respond_to_pings(sender.clone());
             }
 
-            let (app_tx, app_rx) = mpsc::channel(self.config.policy.receiver_queue_capacity);
-            let (pipe_req_tx, pipe_req_rx) =
-                mpsc::channel(self.config.policy.receiver_queue_capacity);
+            let receiver_queue_capacity = self.config.policy.receiver_queue_capacity.max(1);
+            let (app_tx, app_rx) = mpsc::channel(receiver_queue_capacity);
+            let (pipe_req_tx, pipe_req_rx) = mpsc::channel(receiver_queue_capacity);
 
             let dispatcher = Arc::new(PipeDispatcher {
-                pending_creations: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+                pending_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
+                expired_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
                 pending_pipes: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 policy: Arc::new(self.config.policy),
                 type_map: type_map.clone(),
@@ -260,12 +270,13 @@ impl HandshakeContext {
                 receiver.respond_to_pings(sender.clone());
             }
 
-            let (app_tx, app_rx) = mpsc::channel(self.config.policy.receiver_queue_capacity);
-            let (pipe_req_tx, pipe_req_rx) =
-                mpsc::channel(self.config.policy.receiver_queue_capacity);
+            let receiver_queue_capacity = self.config.policy.receiver_queue_capacity.max(1);
+            let (app_tx, app_rx) = mpsc::channel(receiver_queue_capacity);
+            let (pipe_req_tx, pipe_req_rx) = mpsc::channel(receiver_queue_capacity);
 
             let dispatcher = Arc::new(PipeDispatcher {
-                pending_creations: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+                pending_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
+                expired_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
                 pending_pipes: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 policy: Arc::new(self.config.policy),
                 type_map,

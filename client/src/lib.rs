@@ -222,6 +222,10 @@ impl MTPClient {
         sender.set_type_map(&tm).await;
         receiver.set_type_map(&tm).await;
         let version_str = format!("{}", PROTOCOL_VERSION);
+        let public_key_bytes = keys
+            .public_key_bundle()
+            .try_as_bytes()
+            .map_err(|error| CommunicationError::ParseError(error.to_string()))?;
 
         let mut ident =
             CommunicationValue::new_with_type_map(CommunicationType::Identification, &tm)
@@ -233,10 +237,7 @@ impl MTPClient {
                 // This capability marker lets a non-crypto host reject an
                 // authentication attempt instead of treating it as a plain
                 // unauthenticated connection.
-                .add_typed_default(
-                    DataType::PublicKeys,
-                    DataValue::Bytes(keys.public_key_bundle().as_bytes()),
-                );
+                .add_typed_default(DataType::PublicKeys, DataValue::Bytes(public_key_bytes));
         if let Some(desc) = &config.description {
             ident = ident.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
         }
@@ -415,7 +416,9 @@ impl MTPClient {
         receiver.set_type_map(&tm).await;
         let version_str = format!("{}", PROTOCOL_VERSION);
         let pk_bundle = keys.public_key_bundle();
-        let pk_bytes = pk_bundle.as_bytes();
+        let pk_bytes = pk_bundle
+            .try_as_bytes()
+            .map_err(|error| CommunicationError::ParseError(error.to_string()))?;
 
         let mut register = CommunicationValue::new_with_type_map(CommunicationType::Register, &tm)
             .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
@@ -601,7 +604,9 @@ mod tests {
             #[cfg(feature = "pipes")]
             type_map: mtp_codec::TypeMap::latest(),
             #[cfg(feature = "pipes")]
-            pending_creations: Mutex::new(HashMap::new()),
+            pending_creations: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(feature = "pipes")]
+            expired_creations: std::sync::Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]
             pending_pipes: Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]
@@ -639,7 +644,9 @@ mod tests {
             #[cfg(feature = "pipes")]
             type_map: mtp_codec::TypeMap::latest(),
             #[cfg(feature = "pipes")]
-            pending_creations: Mutex::new(HashMap::new()),
+            pending_creations: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(feature = "pipes")]
+            expired_creations: std::sync::Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]
             pending_pipes: Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]

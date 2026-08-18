@@ -60,6 +60,8 @@ pub use sign::{DualSignature, DualSigner, sign_dual};
 #[cfg(feature = "sha2")]
 pub use hash::{Sha256Hasher, sha256, sha256_double};
 
+#[cfg(feature = "password-kdf")]
+pub use kdf::derive_password_key;
 #[cfg(feature = "hkdf")]
 pub use kdf::{derive_encryption_key, hkdf_expand, hkdf_extract};
 
@@ -83,7 +85,9 @@ pub use helper::{ENCRYPT_DOMAIN, KEY_WRAP_DOMAIN};
 
 #[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
 pub use helper::{
-    MAX_RECIPIENTS, MultiEncryptedMessage, RecipientEntry, decrypt_multi_for, encrypt_multi_for,
+    MAX_RECIPIENTS, MultiEncryptedMessage, MultiEncryptedMessageRef, RecipientEntry,
+    decrypt_multi_for, decrypt_multi_for_parts, decrypt_multi_for_parts_with_limit,
+    encrypt_multi_for,
 };
 
 /* ================================ TESTS ================================ */
@@ -311,7 +315,9 @@ mod tests {
     #[test]
     fn keyring_serialize_roundtrip() {
         let kr = Keyring::generate();
-        let bytes = kr.to_bytes();
+        let bytes = kr
+            .try_to_bytes()
+            .expect("keyring serialization should succeed");
         let loaded = Keyring::from_bytes(&bytes).expect("keyring roundtrip should succeed");
         assert_eq!(
             kr.kem_public_key.as_bytes(),
@@ -332,7 +338,9 @@ mod tests {
     fn public_key_bundle_serialize_roundtrip() {
         let kr = Keyring::generate();
         let bundle = kr.public_key_bundle();
-        let bytes = bundle.as_bytes();
+        let bytes = bundle
+            .try_as_bytes()
+            .expect("bundle serialization should succeed");
         let loaded = PublicKeyBundle::from_bytes(&bytes).expect("bundle roundtrip should succeed");
         assert_eq!(
             bundle.kem_public_key.as_bytes(),

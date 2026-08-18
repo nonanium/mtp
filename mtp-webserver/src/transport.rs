@@ -42,6 +42,11 @@ impl H3TransportConnection {
     pub(crate) fn remote_addr(&self) -> std::net::SocketAddr {
         self.quinn.remote_address()
     }
+
+    #[cfg(feature = "crypto")]
+    pub(crate) fn connection_id(&self) -> u64 {
+        self.quinn.stable_id() as u64
+    }
 }
 
 #[async_trait::async_trait]
@@ -283,6 +288,8 @@ async fn accept_web_connection_inner(
     let max_message_size = policy.max_message_size;
     let transport = H3TransportConnection::new(session, quinn);
     let remote_addr = transport.remote_addr();
+    #[cfg(feature = "crypto")]
+    let connection_id = transport.connection_id();
     let policy = Arc::new(policy);
     let sender = WebMtpSender::new(transport.clone(), policy.clone());
     let receiver = WebMtpReceiver::new(transport, policy.clone());
@@ -290,10 +297,14 @@ async fn accept_web_connection_inner(
     let engine = mtp_host::HandshakeEngine::new(Registry::builtin(), host_config);
     #[cfg(feature = "crypto")]
     let result = engine
-        .accept_until(
+        .accept_until_with_context(
             &sender,
             &receiver,
             deadline.expect("crypto WebTransport handshakes have a deadline"),
+            mtp_host::AuthenticationContext {
+                peer_network_identity: Some(remote_addr.to_string()),
+                connection_id,
+            },
         )
         .await?;
     #[cfg(not(feature = "crypto"))]

@@ -340,9 +340,9 @@ impl Keyring {
         Ok(out)
     }
 
-    pub fn to_bytes(&self) -> Zeroizing<Vec<u8>> {
+    #[deprecated(note = "use try_to_bytes for the primary fallible serializer")]
+    pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, crate::error::CryptoError> {
         self.try_to_bytes()
-            .expect("key material length exceeds wire limit")
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::error::CryptoError> {
@@ -383,16 +383,26 @@ impl Keyring {
         })
     }
 
-    pub fn to_hex(&self) -> String {
-        bytes_to_hex(&self.to_bytes())
+    #[deprecated(note = "use try_to_hex for the primary fallible serializer")]
+    pub fn to_hex(&self) -> Result<String, crate::error::CryptoError> {
+        self.try_to_hex()
+    }
+
+    pub fn try_to_hex(&self) -> Result<String, crate::error::CryptoError> {
+        Ok(bytes_to_hex(&self.try_to_bytes()?))
     }
 
     pub fn from_hex(s: &str) -> Result<Self, crate::error::CryptoError> {
         Self::from_bytes(&hex_to_bytes(s)?)
     }
 
-    pub fn to_base64(&self) -> String {
-        bytes_to_base64(&self.to_bytes())
+    #[deprecated(note = "use try_to_base64 for the primary fallible serializer")]
+    pub fn to_base64(&self) -> Result<String, crate::error::CryptoError> {
+        self.try_to_base64()
+    }
+
+    pub fn try_to_base64(&self) -> Result<String, crate::error::CryptoError> {
+        Ok(bytes_to_base64(&self.try_to_bytes()?))
     }
 
     pub fn from_base64(s: &str) -> Result<Self, crate::error::CryptoError> {
@@ -507,9 +517,9 @@ impl PublicKeyBundle {
         Ok(out)
     }
 
-    pub fn as_bytes(&self) -> Vec<u8> {
+    #[deprecated(note = "use try_as_bytes for the primary fallible serializer")]
+    pub fn as_bytes(&self) -> Result<Vec<u8>, crate::error::CryptoError> {
         self.try_as_bytes()
-            .expect("public key bundle field exceeds wire limit")
     }
 
     /// Parse a complete suite-compatible public bundle.
@@ -582,8 +592,13 @@ impl PublicKeyBundle {
         Self::from_bytes(bytes)
     }
 
-    pub fn to_base64(&self) -> String {
-        bytes_to_base64(&self.as_bytes())
+    #[deprecated(note = "use try_to_base64 for the primary fallible serializer")]
+    pub fn to_base64(&self) -> Result<String, crate::error::CryptoError> {
+        self.try_to_base64()
+    }
+
+    pub fn try_to_base64(&self) -> Result<String, crate::error::CryptoError> {
+        Ok(bytes_to_base64(&self.try_as_bytes()?))
     }
 
     pub fn from_base64(s: &str) -> Result<Self, crate::error::CryptoError> {
@@ -599,12 +614,6 @@ impl TryFrom<&[u8]> for PublicKeyBundle {
     type Error = crate::error::CryptoError;
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         Self::from_bytes(bytes)
-    }
-}
-
-impl From<&PublicKeyBundle> for Vec<u8> {
-    fn from(bundle: &PublicKeyBundle) -> Vec<u8> {
-        bundle.as_bytes()
     }
 }
 
@@ -629,7 +638,7 @@ mod tests {
         let cl = SignaturePublicKey::new(vec![3u8; 32]);
 
         let bundle = PublicKeyBundle::new(kem, pq, cl);
-        let bytes = bundle.as_bytes();
+        let bytes = bundle.try_as_bytes()?;
         let recovered = PublicKeyBundle::from_bytes_unvalidated(&bytes)?;
 
         assert_eq!(
@@ -672,9 +681,9 @@ mod tests {
             SignaturePqPublicKey::new(vec![0xCDu8; 96]),
             SignaturePublicKey::new(vec![0xEFu8; 32]),
         );
-        let bytes: Vec<u8> = Vec::from(&bundle);
+        let bytes = bundle.try_as_bytes()?;
         let recovered = PublicKeyBundle::from_bytes_unvalidated(bytes.as_slice())?;
-        assert_eq!(bundle.as_bytes(), recovered.as_bytes());
+        assert_eq!(bundle.try_as_bytes()?, recovered.try_as_bytes()?);
         Ok(())
     }
 
@@ -688,8 +697,8 @@ mod tests {
             SignaturePublicKey::new(vec![5u8; 32]),
             SignaturePrivateKey::new(vec![6u8; 32]),
         );
-        let bytes = keyring.to_bytes();
-        let recovered = Keyring::from_bytes(&bytes)?;
+        let bytes = keyring.try_to_bytes()?;
+        let recovered = Keyring::from_bytes(bytes.as_slice())?;
         assert_eq!(
             keyring.kem_public_key.as_bytes(),
             recovered.kem_public_key.as_bytes()
@@ -722,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_key_parsers_reject_trailing_bytes() {
+    fn canonical_key_parsers_reject_trailing_bytes() -> Result<(), Box<dyn std::error::Error>> {
         let keyring = Keyring::new(
             KemPublicKey::new(vec![1u8; 16]),
             KemPrivateKey::new(vec![2u8; 16]),
@@ -731,25 +740,40 @@ mod tests {
             SignaturePublicKey::new(vec![5u8; 16]),
             SignaturePrivateKey::new(vec![6u8; 16]),
         );
-        let mut keyring_bytes = keyring.to_bytes().to_vec();
+        let mut keyring_bytes = keyring.try_to_bytes()?.to_vec();
         keyring_bytes.push(0xAA);
         assert!(Keyring::from_bytes(&keyring_bytes).is_err());
 
         let bundle = keyring.public_key_bundle();
-        let mut bundle_bytes = bundle.as_bytes();
+        let mut bundle_bytes = bundle.try_as_bytes()?;
         bundle_bytes.push(0xBB);
         assert!(PublicKeyBundle::from_bytes(&bundle_bytes).is_err());
+        Ok(())
     }
 
     #[test]
-    fn validated_bundle_rejects_partial_suite_keys() {
+    fn public_key_bundle_try_as_bytes_rejects_fields_larger_than_wire_length() {
+        let bundle = PublicKeyBundle::new(
+            KemPublicKey::new(vec![0u8; 65_536]),
+            SignaturePqPublicKey::new(Vec::new()),
+            SignaturePublicKey::new(Vec::new()),
+        );
+        assert!(matches!(
+            bundle.try_as_bytes(),
+            Err(crate::error::CryptoError::InvalidKeyLength)
+        ));
+    }
+
+    #[test]
+    fn validated_bundle_rejects_partial_suite_keys() -> Result<(), Box<dyn std::error::Error>> {
         let bundle = PublicKeyBundle::new(
             KemPublicKey::new(vec![1u8; 32]),
             SignaturePqPublicKey::new(vec![2u8; 64]),
             SignaturePublicKey::new(vec![3u8; 32]),
         );
         assert!(bundle.validate().is_err());
-        assert!(PublicKeyBundle::from_bytes_validated(&bundle.as_bytes()).is_err());
+        assert!(PublicKeyBundle::from_bytes_validated(&bundle.try_as_bytes()?).is_err());
+        Ok(())
     }
 
     #[test]
@@ -762,9 +786,9 @@ mod tests {
             SignaturePublicKey::new(vec![4u8; 16]),
             SignaturePrivateKey::new(vec![5u8; 16]),
         );
-        let bytes = keyring.to_bytes();
+        let bytes = keyring.try_to_bytes()?;
         let recovered = Keyring::try_from(bytes.as_slice())?;
-        assert_eq!(keyring.to_bytes(), recovered.to_bytes());
+        assert_eq!(keyring.try_to_bytes()?, recovered.try_to_bytes()?);
         Ok(())
     }
 
@@ -788,9 +812,9 @@ mod tests {
             SignaturePublicKey::new(vec![5u8; 16]),
             SignaturePrivateKey::new(vec![6u8; 16]),
         );
-        let hex = keyring.to_hex();
+        let hex = keyring.try_to_hex()?;
         let recovered = Keyring::from_hex(&hex)?;
-        assert_eq!(keyring.to_bytes(), recovered.to_bytes());
+        assert_eq!(keyring.try_to_bytes()?, recovered.try_to_bytes()?);
         Ok(())
     }
 
@@ -804,9 +828,9 @@ mod tests {
             SignaturePublicKey::new(vec![5u8; 16]),
             SignaturePrivateKey::new(vec![6u8; 16]),
         );
-        let b64 = keyring.to_base64();
+        let b64 = keyring.try_to_base64()?;
         let recovered = Keyring::from_base64(&b64)?;
-        assert_eq!(keyring.to_bytes(), recovered.to_bytes());
+        assert_eq!(keyring.try_to_bytes()?, recovered.try_to_bytes()?);
         Ok(())
     }
 
@@ -817,9 +841,9 @@ mod tests {
             SignaturePqPublicKey::new(vec![2u8; 64]),
             SignaturePublicKey::new(vec![3u8; 32]),
         );
-        let b64 = bundle.to_base64();
+        let b64 = bundle.try_to_base64()?;
         let recovered = PublicKeyBundle::from_base64_unvalidated(&b64)?;
-        assert_eq!(bundle.as_bytes(), recovered.as_bytes());
+        assert_eq!(bundle.try_as_bytes()?, recovered.try_as_bytes()?);
         Ok(())
     }
 

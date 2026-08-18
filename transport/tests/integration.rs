@@ -127,12 +127,12 @@ async fn test_send_receive_roundtrip() -> Result<(), Box<dyn std::error::Error>>
     assert_numbered_message(&received, CommunicationType::Ping, 42, &tm);
 
     // Host sends a response
-    let resp = numbered_message(CommunicationType::Pong, 99, &tm);
+    let resp = numbered_message(CommunicationType::BadRequest, 99, &tm);
     host_tx.send(&resp).await?;
 
     // Client receives it
     let client_received = client_rx.receive().await?;
-    assert_numbered_message(&client_received, CommunicationType::Pong, 99, &tm);
+    assert_numbered_message(&client_received, CommunicationType::BadRequest, 99, &tm);
 
     // Close both sides
     client_tx.close().await;
@@ -179,13 +179,13 @@ async fn test_concurrent_messages() -> Result<(), Box<dyn std::error::Error>> {
 
     // Send 3 responses back
     for i in 0..3u128 {
-        let msg = numbered_message(CommunicationType::Pong, i * 10, &tm);
+        let msg = numbered_message(CommunicationType::BadRequest, i * 10, &tm);
         client_tx.send(&msg).await?;
     }
 
     for i in 0..3u128 {
         let received = host_rx.receive().await?;
-        assert_numbered_message(&received, CommunicationType::Pong, i * 10, &tm);
+        assert_numbered_message(&received, CommunicationType::BadRequest, i * 10, &tm);
     }
 
     client_tx.close().await;
@@ -260,11 +260,11 @@ async fn test_drop_receiver_keeps_sender_alive() -> Result<(), Box<dyn std::erro
 
     let tm = TypeMap::latest();
 
-    let resp = numbered_message(CommunicationType::Pong, 7, &tm);
+    let resp = numbered_message(CommunicationType::BadRequest, 7, &tm);
     host_tx.send(&resp).await?;
 
     let got = client_rx.receive().await?;
-    assert_numbered_message(&got, CommunicationType::Pong, 7, &tm);
+    assert_numbered_message(&got, CommunicationType::BadRequest, 7, &tm);
 
     client_tx.close().await;
     host_tx.close().await;
@@ -284,10 +284,10 @@ async fn test_persistent_stream_reopens_after_local_finish()
 
     client_tx.finish_stream().await?;
 
-    let msg2 = numbered_message(CommunicationType::Pong, 22, &tm);
+    let msg2 = numbered_message(CommunicationType::BadRequest, 22, &tm);
     client_tx.send(&msg2).await?;
     let received2 = host_rx.receive().await?;
-    assert_numbered_message(&received2, CommunicationType::Pong, 22, &tm);
+    assert_numbered_message(&received2, CommunicationType::BadRequest, 22, &tm);
 
     client_tx.close().await;
     host_tx.close().await;

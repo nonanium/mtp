@@ -11,7 +11,10 @@ use tokio::sync::{Mutex, mpsc};
 #[cfg(feature = "crypto")]
 use crate::error::random_client_id;
 #[cfg(feature = "pipes")]
-use crate::pipe::{PipeDispatcher, PipeReceiver, PipeRequest, PipeSender, run_dispatcher};
+use crate::pipe::{
+    PendingCreationGuard, PipeDispatcher, PipeReceiver, PipeRequest, PipeSender,
+    is_expired_creation, run_dispatcher,
+};
 #[cfg(feature = "pipes")]
 use mtp_transport::Policy;
 
@@ -145,10 +148,12 @@ where
         remote_addr: Option<SocketAddr>,
     ) -> Self {
         let policy = Arc::new(Policy::default());
-        let (app_tx, app_rx) = mpsc::channel(policy.receiver_queue_capacity);
-        let (pipe_req_tx, pipe_req_rx) = mpsc::channel(policy.receiver_queue_capacity);
+        let receiver_queue_capacity = policy.receiver_queue_capacity.max(1);
+        let (app_tx, app_rx) = mpsc::channel(receiver_queue_capacity);
+        let (pipe_req_tx, pipe_req_rx) = mpsc::channel(receiver_queue_capacity);
         let dispatcher = Arc::new(PipeDispatcher {
-            pending_creations: Mutex::new(std::collections::HashMap::new()),
+            pending_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
+            expired_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_pipes: Mutex::new(std::collections::HashMap::new()),
             policy,
             type_map: codec.type_map().clone(),
@@ -198,10 +203,12 @@ where
         remote_addr: Option<SocketAddr>,
         policy: Arc<Policy>,
     ) -> Self {
-        let (app_tx, app_rx) = mpsc::channel(policy.receiver_queue_capacity);
-        let (pipe_req_tx, pipe_req_rx) = mpsc::channel(policy.receiver_queue_capacity);
+        let receiver_queue_capacity = policy.receiver_queue_capacity.max(1);
+        let (app_tx, app_rx) = mpsc::channel(receiver_queue_capacity);
+        let (pipe_req_tx, pipe_req_rx) = mpsc::channel(receiver_queue_capacity);
         let dispatcher = Arc::new(PipeDispatcher {
-            pending_creations: Mutex::new(std::collections::HashMap::new()),
+            pending_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
+            expired_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_pipes: Mutex::new(std::collections::HashMap::new()),
             policy,
             type_map: codec.type_map().clone(),
@@ -321,19 +328,37 @@ where
     pub async fn create_pipe(
         &self,
         description: &str,
-    ) -> Result<crate::pipe::PipeHandle<S>, mtp_common::PipeError> {
+    ) -> Result<crate::pipe::PipeHandle<S, P>, mtp_common::PipeError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let pipe_id = {
-            let mut pending = self.pipe_dispatcher.pending_creations.lock().await;
+            let mut pending = self
+                .pipe_dispatcher
+                .pending_creations
+                .lock()
+                .map_err(|_| mtp_common::PipeError::ConnectionClosed)?;
             let pipe_id = loop {
                 let candidate = rand::random::<u32>();
-                if candidate != 0 && !pending.contains_key(&candidate) {
+                if candidate != 0
+                    && !pending.contains_key(&candidate)
+                    && !is_expired_creation(&self.pipe_dispatcher, candidate)
+                {
                     break candidate;
                 }
             };
-            pending.insert(pipe_id, response_tx);
-            pipe_id
+            let token = Arc::new(());
+            pending.insert(
+                pipe_id,
+                crate::pipe::PendingCreation {
+                    token: token.clone(),
+                    sender: response_tx,
+                },
+            );
+            drop(pending);
+            (pipe_id, token)
         };
+        let (pipe_id, token) = pipe_id;
+        let mut creation_guard =
+            PendingCreationGuard::new(self.pipe_dispatcher.clone(), pipe_id, token.clone());
 
         let request = CommunicationValue::new_with_type_map(
             CommunicationType::PipeRequest,
@@ -342,19 +367,17 @@ where
         .with_id(pipe_id)
         .add_typed_default(DataType::Description, DataValue::Str(description.into()));
         if let Err(error) = self.sender.send_pipe_message(&request).await {
-            self.pipe_dispatcher
-                .pending_creations
-                .lock()
-                .await
-                .remove(&pipe_id);
             return Err(mtp_common::PipeError::from(error));
         }
 
+        creation_guard.disarm();
         Ok(crate::pipe::PipeHandle {
             pipe_id,
             description: description.to_owned(),
             sender: self.sender.clone(),
             response_rx,
+            dispatcher: self.pipe_dispatcher.clone(),
+            token,
         })
     }
 

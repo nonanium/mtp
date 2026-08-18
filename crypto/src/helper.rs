@@ -40,6 +40,114 @@ pub struct MultiEncryptedMessage {
     pub ciphertext: Vec<u8>,
 }
 
+/// Borrowed view of a canonical encrypted envelope.
+///
+/// The codec uses this view while validating an attacker-controlled envelope
+/// so parsing it does not first create a complete temporary copy of every
+/// recipient entry and the ciphertext.
+#[derive(Debug, Clone, Copy)]
+pub struct MultiEncryptedMessageRef<'a> {
+    encryption_type: EncryptionType,
+    purpose: u8,
+    bytes: &'a [u8],
+    entries_start: usize,
+    entry_len: usize,
+    count: usize,
+    ciphertext_start: usize,
+}
+
+impl<'a> MultiEncryptedMessageRef<'a> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, CryptoError> {
+        if bytes.len() < 4 {
+            return Err(CryptoError::MalformedEnvelope);
+        }
+        let encryption_type =
+            EncryptionType::from_byte(bytes[0]).ok_or(CryptoError::UnknownAlgorithm)?;
+        let purpose = bytes[1];
+        let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+        if count == 0 || count > MAX_RECIPIENTS {
+            return Err(CryptoError::MalformedEnvelope);
+        }
+        let entry_len = encryption_type
+            .kem_ciphertext_len()
+            .checked_add(encryption_type.wrapped_key_len())
+            .ok_or(CryptoError::MalformedEnvelope)?;
+        let entries_len = count
+            .checked_mul(entry_len)
+            .ok_or(CryptoError::MalformedEnvelope)?;
+        let entries_start = 4usize;
+        let ciphertext_start = entries_start
+            .checked_add(entries_len)
+            .ok_or(CryptoError::MalformedEnvelope)?;
+        let ciphertext_len = bytes
+            .len()
+            .checked_sub(ciphertext_start)
+            .ok_or(CryptoError::MalformedEnvelope)?;
+        if ciphertext_len < encryption_type.minimum_ciphertext_len() {
+            return Err(CryptoError::MalformedEnvelope);
+        }
+        Ok(Self {
+            encryption_type,
+            purpose,
+            bytes,
+            entries_start,
+            entry_len,
+            count,
+            ciphertext_start,
+        })
+    }
+
+    pub const fn encryption_type(&self) -> EncryptionType {
+        self.encryption_type
+    }
+
+    pub const fn purpose(&self) -> u8 {
+        self.purpose
+    }
+
+    pub const fn recipient_count(&self) -> usize {
+        self.count
+    }
+
+    pub fn recipient(&self, index: usize) -> Option<(&'a [u8], &'a [u8])> {
+        if index >= self.count {
+            return None;
+        }
+        let offset = self
+            .entries_start
+            .checked_add(index.checked_mul(self.entry_len)?)?;
+        let kem_len = self.encryption_type.kem_ciphertext_len();
+        let kem_end = offset.checked_add(kem_len)?;
+        let end = offset.checked_add(self.entry_len)?;
+        Some((
+            self.bytes.get(offset..kem_end)?,
+            self.bytes.get(kem_end..end)?,
+        ))
+    }
+
+    pub fn ciphertext(&self) -> &'a [u8] {
+        &self.bytes[self.ciphertext_start..]
+    }
+
+    pub fn to_owned(&self) -> MultiEncryptedMessage {
+        let recipients = (0..self.count)
+            .filter_map(|index| {
+                let (kem_ciphertext, encrypted_key) = self.recipient(index)?;
+                Some(RecipientEntry {
+                    kem_ciphertext: kem_ciphertext.to_vec(),
+                    encrypted_key: encrypted_key.to_vec(),
+                })
+            })
+            .collect();
+        MultiEncryptedMessage {
+            encryption_type: self.encryption_type,
+            purpose: self.purpose,
+            recipients,
+            ciphertext: self.ciphertext().to_vec(),
+        }
+    }
+}
+
 impl MultiEncryptedMessage {
     /// Serialize the envelope body without redundant per-recipient lengths.
     pub fn to_bytes(&self) -> Result<Vec<u8>, CryptoError> {
@@ -72,50 +180,7 @@ impl MultiEncryptedMessage {
 
     /// Parse the canonical envelope body.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        if bytes.len() < 4 {
-            return Err(CryptoError::MalformedEnvelope);
-        }
-        let encryption_type =
-            EncryptionType::from_byte(bytes[0]).ok_or(CryptoError::UnknownAlgorithm)?;
-        let purpose = bytes[1];
-        let count = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
-        if count == 0 || count > MAX_RECIPIENTS {
-            return Err(CryptoError::MalformedEnvelope);
-        }
-        let entry_len = encryption_type.kem_ciphertext_len() + encryption_type.wrapped_key_len();
-        let entries_len = count
-            .checked_mul(entry_len)
-            .ok_or(CryptoError::MalformedEnvelope)?;
-        let start = 4usize;
-        let end = start
-            .checked_add(entries_len)
-            .ok_or(CryptoError::MalformedEnvelope)?;
-        let ciphertext_len = bytes
-            .len()
-            .checked_sub(end)
-            .ok_or(CryptoError::MalformedEnvelope)?;
-        if ciphertext_len < encryption_type.minimum_ciphertext_len() {
-            return Err(CryptoError::MalformedEnvelope);
-        }
-
-        let mut offset = start;
-        let mut recipients = Vec::with_capacity(count);
-        for _ in 0..count {
-            let kem_end = offset + encryption_type.kem_ciphertext_len();
-            let wrapped_end = kem_end + encryption_type.wrapped_key_len();
-            recipients.push(RecipientEntry {
-                kem_ciphertext: bytes[offset..kem_end].to_vec(),
-                encrypted_key: bytes[kem_end..wrapped_end].to_vec(),
-            });
-            offset = wrapped_end;
-        }
-
-        Ok(Self {
-            encryption_type,
-            purpose,
-            recipients,
-            ciphertext: bytes[offset..].to_vec(),
-        })
+        Ok(MultiEncryptedMessageRef::from_bytes(bytes)?.to_owned())
     }
 }
 
@@ -197,20 +262,51 @@ pub fn decrypt_multi_for(
     purpose: u8,
     keyring: &Keyring,
 ) -> Result<Vec<u8>, CryptoError> {
-    if message.recipients.is_empty()
-        || message.recipients.len() > MAX_RECIPIENTS
-        || message.purpose != purpose
-        || message.ciphertext.len() < message.encryption_type.minimum_ciphertext_len()
-        || message.recipients.iter().any(|recipient| {
-            recipient.kem_ciphertext.len() != message.encryption_type.kem_ciphertext_len()
-                || recipient.encrypted_key.len() != message.encryption_type.wrapped_key_len()
+    decrypt_multi_for_parts(
+        message.encryption_type,
+        message.purpose,
+        &message.recipients,
+        &message.ciphertext,
+        purpose,
+        keyring,
+    )
+}
+
+/// Decrypt an envelope represented by borrowed recipient and ciphertext
+/// slices. This keeps protected-value opening from cloning an already-owned
+/// envelope solely to call the cryptographic primitive.
+#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
+pub fn decrypt_multi_for_parts(
+    encryption_type: EncryptionType,
+    envelope_purpose: u8,
+    recipients: &[RecipientEntry],
+    ciphertext: &[u8],
+    purpose: u8,
+    keyring: &Keyring,
+) -> Result<Vec<u8>, CryptoError> {
+    if recipients.is_empty()
+        || recipients.len() > MAX_RECIPIENTS
+        || envelope_purpose != purpose
+        || ciphertext.len() < encryption_type.minimum_ciphertext_len()
+        || recipients.iter().any(|recipient| {
+            recipient.kem_ciphertext.len() != encryption_type.kem_ciphertext_len()
+                || recipient.encrypted_key.len() != encryption_type.wrapped_key_len()
         })
     {
         return Err(CryptoError::MalformedEnvelope);
     }
 
-    let payload_aad = payload_aad(message)?;
-    for entry in &message.recipients {
+    let count = u16::try_from(recipients.len()).map_err(|_| CryptoError::MalformedEnvelope)?;
+    let mut payload_aad = Vec::new();
+    payload_aad.extend_from_slice(ENCRYPT_DOMAIN);
+    payload_aad.push(encryption_type.to_byte());
+    payload_aad.push(envelope_purpose);
+    payload_aad.extend_from_slice(&count.to_be_bytes());
+    for entry in recipients {
+        payload_aad.extend_from_slice(&entry.kem_ciphertext);
+        payload_aad.extend_from_slice(&entry.encrypted_key);
+    }
+    for entry in recipients {
         let shared_secret =
             match HybridKem::decapsulate(&keyring.kem_secret_key, &entry.kem_ciphertext) {
                 Ok(secret) => secret,
@@ -219,28 +315,49 @@ pub fn decrypt_multi_for(
         let wrap_key = Zeroizing::new(derive_encryption_key(
             &shared_secret,
             KEY_WRAP_DOMAIN,
-            &[message.encryption_type.to_byte(), purpose],
+            &[encryption_type.to_byte(), purpose],
         )?);
-        let aad = wrap_aad(message.encryption_type, purpose, &entry.kem_ciphertext);
-        let cek = match open_with_key(
-            message.encryption_type,
-            *wrap_key,
-            &entry.encrypted_key,
-            &aad,
-        ) {
+        let aad = wrap_aad(encryption_type, purpose, &entry.kem_ciphertext);
+        let cek = match open_with_key(encryption_type, *wrap_key, &entry.encrypted_key, &aad) {
             Ok(key) => key,
             Err(_) => continue,
         };
         let cek: [u8; 32] = cek.try_into().map_err(|_| CryptoError::DecryptionFailed)?;
-        return open_with_key(
-            message.encryption_type,
-            cek,
-            &message.ciphertext,
-            &payload_aad,
-        );
+        return open_with_key(encryption_type, cek, ciphertext, &payload_aad);
     }
 
     Err(CryptoError::NoMatchingRecipient)
+}
+
+/// Decrypt a canonical envelope only when its plaintext can fit inside the
+/// caller's allocation budget.
+///
+/// The AEAD implementation allocates its output buffer internally.  Checking
+/// the ciphertext upper bound before entering that implementation makes the
+/// codec's reservation meaningful instead of merely checking the result
+/// after the allocation has already happened.
+#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
+pub fn decrypt_multi_for_parts_with_limit(
+    encryption_type: EncryptionType,
+    envelope_purpose: u8,
+    recipients: &[RecipientEntry],
+    ciphertext: &[u8],
+    purpose: u8,
+    keyring: &Keyring,
+    max_plaintext_len: usize,
+) -> Result<Vec<u8>, CryptoError> {
+    if ciphertext.len() > max_plaintext_len {
+        return Err(CryptoError::AllocationLimit);
+    }
+
+    decrypt_multi_for_parts(
+        encryption_type,
+        envelope_purpose,
+        recipients,
+        ciphertext,
+        purpose,
+        keyring,
+    )
 }
 
 #[cfg(test)]
@@ -324,5 +441,31 @@ mod tests {
             MultiEncryptedMessage::from_bytes(&encoded),
             Err(CryptoError::MalformedEnvelope)
         ));
+    }
+
+    #[cfg(all(feature = "mlkem-tls", feature = "hkdf", feature = "chacha20poly1305"))]
+    #[test]
+    fn bounded_decryption_rejects_before_plaintext_allocation() -> Result<(), CryptoError> {
+        let recipient = Keyring::generate();
+        let message = encrypt_multi_for(
+            EncryptionType::MlKemChaCha20Poly1305,
+            1,
+            b"bounded plaintext",
+            &[recipient.public_key_bundle()],
+        )?;
+
+        assert!(matches!(
+            decrypt_multi_for_parts_with_limit(
+                message.encryption_type,
+                message.purpose,
+                &message.recipients,
+                &message.ciphertext,
+                message.purpose,
+                &recipient,
+                message.ciphertext.len() - 1,
+            ),
+            Err(CryptoError::AllocationLimit)
+        ));
+        Ok(())
     }
 }

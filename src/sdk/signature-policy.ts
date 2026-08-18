@@ -92,8 +92,14 @@ export function signatureVerificationPolicyValue(
       return bindings.mtp_protection_signature_suite_ed25519();
     case "dual":
       return bindings.mtp_protection_signature_suite_dual();
-    case "any-supported":
-      return 0;
+    case "any-supported": {
+      const compatibility = (
+        bindings as typeof bindings & {
+          mtp_protection_signature_suite_any_supported?: () => number;
+        }
+      ).mtp_protection_signature_suite_any_supported;
+      return compatibility?.() ?? 0;
+    }
   }
 }
 

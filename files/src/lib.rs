@@ -119,6 +119,20 @@ fn temporary_path(path: &Path, attempt: u64) -> io::Result<PathBuf> {
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 fn write_secret_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
 
@@ -146,7 +160,7 @@ fn write_secret_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
-    Ok(())
+    sync_parent_directory(path)
 }
 
 fn derive_key(
@@ -156,21 +170,12 @@ fn derive_key(
     iterations: u32,
     lanes: u32,
 ) -> Result<Zeroizing<[u8; 32]>, FileError> {
-    if salt.len() != SALT_LEN
-        || !(8 * 1024..=256 * 1024).contains(&memory_kib)
-        || !(1..=10).contains(&iterations)
-        || !(1..=8).contains(&lanes)
-    {
+    if salt.len() != SALT_LEN {
         return Err(FileError::Crypto(CryptoError::KdfError));
     }
-    let params = argon2::Params::new(memory_kib, iterations, lanes, Some(32))
-        .map_err(|_| FileError::Crypto(CryptoError::KdfError))?;
-    let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    let mut key = Zeroizing::new([0u8; 32]);
-    argon
-        .hash_password_into(passphrase, salt, key.as_mut())
-        .map_err(|_| FileError::Crypto(CryptoError::KdfError))?;
-    Ok(key)
+    Ok(Zeroizing::new(mtp_crypto::derive_password_key(
+        passphrase, salt, memory_kib, iterations, lanes,
+    )?))
 }
 
 fn protected_header_aad(parameters: &[u8]) -> Vec<u8> {
@@ -206,7 +211,7 @@ pub fn save_keyring(
     parameters.extend_from_slice(&ARGON2_LANES.to_be_bytes());
     parameters.extend_from_slice(&salt);
     let cipher = ChaCha20Poly1305::new(*key);
-    let plaintext = keyring.to_bytes();
+    let plaintext = keyring.try_to_bytes()?;
     let encrypted = cipher.encrypt(&plaintext, &protected_header_aad(&parameters))?;
     let mut payload = Vec::with_capacity(PROTECTED_PARAMS_LEN + encrypted.len());
     payload.extend_from_slice(&parameters);
@@ -259,7 +264,7 @@ pub fn load_keyring(path: impl AsRef<Path>, passphrase: &[u8]) -> Result<Keyring
 /// Explicitly save the legacy plaintext format for tests and development.
 #[cfg(any(test, feature = "raw"))]
 pub fn save_keyring_raw(keyring: &Keyring, path: impl AsRef<Path>) -> Result<(), FileError> {
-    let payload = keyring.to_bytes();
+    let payload = keyring.try_to_bytes()?;
     let bytes = Zeroizing::new(encode(KEYRING_MAGIC, RAW_FORMAT_VERSION, &payload));
     write_secret_atomic(path.as_ref(), &bytes)?;
     Ok(())
@@ -286,7 +291,8 @@ pub fn save_public_key_bundle(
     bundle: &PublicKeyBundle,
     path: impl AsRef<Path>,
 ) -> Result<(), FileError> {
-    let bytes = encode(BUNDLE_MAGIC, BUNDLE_FORMAT_VERSION, &bundle.as_bytes());
+    let bundle_bytes = bundle.try_as_bytes()?;
+    let bytes = encode(BUNDLE_MAGIC, BUNDLE_FORMAT_VERSION, &bundle_bytes);
     fs::write(path, bytes)?;
     Ok(())
 }
@@ -339,7 +345,7 @@ mod tests {
         let keyring = sample_keyring();
         save_keyring(&keyring, &path, b"correct horse battery staple")?;
         let loaded = load_keyring(&path, b"correct horse battery staple")?;
-        assert_eq!(keyring.to_bytes(), loaded.to_bytes());
+        assert_eq!(keyring.try_to_bytes()?, loaded.try_to_bytes()?);
         let _ = fs::remove_file(&path);
         Ok(())
     }
@@ -350,7 +356,7 @@ mod tests {
         let bundle = Keyring::generate().public_key_bundle();
         save_public_key_bundle(&bundle, &path)?;
         let loaded = load_public_key_bundle(&path)?;
-        assert_eq!(bundle.as_bytes(), loaded.as_bytes());
+        assert_eq!(bundle.try_as_bytes()?, loaded.try_as_bytes()?);
         let _ = fs::remove_file(&path);
         Ok(())
     }
@@ -414,7 +420,7 @@ mod tests {
             Err(FileError::UnprotectedKeyring)
         ));
         let loaded = load_keyring_raw(&path)?;
-        assert_eq!(keyring.to_bytes(), loaded.to_bytes());
+        assert_eq!(keyring.try_to_bytes()?, loaded.try_to_bytes()?);
         let _ = fs::remove_file(&path);
         Ok(())
     }
@@ -423,7 +429,7 @@ mod tests {
     fn protected_keyring_is_not_plaintext() -> Result<(), Box<dyn std::error::Error>> {
         let path = temp_path(KEYRING_EXTENSION);
         let keyring = sample_keyring();
-        let serialized = keyring.to_bytes();
+        let serialized = keyring.try_to_bytes()?;
         save_keyring(&keyring, &path, b"passphrase")?;
         let stored = fs::read(&path)?;
         assert!(

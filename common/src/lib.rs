@@ -41,6 +41,10 @@ pub enum CodecError {
     InvalidEncoding,
     #[error("Too many entries to encode")]
     TooManyEntries,
+    #[error("Missing negotiated type map")]
+    MissingTypeMap,
+    #[error("Type-map mismatch: expected {expected}, actual {actual}")]
+    TypeMapMismatch { expected: String, actual: String },
     #[error("Crypto failed: {0}")]
     CryptoFailed(String),
     #[error("Missing required field: {0}")]

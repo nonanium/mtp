@@ -7,14 +7,38 @@
 #![cfg(feature = "crypto")]
 
 use mtp_crypto::{Keyring, PublicKeyBundle, SignatureScheme};
-use mtp_type_map::{CommunicationType, DataType, TypeMap};
-use std::collections::HashSet;
+use mtp_type_map::{CommunicationType, DataType, DataTypeId, TypeMap};
+use std::collections::{HashSet, VecDeque};
 
-use crate::{CommunicationValue, DataValue, ProtectionError, ProtectionPolicy, ProtectionPurpose};
+use crate::{
+    CommunicationValue, DataValue, DecodeLimits, EncodeLimits, ProtectionError, ProtectionPolicy,
+    ProtectionPurpose,
+};
 
 /// The direct protected-message envelope schema version emitted by this
 /// codec.
 pub const CURRENT_PROTECTED_VERSION: u64 = 1;
+
+/// Semantic limits for fields that are retained after a protected message is
+/// opened. These are intentionally separate from generic transport blobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProtectedLimits {
+    pub max_message_id_bytes: usize,
+    pub max_metadata_encoded_bytes: usize,
+    pub max_signer_key_history: usize,
+    pub max_decryption_key_history: usize,
+}
+
+impl Default for ProtectedLimits {
+    fn default() -> Self {
+        Self {
+            max_message_id_bytes: 256,
+            max_metadata_encoded_bytes: 1024 * 1024,
+            max_signer_key_history: 8,
+            max_decryption_key_history: 8,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtectedError {
@@ -46,6 +70,8 @@ pub enum ProtectedError {
     ReservedApplicationType(String),
     #[error("protected message was already accepted")]
     Replay,
+    #[error("protected resource limit exceeded: {0}")]
+    ResourceLimit(&'static str),
     #[error("protection error: {0}")]
     Protection(#[from] ProtectionError),
     #[error("replay guard error: {0}")]
@@ -78,9 +104,35 @@ pub enum ReplayError {
 
 /// Small in-memory guard useful for tests and short-lived clients. Production
 /// consumers should implement [`ReplayGuard`] over persistent storage.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InMemoryReplayGuard {
     accepted: HashSet<(u64, String)>,
+    order: VecDeque<(u64, String)>,
+    capacity: usize,
+}
+
+impl Default for InMemoryReplayGuard {
+    fn default() -> Self {
+        Self::with_capacity(10_000)
+    }
+}
+
+impl InMemoryReplayGuard {
+    pub fn new(capacity: usize) -> Self {
+        Self::with_capacity(capacity)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            accepted: HashSet::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.accepted.len()
+    }
 }
 
 impl ReplayGuard for InMemoryReplayGuard {
@@ -90,7 +142,21 @@ impl ReplayGuard for InMemoryReplayGuard {
         message_id: &str,
         _created_at: u64,
     ) -> Result<bool, ReplayError> {
-        Ok(self.accepted.insert((signer_id, message_id.to_owned())))
+        let key = (signer_id, message_id.to_owned());
+        if self.accepted.contains(&key) {
+            return Ok(false);
+        }
+        if self.capacity == 0 {
+            return Ok(false);
+        }
+        self.accepted.insert(key.clone());
+        self.order.push_back(key);
+        while self.accepted.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.accepted.remove(&oldest);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -110,6 +176,8 @@ pub struct ProtectedMessageBuilder<'a> {
     type_map: Option<TypeMap>,
     frame_id: Option<u32>,
     expose_sender: bool,
+    limits: ProtectedLimits,
+    encode_limits: EncodeLimits,
 }
 
 impl<'a> ProtectedMessageBuilder<'a> {
@@ -136,6 +204,8 @@ impl<'a> ProtectedMessageBuilder<'a> {
             type_map: None,
             frame_id: None,
             expose_sender: false,
+            limits: ProtectedLimits::default(),
+            encode_limits: EncodeLimits::default(),
         }
     }
 
@@ -176,6 +246,16 @@ impl<'a> ProtectedMessageBuilder<'a> {
         self
     }
 
+    pub fn protected_limits(mut self, limits: ProtectedLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub fn encode_limits(mut self, limits: EncodeLimits) -> Self {
+        self.encode_limits = limits;
+        self
+    }
+
     pub fn build(self) -> Result<CommunicationValue, ProtectedError> {
         let message_id = self.message_id.ok_or(ProtectedError::InvalidLayout(
             "protected builder requires a message ID",
@@ -187,6 +267,9 @@ impl<'a> ProtectedMessageBuilder<'a> {
             return Err(ProtectedError::InvalidLayout(
                 "protected identifiers must be non-empty",
             ));
+        }
+        if message_id.len() > self.limits.max_message_id_bytes {
+            return Err(ProtectedError::ResourceLimit("message ID"));
         }
         if self.recipients.is_empty() {
             return Err(ProtectedError::InvalidLayout(
@@ -217,8 +300,17 @@ impl<'a> ProtectedMessageBuilder<'a> {
             (created_at_id, DataValue::UnsignedNumber(created_at as u128)),
             (content_id, self.content),
         ]);
-        let signed = envelope.sign(self.signer_id, self.signature_purpose, self.signer)?;
-        let encrypted = signed.encrypt_for(&self.recipients, self.encryption_purpose)?;
+        let signed = envelope.sign_with_limits(
+            self.signer_id,
+            self.signature_purpose,
+            self.signer,
+            self.encode_limits,
+        )?;
+        let encrypted = signed.encrypt_for_with_limits(
+            &self.recipients,
+            self.encryption_purpose,
+            self.encode_limits,
+        )?;
 
         let mut frame = CommunicationValue::new_with_type_map(application_type, &type_map)
             .with_receiver(self.final_recipient_id)
@@ -258,6 +350,12 @@ pub struct ProtectedOpenOptions {
     pub encryption_purpose: ProtectionPurpose,
     /// Signature algorithms accepted by the receiver.
     pub policy: ProtectionPolicy,
+    /// Recursive and cumulative allocation policy used while opening.
+    pub decode_limits: DecodeLimits,
+    /// Bound used when reconstructing signed bytes for verification.
+    pub encode_limits: EncodeLimits,
+    /// Semantic limits for retained protected fields and key histories.
+    pub protected_limits: ProtectedLimits,
 }
 
 impl ProtectedOpenOptions {
@@ -272,7 +370,40 @@ impl ProtectedOpenOptions {
             signature_purpose,
             encryption_purpose,
             policy,
+            decode_limits: DecodeLimits {
+                max_depth: 64,
+                max_values: 65_536,
+                max_blob_size: 16 * 1024 * 1024,
+                max_recipients: 64,
+                max_allocated_bytes: 64 * 1024 * 1024,
+            },
+            encode_limits: EncodeLimits {
+                max_depth: 64,
+                max_values: 65_536,
+                max_output_size: 16 * 1024 * 1024,
+            },
+            protected_limits: ProtectedLimits {
+                max_message_id_bytes: 256,
+                max_metadata_encoded_bytes: 1024 * 1024,
+                max_signer_key_history: 8,
+                max_decryption_key_history: 8,
+            },
         }
+    }
+
+    pub const fn with_limits(
+        mut self,
+        decode_limits: DecodeLimits,
+        protected_limits: ProtectedLimits,
+    ) -> Self {
+        self.decode_limits = decode_limits;
+        self.protected_limits = protected_limits;
+        self
+    }
+
+    pub const fn with_encode_limits(mut self, encode_limits: EncodeLimits) -> Self {
+        self.encode_limits = encode_limits;
+        self
     }
 }
 
@@ -328,23 +459,26 @@ fn validate_protected_frame(frame: &CommunicationValue) -> Result<TypeMap, Prote
 }
 
 fn field<'a>(
-    value: &'a DataValue,
+    entries: &'a [(DataTypeId, DataValue)],
     data_type: DataType,
     type_map: &TypeMap,
 ) -> Result<&'a DataValue, ProtectedError> {
-    value
-        .get_field(protected_field_id(data_type, type_map)?)
+    let field_id = protected_field_id(data_type, type_map)?;
+    entries
+        .iter()
+        .find(|(id, _)| *id == field_id)
+        .map(|(_, value)| value)
         .ok_or(ProtectedError::InvalidLayout(
             "required protected field is missing",
         ))
 }
 
 fn unsigned_field(
-    value: &DataValue,
+    entries: &[(DataTypeId, DataValue)],
     data_type: DataType,
     type_map: &TypeMap,
 ) -> Result<u128, ProtectedError> {
-    field(value, data_type, type_map)?
+    field(entries, data_type, type_map)?
         .as_unsigned_number()
         .ok_or(ProtectedError::InvalidLayout(
             "protected field is not unsigned",
@@ -352,11 +486,11 @@ fn unsigned_field(
 }
 
 fn string_field(
-    value: &DataValue,
+    entries: &[(DataTypeId, DataValue)],
     data_type: DataType,
     type_map: &TypeMap,
 ) -> Result<String, ProtectedError> {
-    field(value, data_type, type_map)?
+    field(entries, data_type, type_map)?
         .as_string()
         .filter(|value| !value.is_empty())
         .ok_or(ProtectedError::InvalidLayout(
@@ -364,10 +498,28 @@ fn string_field(
         ))
 }
 
-fn protected_version(value: &DataValue, type_map: &TypeMap) -> Result<u64, ProtectedError> {
+fn string_field_ref<'a>(
+    entries: &'a [(DataTypeId, DataValue)],
+    data_type: DataType,
+    type_map: &TypeMap,
+) -> Result<&'a str, ProtectedError> {
+    field(entries, data_type, type_map)?
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(ProtectedError::InvalidLayout(
+            "protected field is not a non-empty string",
+        ))
+}
+
+fn protected_version(
+    entries: &[(DataTypeId, DataValue)],
+    type_map: &TypeMap,
+) -> Result<u64, ProtectedError> {
     let version_id = protected_field_id(DataType::ProtectedVersion, type_map)?;
-    let version = value
-        .get_field(version_id)
+    let version = entries
+        .iter()
+        .find(|(id, _)| *id == version_id)
+        .map(|(_, value)| value)
         .ok_or(ProtectedError::MissingProtectedVersion)?
         .as_unsigned_number()
         .ok_or(ProtectedError::InvalidLayout(
@@ -381,10 +533,15 @@ fn decrypt_protected_payload(
     frame: &CommunicationValue,
     keyrings: &[&Keyring],
     encryption_purpose: ProtectionPurpose,
+    decode_limits: DecodeLimits,
+    max_decryption_key_history: usize,
 ) -> Result<DataValue, ProtectedError> {
+    if keyrings.len() > max_decryption_key_history {
+        return Err(ProtectedError::ResourceLimit("decryption key history"));
+    }
     frame
         .payload()
-        .decrypt_with_keyrings(keyrings, encryption_purpose)
+        .decrypt_with_keyrings_and_limits(keyrings, encryption_purpose, decode_limits)
         .map_err(|error| match error {
             ProtectionError::NotEncrypted => ProtectedError::PayloadNotEncrypted,
             other => ProtectedError::Protection(other),
@@ -394,22 +551,63 @@ fn decrypt_protected_payload(
 /// Return the claimed signer ID after decryption, without verifying its
 /// signature. The value is untrusted and may only select the key history that
 /// is then bound to the same signer ID during the subsequent open.
+#[deprecated(note = "use protected_claimed_signer_id_with_limits; pass the receive DecodeLimits")]
 pub fn protected_claimed_signer_id(
     frame: &CommunicationValue,
     keyrings: &[&Keyring],
     encryption_purpose: ProtectionPurpose,
 ) -> Result<u64, ProtectedError> {
+    // Migrate to `protected_claimed_signer_id_with_limits` at receive boundaries.
+    protected_claimed_signer_id_with_limits(
+        frame,
+        keyrings,
+        encryption_purpose,
+        DecodeLimits::default(),
+    )
+}
+
+pub fn protected_claimed_signer_id_with_limits(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    encryption_purpose: ProtectionPurpose,
+    decode_limits: DecodeLimits,
+) -> Result<u64, ProtectedError> {
+    protected_claimed_signer_id_with_options(
+        frame,
+        keyrings,
+        encryption_purpose,
+        decode_limits,
+        ProtectedLimits::default(),
+    )
+}
+
+/// Return the claimed signer ID while applying the complete receive policy.
+///
+/// This is deliberately separate from the compatibility decoder above: the
+/// claimed ID is used to select a signer-key history, so the decryption-key
+/// history bound must be the same bound used by the eventual open operation.
+pub fn protected_claimed_signer_id_with_options(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    encryption_purpose: ProtectionPurpose,
+    decode_limits: DecodeLimits,
+    protected_limits: ProtectedLimits,
+) -> Result<u64, ProtectedError> {
     validate_protected_frame(frame)?;
-    let decrypted = decrypt_protected_payload(frame, keyrings, encryption_purpose)?;
+    let decrypted = decrypt_protected_payload(
+        frame,
+        keyrings,
+        encryption_purpose,
+        decode_limits,
+        protected_limits.max_decryption_key_history,
+    )?;
     let signed = decrypted
         .as_signed()
         .ok_or(ProtectedError::PayloadNotSigned)?;
     Ok(signed.signer_id)
 }
 
-/// Open a direct protected message using a resolver for trusted signer keys.
-/// The resolver receives a claimed, unverified signer ID only as a lookup key.
-pub fn open_protected_with<F>(
+fn open_protected_with_impl<F>(
     frame: &CommunicationValue,
     keyrings: &[&Keyring],
     expected_signer_id: Option<u64>,
@@ -422,7 +620,13 @@ where
 {
     validate_protected_frame(frame)?;
     let type_map = frame.type_map().cloned().unwrap_or_else(TypeMap::latest);
-    let decrypted = decrypt_protected_payload(frame, keyrings, options.encryption_purpose)?;
+    let decrypted = decrypt_protected_payload(
+        frame,
+        keyrings,
+        options.encryption_purpose,
+        options.decode_limits,
+        options.protected_limits.max_decryption_key_history,
+    )?;
     let signed = decrypted
         .as_signed()
         .ok_or(ProtectedError::PayloadNotSigned)?;
@@ -437,13 +641,54 @@ where
     }
     let signer_keys = resolve_signer_keys(signed.signer_id)
         .ok_or(ProtectionError::SignerKeyNotFound(signed.signer_id))?;
+    if signer_keys.len() > options.protected_limits.max_signer_key_history {
+        return Err(ProtectedError::ResourceLimit("signer key history"));
+    }
     open_decrypted_protected(frame, type_map, signed, &signer_keys, options, replay_guard)
 }
 
-/// Open a direct protected message against already resolved trusted signer
-/// keys. The signer ID is mandatory so a key history cannot be applied to a
-/// different claimed identity.
-pub fn open_protected_with_keys(
+pub fn open_protected_with_checked<F>(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    expected_signer_id: Option<u64>,
+    resolve_signer_keys: F,
+    options: ProtectedOpenOptions,
+    replay_guard: &mut dyn ReplayGuard,
+) -> Result<VerifiedProtectedMessage, ProtectedError>
+where
+    F: FnOnce(u64) -> Option<Vec<PublicKeyBundle>>,
+{
+    open_protected_with_impl(
+        frame,
+        keyrings,
+        expected_signer_id,
+        resolve_signer_keys,
+        options,
+        Some(replay_guard),
+    )
+}
+
+pub fn open_protected_with_without_replay<F>(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    expected_signer_id: Option<u64>,
+    resolve_signer_keys: F,
+    options: ProtectedOpenOptions,
+) -> Result<VerifiedProtectedMessage, ProtectedError>
+where
+    F: FnOnce(u64) -> Option<Vec<PublicKeyBundle>>,
+{
+    open_protected_with_impl(
+        frame,
+        keyrings,
+        expected_signer_id,
+        resolve_signer_keys,
+        options,
+        None,
+    )
+}
+
+fn open_protected_with_keys_impl(
     frame: &CommunicationValue,
     keyrings: &[&Keyring],
     expected_signer_id: u64,
@@ -452,7 +697,13 @@ pub fn open_protected_with_keys(
     replay_guard: Option<&mut dyn ReplayGuard>,
 ) -> Result<VerifiedProtectedMessage, ProtectedError> {
     let type_map = validate_protected_frame(frame)?;
-    let decrypted = decrypt_protected_payload(frame, keyrings, options.encryption_purpose)?;
+    let decrypted = decrypt_protected_payload(
+        frame,
+        keyrings,
+        options.encryption_purpose,
+        options.decode_limits,
+        options.protected_limits.max_decryption_key_history,
+    )?;
     let signed = decrypted
         .as_signed()
         .ok_or(ProtectedError::PayloadNotSigned)?;
@@ -473,23 +724,73 @@ pub fn open_protected_with_keys(
     )
 }
 
-/// Open a direct protected message when the expected signer and one trusted
-/// public key are already known.
-pub fn open_protected(
+pub fn open_protected_with_keys_checked(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    expected_signer_id: u64,
+    signer_public_keys: &[PublicKeyBundle],
+    options: ProtectedOpenOptions,
+    replay_guard: &mut dyn ReplayGuard,
+) -> Result<VerifiedProtectedMessage, ProtectedError> {
+    open_protected_with_keys_impl(
+        frame,
+        keyrings,
+        expected_signer_id,
+        signer_public_keys,
+        options,
+        Some(replay_guard),
+    )
+}
+
+pub fn open_protected_with_keys_without_replay(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    expected_signer_id: u64,
+    signer_public_keys: &[PublicKeyBundle],
+    options: ProtectedOpenOptions,
+) -> Result<VerifiedProtectedMessage, ProtectedError> {
+    open_protected_with_keys_impl(
+        frame,
+        keyrings,
+        expected_signer_id,
+        signer_public_keys,
+        options,
+        None,
+    )
+}
+
+pub fn open_protected_checked(
     frame: &CommunicationValue,
     keyring: &Keyring,
     expected_signer_id: u64,
     signer_public_key: &PublicKeyBundle,
     options: ProtectedOpenOptions,
-    replay_guard: Option<&mut dyn ReplayGuard>,
+    replay_guard: &mut dyn ReplayGuard,
 ) -> Result<VerifiedProtectedMessage, ProtectedError> {
-    open_protected_with_keys(
+    open_protected_with_keys_impl(
         frame,
         std::slice::from_ref(&keyring),
         expected_signer_id,
         std::slice::from_ref(signer_public_key),
         options,
-        replay_guard,
+        Some(replay_guard),
+    )
+}
+
+pub fn open_protected_without_replay(
+    frame: &CommunicationValue,
+    keyring: &Keyring,
+    expected_signer_id: u64,
+    signer_public_key: &PublicKeyBundle,
+    options: ProtectedOpenOptions,
+) -> Result<VerifiedProtectedMessage, ProtectedError> {
+    open_protected_with_keys_impl(
+        frame,
+        std::slice::from_ref(&keyring),
+        expected_signer_id,
+        std::slice::from_ref(signer_public_key),
+        options,
+        None,
     )
 }
 
@@ -501,11 +802,15 @@ fn open_decrypted_protected(
     options: ProtectedOpenOptions,
     mut replay_guard: Option<&mut dyn ReplayGuard>,
 ) -> Result<VerifiedProtectedMessage, ProtectedError> {
-    let matched_signer_key_index = signed.verify_with_key_history_index(
+    if signer_public_keys.len() > options.protected_limits.max_signer_key_history {
+        return Err(ProtectedError::ResourceLimit("signer key history"));
+    }
+    let matched_signer_key_index = signed.verify_with_key_history_index_and_limits(
         signed.signer_id,
         signer_public_keys,
         options.signature_purpose,
         options.policy,
+        options.encode_limits,
     )?;
     let receiver_id = frame.receiver().ok_or(ProtectedError::MissingReceiver)?;
     if options
@@ -520,22 +825,23 @@ fn open_decrypted_protected(
     {
         return Err(ProtectedError::SenderMismatch);
     }
+    /* The authenticated value is already owned by the decoder. Keep this
+    inspection borrowed so opening a large envelope does not clone it. */
     let envelope = signed
         .value
-        .as_container()
+        .container_entries()
         .ok_or(ProtectedError::MissingEnvelope)?;
-    let envelope = DataValue::Container(envelope);
-    let version = protected_version(&envelope, &type_map)?;
+    let version = protected_version(envelope, &type_map)?;
     if version != CURRENT_PROTECTED_VERSION {
         return Err(ProtectedError::UnsupportedProtectedVersion(version));
     }
-    let message_type = string_field(&envelope, DataType::MessageType, &type_map)?;
+    let message_type = string_field(envelope, DataType::MessageType, &type_map)?;
     let application_type = validate_application_message_type(&message_type, &type_map)?;
     if frame.get_comm_type_enum() != Some(application_type) {
         return Err(ProtectedError::MessageTypeMismatch);
     }
     let final_recipient_id = u64::try_from(unsigned_field(
-        &envelope,
+        envelope,
         DataType::FinalRecipientId,
         &type_map,
     )?)
@@ -543,10 +849,14 @@ fn open_decrypted_protected(
     if final_recipient_id != receiver_id {
         return Err(ProtectedError::FinalRecipientMismatch);
     }
-    let message_id = string_field(&envelope, DataType::MessageId, &type_map)?;
-    let created_at = u64::try_from(unsigned_field(&envelope, DataType::CreatedAt, &type_map)?)
+    let message_id = string_field_ref(envelope, DataType::MessageId, &type_map)?;
+    if message_id.len() > options.protected_limits.max_message_id_bytes {
+        return Err(ProtectedError::ResourceLimit("message ID"));
+    }
+    let message_id = message_id.to_owned();
+    let created_at = u64::try_from(unsigned_field(envelope, DataType::CreatedAt, &type_map)?)
         .map_err(|_| ProtectedError::InvalidLayout("created-at value is out of range"))?;
-    let content = field(&envelope, DataType::Content, &type_map)?.clone();
+    let content = field(envelope, DataType::Content, &type_map)?.clone();
 
     if let Some(guard) = replay_guard.as_mut()
         && !guard.accept(signed.signer_id, &message_id, created_at)?
@@ -569,7 +879,7 @@ fn open_decrypted_protected(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mtp_crypto::{Ed25519Signer, Keyring};
+    use mtp_crypto::{Ed25519Signer, Keyring, PublicKeyBundle};
     use mtp_type_map::{DataType, DataTypeId};
 
     const SIGNATURE_PURPOSE: ProtectionPurpose = ProtectionPurpose(0x40);
@@ -584,10 +894,98 @@ mod tests {
         )
     }
 
+    // Keep the existing test cases concise while making the production API
+    // choice explicit: every call below is routed to either the checked or
+    // the named without-replay entry point.
+    fn open_protected(
+        frame: &CommunicationValue,
+        keyring: &Keyring,
+        expected_signer_id: u64,
+        signer_public_key: &PublicKeyBundle,
+        options: ProtectedOpenOptions,
+        replay_guard: Option<&mut dyn ReplayGuard>,
+    ) -> Result<VerifiedProtectedMessage, ProtectedError> {
+        match replay_guard {
+            Some(replay_guard) => super::open_protected_checked(
+                frame,
+                keyring,
+                expected_signer_id,
+                signer_public_key,
+                options,
+                replay_guard,
+            ),
+            None => super::open_protected_without_replay(
+                frame,
+                keyring,
+                expected_signer_id,
+                signer_public_key,
+                options,
+            ),
+        }
+    }
+
+    fn open_protected_with<F>(
+        frame: &CommunicationValue,
+        keyrings: &[&Keyring],
+        expected_signer_id: Option<u64>,
+        resolve_signer_keys: F,
+        options: ProtectedOpenOptions,
+        replay_guard: Option<&mut dyn ReplayGuard>,
+    ) -> Result<VerifiedProtectedMessage, ProtectedError>
+    where
+        F: FnOnce(u64) -> Option<Vec<PublicKeyBundle>>,
+    {
+        match replay_guard {
+            Some(replay_guard) => super::open_protected_with_checked(
+                frame,
+                keyrings,
+                expected_signer_id,
+                resolve_signer_keys,
+                options,
+                replay_guard,
+            ),
+            None => super::open_protected_with_without_replay(
+                frame,
+                keyrings,
+                expected_signer_id,
+                resolve_signer_keys,
+                options,
+            ),
+        }
+    }
+
+    fn open_protected_with_keys(
+        frame: &CommunicationValue,
+        keyrings: &[&Keyring],
+        expected_signer_id: u64,
+        signer_public_keys: &[PublicKeyBundle],
+        options: ProtectedOpenOptions,
+        replay_guard: Option<&mut dyn ReplayGuard>,
+    ) -> Result<VerifiedProtectedMessage, ProtectedError> {
+        match replay_guard {
+            Some(replay_guard) => super::open_protected_with_keys_checked(
+                frame,
+                keyrings,
+                expected_signer_id,
+                signer_public_keys,
+                options,
+                replay_guard,
+            ),
+            None => super::open_protected_with_keys_without_replay(
+                frame,
+                keyrings,
+                expected_signer_id,
+                signer_public_keys,
+                options,
+            ),
+        }
+    }
+
     #[derive(Default)]
     struct RecordingReplayGuard {
         created_at: Option<u64>,
         accepted: bool,
+        calls: usize,
     }
 
     impl ReplayGuard for RecordingReplayGuard {
@@ -597,6 +995,7 @@ mod tests {
             _message_id: &str,
             created_at: u64,
         ) -> Result<bool, ReplayError> {
+            self.calls += 1;
             self.created_at = Some(created_at);
             if self.accepted {
                 Ok(false)
@@ -605,6 +1004,38 @@ mod tests {
                 Ok(true)
             }
         }
+    }
+
+    #[test]
+    fn in_memory_replay_guard_is_bounded_and_deduplicates() {
+        let mut guard = InMemoryReplayGuard::with_capacity(2);
+        assert!(guard.accept(7, "first", 1).expect("first replay decision"));
+        assert!(
+            guard
+                .accept(7, "second", 2)
+                .expect("second replay decision")
+        );
+        assert!(
+            !guard
+                .accept(7, "first", 3)
+                .expect("duplicate replay decision")
+        );
+        assert_eq!(guard.len(), 2);
+
+        assert!(guard.accept(7, "third", 4).expect("third replay decision"));
+        assert_eq!(guard.len(), 2);
+        assert!(
+            guard
+                .accept(7, "first", 5)
+                .expect("evicted replay decision")
+        );
+
+        let mut disabled = InMemoryReplayGuard::with_capacity(0);
+        assert!(
+            !disabled
+                .accept(7, "disabled", 1)
+                .expect("disabled replay decision")
+        );
     }
 
     fn protected_field(data_type: DataType, type_map: &TypeMap) -> DataTypeId {
@@ -743,6 +1174,7 @@ mod tests {
         assert_eq!(opened.message_type, "ProtectedMessage");
         assert_eq!(opened.message_id, "protected-test");
         assert_eq!(guard.created_at, Some(1_700_000_000_000));
+        assert_eq!(guard.calls, 1);
         assert_eq!(opened.content, DataValue::Str("hello".into()));
         assert!(matches!(
             open_protected(
@@ -755,6 +1187,29 @@ mod tests {
             ),
             Err(ProtectedError::Replay)
         ));
+    }
+
+    #[test]
+    fn oversized_message_id_is_rejected_before_replay_guard() {
+        let sender = Keyring::generate();
+        let recipient = Keyring::generate();
+        let frame = valid_frame(&sender, &recipient, DataValue::Str("hello".into()));
+        let mut options = open_options(Some(42));
+        options.protected_limits.max_message_id_bytes = 3;
+        let mut guard = RecordingReplayGuard::default();
+
+        assert!(matches!(
+            open_protected_checked(
+                &frame,
+                &recipient,
+                7,
+                &sender.public_key_bundle(),
+                options,
+                &mut guard,
+            ),
+            Err(ProtectedError::ResourceLimit("message ID"))
+        ));
+        assert_eq!(guard.calls, 0);
     }
 
     #[test]

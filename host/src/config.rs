@@ -5,9 +5,13 @@ use std::collections::HashMap;
 #[cfg(feature = "crypto")]
 use std::collections::HashSet;
 #[cfg(feature = "crypto")]
+use std::collections::VecDeque;
+#[cfg(feature = "crypto")]
 use std::pin::Pin;
 #[cfg(feature = "crypto")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "crypto")]
+use std::time::{Duration as StdDuration, Instant};
 #[cfg(feature = "crypto")]
 use tokio::time::Duration;
 
@@ -82,6 +86,158 @@ pub enum AuthenticationPolicy {
     Unauthenticated,
 }
 
+/// Transport-supplied identity used to scope authentication attempt limits.
+/// Concrete hosts should populate these fields from the accepted connection;
+/// the zero/empty defaults exist only for transport-neutral callers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthenticationContext {
+    pub peer_network_identity: Option<String>,
+    pub connection_id: u64,
+}
+
+#[cfg(feature = "crypto")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticationAttempt {
+    pub peer_network_identity: Option<String>,
+    pub connection_id: u64,
+    pub claimed_client_id: Option<u64>,
+    pub registration: bool,
+}
+
+#[cfg(feature = "crypto")]
+#[derive(Debug, thiserror::Error)]
+pub enum AuthenticationLimitError {
+    #[error("authentication limiter storage is unavailable")]
+    Store,
+}
+
+#[cfg(feature = "crypto")]
+pub trait AuthenticationAttemptLimiter: Send + Sync {
+    fn allow(&self, context: &AuthenticationAttempt) -> Result<bool, AuthenticationLimitError>;
+}
+
+#[cfg(feature = "crypto")]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+enum AuthenticationLimitKey {
+    Peer(String),
+    Connection(u64),
+    Client(u64),
+    Registration,
+    Global,
+}
+
+#[cfg(feature = "crypto")]
+#[derive(Debug)]
+pub struct InMemoryAuthenticationAttemptLimiter {
+    max_attempts: usize,
+    window: StdDuration,
+    max_keys: usize,
+    by_peer: bool,
+    by_connection: bool,
+    by_client: bool,
+    by_registration: bool,
+    attempts: Mutex<HashMap<AuthenticationLimitKey, VecDeque<Instant>>>,
+}
+
+#[cfg(feature = "crypto")]
+impl InMemoryAuthenticationAttemptLimiter {
+    pub fn new(max_attempts: usize, window: StdDuration) -> Self {
+        Self {
+            max_attempts,
+            window,
+            max_keys: 100_000,
+            by_peer: true,
+            by_connection: true,
+            by_client: true,
+            by_registration: true,
+            attempts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn with_keys(
+        mut self,
+        by_peer: bool,
+        by_connection: bool,
+        by_client: bool,
+        by_registration: bool,
+    ) -> Self {
+        self.by_peer = by_peer;
+        self.by_connection = by_connection;
+        self.by_client = by_client;
+        self.by_registration = by_registration;
+        self
+    }
+
+    pub fn with_max_keys(mut self, max_keys: usize) -> Self {
+        self.max_keys = max_keys.max(1);
+        self
+    }
+
+    fn keys(&self, context: &AuthenticationAttempt) -> Vec<AuthenticationLimitKey> {
+        let mut keys = Vec::with_capacity(5);
+        if self.by_peer
+            && let Some(peer) = context.peer_network_identity.as_ref()
+        {
+            keys.push(AuthenticationLimitKey::Peer(peer.clone()));
+        }
+        if self.by_connection && context.connection_id != 0 {
+            keys.push(AuthenticationLimitKey::Connection(context.connection_id));
+        }
+        if self.by_client
+            && let Some(client_id) = context.claimed_client_id
+        {
+            keys.push(AuthenticationLimitKey::Client(client_id));
+        }
+        if self.by_registration && context.registration {
+            keys.push(AuthenticationLimitKey::Registration);
+        }
+        // Keep one global bucket as a backstop when an attacker varies the
+        // claimed client ID or presents no peer/connection identity.
+        keys.push(AuthenticationLimitKey::Global);
+        keys
+    }
+}
+
+#[cfg(feature = "crypto")]
+impl AuthenticationAttemptLimiter for InMemoryAuthenticationAttemptLimiter {
+    fn allow(&self, context: &AuthenticationAttempt) -> Result<bool, AuthenticationLimitError> {
+        if self.max_attempts == 0 {
+            return Ok(false);
+        }
+        let now = Instant::now();
+        let cutoff = now.checked_sub(self.window);
+        let keys = self.keys(context);
+        let mut attempts = self
+            .attempts
+            .lock()
+            .map_err(|_| AuthenticationLimitError::Store)?;
+
+        for key in &keys {
+            if let Some(history) = attempts.get_mut(key) {
+                while history
+                    .front()
+                    .is_some_and(|timestamp| cutoff.is_some_and(|cutoff| *timestamp <= cutoff))
+                {
+                    history.pop_front();
+                }
+                if history.len() >= self.max_attempts {
+                    return Ok(false);
+                }
+            }
+        }
+
+        for key in keys {
+            if !attempts.contains_key(&key) && attempts.len() >= self.max_keys {
+                if let Some(oldest) = attempts.keys().next().cloned() {
+                    attempts.remove(&oldest);
+                }
+            }
+            attempts.entry(key).or_default().push_back(now);
+        }
+        Ok(true)
+    }
+}
+
 pub struct HostConfig {
     pub ip: IpAddr,
     pub port: u16,
@@ -113,6 +269,10 @@ pub struct HostConfig {
     pub complete_register: CompleteRegister,
     #[cfg(feature = "crypto")]
     pub find_registered_client: Option<FindRegisteredClient>,
+    #[cfg(feature = "crypto")]
+    pub auth_limiter: Arc<dyn AuthenticationAttemptLimiter>,
+    #[cfg(feature = "crypto")]
+    pub conceal_authentication_identities: bool,
 }
 
 impl HostConfig {
@@ -153,6 +313,13 @@ impl HostConfig {
             complete_register: Box::new(|_, _| Box::pin(async { 0 })),
             #[cfg(feature = "crypto")]
             find_registered_client: None,
+            #[cfg(feature = "crypto")]
+            auth_limiter: Arc::new(InMemoryAuthenticationAttemptLimiter::new(
+                32,
+                StdDuration::from_secs(60),
+            )),
+            #[cfg(feature = "crypto")]
+            conceal_authentication_identities: true,
         }
     }
 
@@ -209,5 +376,68 @@ impl HostConfig {
     pub fn with_registration_lookup(mut self, lookup: FindRegisteredClient) -> Self {
         self.find_registered_client = Some(lookup);
         self
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn with_authentication_limiter(
+        mut self,
+        limiter: Arc<dyn AuthenticationAttemptLimiter>,
+    ) -> Self {
+        self.auth_limiter = limiter;
+        self
+    }
+
+    #[cfg(feature = "crypto")]
+    pub fn with_authentication_identity_concealment(mut self, conceal: bool) -> Self {
+        self.conceal_authentication_identities = conceal;
+        self
+    }
+}
+
+#[cfg(all(test, feature = "crypto"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authentication_attempt_limiter_rejects_repeated_attempts() {
+        let limiter = InMemoryAuthenticationAttemptLimiter::new(1, StdDuration::from_secs(60))
+            .with_keys(false, true, false, false);
+        let attempt = AuthenticationAttempt {
+            peer_network_identity: None,
+            connection_id: 9,
+            claimed_client_id: Some(42),
+            registration: false,
+        };
+
+        assert!(limiter.allow(&attempt).expect("first attempt decision"));
+        assert!(!limiter.allow(&attempt).expect("second attempt decision"));
+    }
+
+    #[test]
+    fn authentication_attempt_limiter_can_scope_registration_separately() {
+        let limiter = InMemoryAuthenticationAttemptLimiter::new(2, StdDuration::from_secs(60))
+            .with_keys(false, false, false, true);
+        let login = AuthenticationAttempt {
+            peer_network_identity: None,
+            connection_id: 1,
+            claimed_client_id: None,
+            registration: false,
+        };
+        let registration = AuthenticationAttempt {
+            registration: true,
+            ..login.clone()
+        };
+
+        assert!(limiter.allow(&login).expect("login attempt decision"));
+        assert!(
+            limiter
+                .allow(&registration)
+                .expect("registration attempt decision")
+        );
+        assert!(
+            !limiter
+                .allow(&registration)
+                .expect("repeated registration decision")
+        );
     }
 }

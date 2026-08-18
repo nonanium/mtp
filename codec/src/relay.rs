@@ -9,11 +9,11 @@
 #![cfg(feature = "crypto")]
 
 use mtp_crypto::{Keyring, PublicKeyBundle, SignatureScheme};
-use mtp_type_map::{CommunicationType, DataType, TypeMap};
+use mtp_type_map::{CommunicationType, DataType, DataTypeId, TypeMap};
 
 use crate::{
-    CommunicationValue, DataValue, MtpProtectionPurpose, ProtectionError, ProtectionPolicy,
-    ReplayError, ReplayGuard,
+    CommunicationValue, DataValue, DecodeLimits, EncodeLimits, MtpProtectionPurpose,
+    ProtectedLimits, ProtectionError, ProtectionPolicy, ReplayError, ReplayGuard,
 };
 
 /// The relay metadata schema emitted by [`SealedRelayBuilder`].
@@ -37,6 +37,8 @@ pub enum RelayError {
     NotFinalRecipient,
     #[error("relay message was already accepted")]
     Replay,
+    #[error("relay resource limit exceeded: {0}")]
+    ResourceLimit(&'static str),
     #[error("relay application message type is reserved: {0}")]
     ReservedApplicationType(String),
     #[error("protection error: {0}")]
@@ -62,6 +64,9 @@ pub struct VerifiedRelayMetadata {
     encrypted_content: DataValue,
     type_map: TypeMap,
     matched_signer_key_index: usize,
+    decode_limits: DecodeLimits,
+    encode_limits: EncodeLimits,
+    protected_limits: ProtectedLimits,
     // There is intentionally no public constructor. This marker documents
     // that the fields originate from a successful authenticated open.
     _verified: VerifiedMarker,
@@ -82,6 +87,18 @@ impl VerifiedRelayMetadata {
 
     pub fn final_recipient_id(&self) -> u64 {
         self.final_recipient_id
+    }
+
+    pub fn decode_limits(&self) -> DecodeLimits {
+        self.decode_limits
+    }
+
+    pub fn protected_limits(&self) -> ProtectedLimits {
+        self.protected_limits
+    }
+
+    pub fn encode_limits(&self) -> EncodeLimits {
+        self.encode_limits
     }
 
     pub fn message_id(&self) -> &str {
@@ -120,6 +137,40 @@ pub struct VerifiedRelayContent {
     pub content: DataValue,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RelayOpenOptions {
+    pub policy: ProtectionPolicy,
+    pub decode_limits: DecodeLimits,
+    pub encode_limits: EncodeLimits,
+    pub protected_limits: ProtectedLimits,
+}
+
+impl RelayOpenOptions {
+    pub fn new(policy: ProtectionPolicy) -> Self {
+        Self {
+            policy,
+            decode_limits: DecodeLimits::default(),
+            encode_limits: EncodeLimits::default(),
+            protected_limits: ProtectedLimits::default(),
+        }
+    }
+
+    pub const fn with_limits(
+        mut self,
+        decode_limits: DecodeLimits,
+        protected_limits: ProtectedLimits,
+    ) -> Self {
+        self.decode_limits = decode_limits;
+        self.protected_limits = protected_limits;
+        self
+    }
+
+    pub const fn with_encode_limits(mut self, encode_limits: EncodeLimits) -> Self {
+        self.encode_limits = encode_limits;
+        self
+    }
+}
+
 /// Native sealed-relay builder shared by non-WASM applications.
 ///
 /// The browser SDK and this builder intentionally produce the same reserved
@@ -139,6 +190,8 @@ pub struct SealedRelayBuilder<'a> {
     metadata_recipients: Vec<PublicKeyBundle>,
     content_recipients: Vec<PublicKeyBundle>,
     type_map: Option<TypeMap>,
+    limits: ProtectedLimits,
+    encode_limits: EncodeLimits,
 }
 
 impl<'a> SealedRelayBuilder<'a> {
@@ -163,6 +216,8 @@ impl<'a> SealedRelayBuilder<'a> {
             metadata_recipients: Vec::new(),
             content_recipients: Vec::new(),
             type_map: None,
+            limits: ProtectedLimits::default(),
+            encode_limits: EncodeLimits::default(),
         }
     }
 
@@ -192,6 +247,16 @@ impl<'a> SealedRelayBuilder<'a> {
         self
     }
 
+    pub fn protected_limits(mut self, limits: ProtectedLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub fn encode_limits(mut self, limits: EncodeLimits) -> Self {
+        self.encode_limits = limits;
+        self
+    }
+
     /// Build the reserved relay fields against a negotiated type map. The
     /// default is the current map, but native callers handling an older
     /// negotiated frame should pass that map explicitly.
@@ -212,10 +277,16 @@ impl<'a> SealedRelayBuilder<'a> {
                 "relay builder identifiers must be non-empty",
             ));
         }
+        if message_id.len() > self.limits.max_message_id_bytes {
+            return Err(RelayError::ResourceLimit("message ID"));
+        }
         if self.metadata_recipients.is_empty() || self.content_recipients.is_empty() {
             return Err(RelayError::InvalidLayout(
                 "relay builder requires metadata and content recipients",
             ));
+        }
+        if let Some(metadata) = self.metadata.as_ref() {
+            validate_metadata_size(metadata, &self.limits)?;
         }
 
         let type_map = self.type_map.unwrap_or_else(TypeMap::latest);
@@ -232,14 +303,16 @@ impl<'a> SealedRelayBuilder<'a> {
             (message_type_id, DataValue::Str(self.message_type)),
             (content_id, self.content),
         ]);
-        let signed_content = content.sign(
+        let signed_content = content.sign_with_limits(
             self.signer_id,
             MtpProtectionPurpose::RelayContentSignature.into(),
             self.signer,
+            self.encode_limits,
         )?;
-        let encrypted_content = signed_content.encrypt_for(
+        let encrypted_content = signed_content.encrypt_for_with_limits(
             &self.content_recipients,
             MtpProtectionPurpose::RelayContentEncryption.into(),
+            self.encode_limits,
         )?;
         let mut metadata_fields = vec![
             (
@@ -258,14 +331,16 @@ impl<'a> SealedRelayBuilder<'a> {
             metadata_fields.push((metadata_id, application_metadata));
         }
         let metadata = DataValue::Container(metadata_fields);
-        let signed_metadata = metadata.sign(
+        let signed_metadata = metadata.sign_with_limits(
             self.signer_id,
             MtpProtectionPurpose::RelayMetadataSignature.into(),
             self.signer,
+            self.encode_limits,
         )?;
-        let encrypted_metadata = signed_metadata.encrypt_for(
+        let encrypted_metadata = signed_metadata.encrypt_for_with_limits(
             &self.metadata_recipients,
             MtpProtectionPurpose::RelayMetadataEncryption.into(),
+            self.encode_limits,
         )?;
         Ok(
             CommunicationValue::new_with_type_map(CommunicationType::Relay, &type_map)
@@ -305,22 +380,44 @@ fn validate_application_message_type(
     Ok(())
 }
 
+fn validate_metadata_size(
+    metadata: &DataValue,
+    limits: &ProtectedLimits,
+) -> Result<(), RelayError> {
+    let encoded = metadata
+        .to_bytes_with_limits(EncodeLimits {
+            max_output_size: limits.max_metadata_encoded_bytes,
+            ..EncodeLimits::default()
+        })
+        .map_err(|error| match error {
+            mtp_common::CodecError::TooManyEntries => RelayError::ResourceLimit("metadata"),
+            _ => RelayError::InvalidLayout("metadata cannot be encoded"),
+        })?;
+    if encoded.len() > limits.max_metadata_encoded_bytes {
+        return Err(RelayError::ResourceLimit("metadata"));
+    }
+    Ok(())
+}
+
 fn field<'a>(
-    value: &'a DataValue,
+    entries: &'a [(DataTypeId, DataValue)],
     data_type: DataType,
     type_map: &TypeMap,
 ) -> Result<&'a DataValue, RelayError> {
-    value
-        .get_field(relay_field(data_type, type_map)?)
+    let field_id = relay_field(data_type, type_map)?;
+    entries
+        .iter()
+        .find(|(id, _)| *id == field_id)
+        .map(|(_, value)| value)
         .ok_or(RelayError::InvalidLayout("required relay field is missing"))
 }
 
 fn string_field(
-    value: &DataValue,
+    entries: &[(DataTypeId, DataValue)],
     data_type: DataType,
     type_map: &TypeMap,
 ) -> Result<String, RelayError> {
-    field(value, data_type, type_map)?
+    field(entries, data_type, type_map)?
         .as_string()
         .filter(|value| !value.is_empty())
         .ok_or(RelayError::InvalidLayout(
@@ -328,21 +425,36 @@ fn string_field(
         ))
 }
 
-fn optional_metadata_field(
-    value: &DataValue,
+fn string_field_ref<'a>(
+    entries: &'a [(DataTypeId, DataValue)],
+    data_type: DataType,
     type_map: &TypeMap,
-) -> Result<Option<DataValue>, RelayError> {
-    Ok(value
-        .get_field(relay_field(DataType::Metadata, type_map)?)
-        .cloned())
+) -> Result<&'a str, RelayError> {
+    field(entries, data_type, type_map)?
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(RelayError::InvalidLayout(
+            "relay field is not a non-empty string",
+        ))
+}
+
+fn optional_metadata_field<'a>(
+    entries: &'a [(DataTypeId, DataValue)],
+    type_map: &TypeMap,
+) -> Result<Option<&'a DataValue>, RelayError> {
+    let field_id = relay_field(DataType::Metadata, type_map)?;
+    Ok(entries
+        .iter()
+        .find(|(id, _)| *id == field_id)
+        .map(|(_, value)| value))
 }
 
 fn unsigned_field(
-    value: &DataValue,
+    entries: &[(DataTypeId, DataValue)],
     data_type: DataType,
     type_map: &TypeMap,
 ) -> Result<u128, RelayError> {
-    field(value, data_type, type_map)?
+    field(entries, data_type, type_map)?
         .as_unsigned_number()
         .ok_or(RelayError::InvalidLayout("relay field is not unsigned"))
 }
@@ -356,55 +468,86 @@ struct RelayMetadataV1 {
     encrypted_content: DataValue,
 }
 
-fn relay_version(value: &DataValue, type_map: &TypeMap) -> Result<u64, RelayError> {
+fn relay_version(
+    entries: &[(DataTypeId, DataValue)],
+    type_map: &TypeMap,
+) -> Result<u64, RelayError> {
     let version_id = relay_field(DataType::RelayVersion, type_map)?;
-    let version = value
-        .get_field(version_id)
+    let version = entries
+        .iter()
+        .find(|(id, _)| *id == version_id)
+        .map(|(_, value)| value)
         .ok_or(RelayError::MissingRelayVersion)?
         .as_unsigned_number()
         .ok_or(RelayError::InvalidLayout("relay version is not unsigned"))?;
     u64::try_from(version).map_err(|_| RelayError::InvalidLayout("relay version is out of range"))
 }
 
-fn parse_relay_v1(value: &DataValue, type_map: &TypeMap) -> Result<RelayMetadataV1, RelayError> {
-    let final_recipient_id =
-        u64::try_from(unsigned_field(value, DataType::FinalRecipientId, type_map)?)
-            .map_err(|_| RelayError::InvalidLayout("final recipient ID is out of range"))?;
-    let created_at = u64::try_from(unsigned_field(value, DataType::CreatedAt, type_map)?)
+fn parse_relay_v1(
+    entries: &[(DataTypeId, DataValue)],
+    type_map: &TypeMap,
+    limits: &ProtectedLimits,
+) -> Result<RelayMetadataV1, RelayError> {
+    let final_recipient_id = u64::try_from(unsigned_field(
+        entries,
+        DataType::FinalRecipientId,
+        type_map,
+    )?)
+    .map_err(|_| RelayError::InvalidLayout("final recipient ID is out of range"))?;
+    let created_at = u64::try_from(unsigned_field(entries, DataType::CreatedAt, type_map)?)
         .map_err(|_| RelayError::InvalidLayout("created-at value is out of range"))?;
-    let encrypted_content = field(value, DataType::Content, type_map)?.clone();
+    let encrypted_content = field(entries, DataType::Content, type_map)?.clone();
     if encrypted_content.as_encrypted().is_none() {
         return Err(RelayError::InvalidLayout("content is not encrypted"));
     }
+    let message_id = string_field_ref(entries, DataType::MessageId, type_map)?;
+    if message_id.len() > limits.max_message_id_bytes {
+        return Err(RelayError::ResourceLimit("message ID"));
+    }
+    let metadata = optional_metadata_field(entries, type_map)?;
+    if let Some(metadata) = metadata {
+        validate_metadata_size(metadata, limits)?;
+    }
     Ok(RelayMetadataV1 {
         final_recipient_id,
-        message_id: string_field(value, DataType::MessageId, type_map)?,
+        message_id: message_id.to_owned(),
         created_at,
-        metadata: optional_metadata_field(value, type_map)?,
+        metadata: metadata.cloned(),
         encrypted_content,
     })
 }
 
-/// Decrypt and verify relay metadata, without opening its content.
-///
-/// `expected_signer_id` is required when the caller already knows the sender.
-/// For sealed-sender operation use [`open_relay_metadata_with`] and resolve a
-/// trusted key by the claimed, unverified signer ID. The ID is authenticated
-/// only after the returned key history verifies the signature.
-pub fn open_relay_metadata(
+pub fn open_relay_metadata_checked(
     frame: &CommunicationValue,
     keyring: &Keyring,
     expected_signer_id: u64,
     signer_public_key: &PublicKeyBundle,
-    policy: ProtectionPolicy,
+    options: RelayOpenOptions,
+    replay_guard: &mut dyn ReplayGuard,
 ) -> Result<VerifiedRelayMetadata, RelayError> {
-    open_relay_metadata_with(
+    open_relay_metadata_with_limits_checked(
         frame,
         std::slice::from_ref(&keyring),
         Some(expected_signer_id),
         |_| Some(vec![signer_public_key.clone()]),
-        policy,
-        None,
+        options,
+        replay_guard,
+    )
+}
+
+pub fn open_relay_metadata_without_replay(
+    frame: &CommunicationValue,
+    keyring: &Keyring,
+    expected_signer_id: u64,
+    signer_public_key: &PublicKeyBundle,
+    options: RelayOpenOptions,
+) -> Result<VerifiedRelayMetadata, RelayError> {
+    open_relay_metadata_with_limits_without_replay(
+        frame,
+        std::slice::from_ref(&keyring),
+        Some(expected_signer_id),
+        |_| Some(vec![signer_public_key.clone()]),
+        options,
     )
 }
 
@@ -425,15 +568,45 @@ fn validate_relay_frame(frame: &CommunicationValue) -> Result<(), RelayError> {
 /// signature or interpreting the versioned relay schema. The result is
 /// untrusted and may only select the key history that is then bound to the
 /// same signer ID during [`open_relay_metadata_with_keys`].
+#[deprecated(note = "use relay_metadata_claimed_signer_id_with_limits")]
 pub fn relay_metadata_claimed_signer_id(
     frame: &CommunicationValue,
     keyrings: &[&Keyring],
 ) -> Result<u64, RelayError> {
-    validate_relay_frame(frame)?;
+    // Migrate to `relay_metadata_claimed_signer_id_with_limits` at receive boundaries.
+    relay_metadata_claimed_signer_id_with_limits(frame, keyrings, DecodeLimits::default())
+}
 
-    let decrypted = frame.payload().decrypt_with_keyrings(
+pub fn relay_metadata_claimed_signer_id_with_limits(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    decode_limits: DecodeLimits,
+) -> Result<u64, RelayError> {
+    relay_metadata_claimed_signer_id_with_options(
+        frame,
+        keyrings,
+        decode_limits,
+        ProtectedLimits::default(),
+    )
+}
+
+/// Return the claimed relay signer ID while applying the complete receive
+/// policy, including the caller's decryption-key history bound.
+pub fn relay_metadata_claimed_signer_id_with_options(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    decode_limits: DecodeLimits,
+    protected_limits: ProtectedLimits,
+) -> Result<u64, RelayError> {
+    validate_relay_frame(frame)?;
+    if keyrings.len() > protected_limits.max_decryption_key_history {
+        return Err(RelayError::ResourceLimit("decryption key history"));
+    }
+
+    let decrypted = frame.payload().decrypt_with_keyrings_and_limits(
         keyrings,
         MtpProtectionPurpose::RelayMetadataEncryption.into(),
+        decode_limits,
     )?;
     let signed = decrypted
         .as_signed()
@@ -441,49 +614,118 @@ pub fn relay_metadata_claimed_signer_id(
     Ok(signed.signer_id)
 }
 
-/// Decrypt and verify relay metadata against an already resolved signing-key
-/// history. All relay version and field interpretation remains in the native
-/// codec rather than being duplicated by language bindings.
-pub fn open_relay_metadata_with_keys(
-    frame: &CommunicationValue,
-    keyrings: &[&Keyring],
-    expected_signer_id: u64,
-    signer_public_keys: &[PublicKeyBundle],
-    policy: ProtectionPolicy,
-) -> Result<VerifiedRelayMetadata, RelayError> {
-    let signer_public_keys = signer_public_keys.to_vec();
-    open_relay_metadata_with(
-        frame,
-        keyrings,
-        Some(expected_signer_id),
-        move |_| Some(signer_public_keys.clone()),
-        policy,
-        None,
-    )
-}
-
 /// Decrypt and verify relay metadata using recipient-key history and a
 /// signer-key resolver. The resolver receives a claimed, unverified signer
 /// ID used only as a trusted-key lookup key. The ID becomes authenticated
 /// only after signature verification. This is the native counterpart of the
 /// browser relay API and supports sealed sender plus signing-key rotation.
-pub fn open_relay_metadata_with<F>(
+pub fn open_relay_metadata_with_checked<F>(
     frame: &CommunicationValue,
     keyrings: &[&Keyring],
     expected_signer_id: Option<u64>,
     resolve_signer_keys: F,
-    policy: ProtectionPolicy,
+    options: RelayOpenOptions,
+    replay_guard: &mut dyn ReplayGuard,
+) -> Result<VerifiedRelayMetadata, RelayError>
+where
+    F: FnOnce(u64) -> Option<Vec<PublicKeyBundle>>,
+{
+    open_relay_metadata_with_limits_checked(
+        frame,
+        keyrings,
+        expected_signer_id,
+        resolve_signer_keys,
+        options,
+        replay_guard,
+    )
+}
+
+/// Open relay metadata for message processing with replay protection required
+/// by the type system.
+pub fn open_relay_metadata_with_limits_checked<F>(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    expected_signer_id: Option<u64>,
+    resolve_signer_keys: F,
+    options: RelayOpenOptions,
+    replay_guard: &mut dyn ReplayGuard,
+) -> Result<VerifiedRelayMetadata, RelayError>
+where
+    F: FnOnce(u64) -> Option<Vec<PublicKeyBundle>>,
+{
+    open_relay_metadata_impl(
+        frame,
+        keyrings,
+        expected_signer_id,
+        resolve_signer_keys,
+        options,
+        Some(replay_guard),
+    )
+}
+
+pub fn open_relay_metadata_with_without_replay<F>(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    expected_signer_id: Option<u64>,
+    resolve_signer_keys: F,
+    options: RelayOpenOptions,
+) -> Result<VerifiedRelayMetadata, RelayError>
+where
+    F: FnOnce(u64) -> Option<Vec<PublicKeyBundle>>,
+{
+    open_relay_metadata_with_limits_without_replay(
+        frame,
+        keyrings,
+        expected_signer_id,
+        resolve_signer_keys,
+        options,
+    )
+}
+
+/// Open relay metadata for stored/forensic use without replay protection.
+/// The name makes the security trade-off explicit at the call site.
+pub fn open_relay_metadata_with_limits_without_replay<F>(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    expected_signer_id: Option<u64>,
+    resolve_signer_keys: F,
+    options: RelayOpenOptions,
+) -> Result<VerifiedRelayMetadata, RelayError>
+where
+    F: FnOnce(u64) -> Option<Vec<PublicKeyBundle>>,
+{
+    open_relay_metadata_impl(
+        frame,
+        keyrings,
+        expected_signer_id,
+        resolve_signer_keys,
+        options,
+        None,
+    )
+}
+
+fn open_relay_metadata_impl<F>(
+    frame: &CommunicationValue,
+    keyrings: &[&Keyring],
+    expected_signer_id: Option<u64>,
+    resolve_signer_keys: F,
+    options: RelayOpenOptions,
     mut replay_guard: Option<&mut dyn ReplayGuard>,
 ) -> Result<VerifiedRelayMetadata, RelayError>
 where
-    F: Fn(u64) -> Option<Vec<PublicKeyBundle>>,
+    F: FnOnce(u64) -> Option<Vec<PublicKeyBundle>>,
 {
     validate_relay_frame(frame)?;
 
+    if keyrings.len() > options.protected_limits.max_decryption_key_history {
+        return Err(RelayError::ResourceLimit("decryption key history"));
+    }
+
     let type_map = frame.type_map().cloned().unwrap_or_else(TypeMap::latest);
-    let decrypted = frame.payload().decrypt_with_keyrings(
+    let decrypted = frame.payload().decrypt_with_keyrings_and_limits(
         keyrings,
         MtpProtectionPurpose::RelayMetadataEncryption.into(),
+        options.decode_limits,
     )?;
     let signed = decrypted
         .as_signed()
@@ -499,23 +741,30 @@ where
     }
     let signer_keys = resolve_signer_keys(signed.signer_id)
         .ok_or(ProtectionError::SignerKeyNotFound(signed.signer_id))?;
-    let matched_signer_key_index = signed.verify_with_key_history_index(
+    if signer_keys.len() > options.protected_limits.max_signer_key_history {
+        return Err(RelayError::ResourceLimit("signer key history"));
+    }
+    let matched_signer_key_index = signed.verify_with_key_history_index_and_limits(
         signed.signer_id,
         &signer_keys,
         MtpProtectionPurpose::RelayMetadataSignature.into(),
-        policy,
+        options.policy,
+        options.encode_limits,
     )?;
+    /* Verification leaves the signed envelope owned by `decrypted`; inspect
+    its entries in place to avoid a second attacker-controlled clone. */
     let metadata = signed
         .value
-        .as_container()
+        .container_entries()
         .ok_or(RelayError::InvalidLayout("metadata is not a container"))?;
-    let metadata = DataValue::Container(metadata);
-    let relay_version = relay_version(&metadata, &type_map)?;
+    let relay_version = relay_version(metadata, &type_map)?;
     let parsed = match relay_version {
-        1 => parse_relay_v1(&metadata, &type_map)?,
+        1 => parse_relay_v1(metadata, &type_map, &options.protected_limits)?,
         other => return Err(RelayError::UnsupportedRelayVersion(other)),
     };
-
+    if parsed.message_id.len() > options.protected_limits.max_message_id_bytes {
+        return Err(RelayError::ResourceLimit("message ID"));
+    }
     let result = VerifiedRelayMetadata {
         relay_version,
         signer_id: signed.signer_id,
@@ -526,6 +775,9 @@ where
         encrypted_content: parsed.encrypted_content,
         type_map,
         matched_signer_key_index,
+        decode_limits: options.decode_limits,
+        encode_limits: options.encode_limits,
+        protected_limits: options.protected_limits,
         _verified: VerifiedMarker,
     };
     if let Some(guard) = replay_guard.as_mut()
@@ -537,6 +789,7 @@ where
 }
 
 /// Open and verify content after metadata has been authenticated.
+#[deprecated(note = "use open_relay_content_with_limits_without_replay")]
 pub fn open_relay_content(
     metadata: &VerifiedRelayMetadata,
     keyring: &Keyring,
@@ -544,17 +797,23 @@ pub fn open_relay_content(
     expected_recipient_id: u64,
     policy: ProtectionPolicy,
 ) -> Result<VerifiedRelayContent, RelayError> {
-    open_relay_content_with_keys(
+    open_relay_content_with_limits_without_replay(
         metadata,
-        keyring,
+        std::slice::from_ref(&keyring),
         std::slice::from_ref(signer_public_key),
-        expected_recipient_id,
-        policy,
+        Some(expected_recipient_id),
+        RelayOpenOptions {
+            policy,
+            decode_limits: metadata.decode_limits,
+            encode_limits: metadata.encode_limits,
+            protected_limits: metadata.protected_limits,
+        },
     )
 }
 
 /// Open relay content against trusted signing-key history for the metadata's
 /// authenticated signer ID.
+#[deprecated(note = "use open_relay_content_with_limits_without_replay")]
 pub fn open_relay_content_with_keys(
     metadata: &VerifiedRelayMetadata,
     keyring: &Keyring,
@@ -562,18 +821,24 @@ pub fn open_relay_content_with_keys(
     expected_recipient_id: u64,
     policy: ProtectionPolicy,
 ) -> Result<VerifiedRelayContent, RelayError> {
-    open_relay_content_with_keyrings(
+    open_relay_content_with_limits_without_replay(
         metadata,
         std::slice::from_ref(&keyring),
         signer_public_keys,
         Some(expected_recipient_id),
-        policy,
+        RelayOpenOptions {
+            policy,
+            decode_limits: metadata.decode_limits,
+            encode_limits: metadata.encode_limits,
+            protected_limits: metadata.protected_limits,
+        },
     )
 }
 
 /// Open relay content against recipient-key history and trusted signing-key
 /// history. The expected final recipient is optional for callers that only
 /// have decryption material and do not have a local identity ID.
+#[deprecated(note = "use open_relay_content_with_limits_without_replay")]
 pub fn open_relay_content_with_keyrings(
     metadata: &VerifiedRelayMetadata,
     keyrings: &[&Keyring],
@@ -581,15 +846,96 @@ pub fn open_relay_content_with_keyrings(
     expected_recipient_id: Option<u64>,
     policy: ProtectionPolicy,
 ) -> Result<VerifiedRelayContent, RelayError> {
+    // Migrate to `open_relay_content_with_limits_without_replay` to keep the decode policy
+    // explicit across metadata and content opening.
+    open_relay_content_with_limits_without_replay(
+        metadata,
+        keyrings,
+        signer_public_keys,
+        expected_recipient_id,
+        RelayOpenOptions {
+            policy,
+            decode_limits: metadata.decode_limits,
+            encode_limits: metadata.encode_limits,
+            protected_limits: metadata.protected_limits,
+        },
+    )
+}
+
+#[deprecated(note = "use open_relay_content_with_limits_without_replay")]
+pub fn open_relay_content_with_keyrings_and_limits(
+    metadata: &VerifiedRelayMetadata,
+    keyrings: &[&Keyring],
+    signer_public_keys: &[PublicKeyBundle],
+    expected_recipient_id: Option<u64>,
+    options: RelayOpenOptions,
+) -> Result<VerifiedRelayContent, RelayError> {
+    open_relay_content_with_limits_without_replay(
+        metadata,
+        keyrings,
+        signer_public_keys,
+        expected_recipient_id,
+        options,
+    )
+}
+
+/// Compatibility alias for callers that already hold authenticated relay
+/// metadata. New code should use the explicit `_without_replay` name.
+#[deprecated(note = "use open_relay_content_with_limits_without_replay")]
+pub fn open_relay_content_with_limits(
+    metadata: &VerifiedRelayMetadata,
+    keyrings: &[&Keyring],
+    signer_public_keys: &[PublicKeyBundle],
+    expected_recipient_id: Option<u64>,
+    options: RelayOpenOptions,
+) -> Result<VerifiedRelayContent, RelayError> {
+    open_relay_content_with_limits_without_replay(
+        metadata,
+        keyrings,
+        signer_public_keys,
+        expected_recipient_id,
+        options,
+    )
+}
+
+/// Open relay content after the authenticated metadata operation without
+/// making a second replay decision. Replay is consumed by the metadata
+/// processing boundary; this explicit name prevents callers from mistaking
+/// content opening for an independent replay check.
+pub fn open_relay_content_with_limits_without_replay(
+    metadata: &VerifiedRelayMetadata,
+    keyrings: &[&Keyring],
+    signer_public_keys: &[PublicKeyBundle],
+    expected_recipient_id: Option<u64>,
+    options: RelayOpenOptions,
+) -> Result<VerifiedRelayContent, RelayError> {
+    let options = RelayOpenOptions {
+        policy: options.policy,
+        decode_limits: restrict_decode_limits(options.decode_limits, metadata.decode_limits),
+        encode_limits: restrict_encode_limits(options.encode_limits, metadata.encode_limits),
+        protected_limits: restrict_protected_limits(
+            options.protected_limits,
+            metadata.protected_limits,
+        ),
+    };
     if expected_recipient_id.is_some_and(|id| metadata.final_recipient_id != id) {
         return Err(RelayError::NotFinalRecipient);
     }
+    if keyrings.len() > options.protected_limits.max_decryption_key_history {
+        return Err(RelayError::ResourceLimit("decryption key history"));
+    }
+    if signer_public_keys.len() > options.protected_limits.max_signer_key_history {
+        return Err(RelayError::ResourceLimit("signer key history"));
+    }
 
     let type_map = &metadata.type_map;
-    let decrypted = metadata.encrypted_content.decrypt_with_keyrings(
-        keyrings,
-        MtpProtectionPurpose::RelayContentEncryption.into(),
-    )?;
+    let decrypted = metadata
+        .encrypted_content
+        .decrypt_with_keyrings_and_limits(
+            keyrings,
+            MtpProtectionPurpose::RelayContentEncryption.into(),
+            options.decode_limits,
+        )?;
     let signed = decrypted
         .as_signed()
         .ok_or(RelayError::InvalidLayout("content is not signed"))?;
@@ -600,25 +946,58 @@ pub fn open_relay_content_with_keyrings(
     }
     // Content is a separately signed value and must not inherit a weaker
     // metadata policy.
-    signed.verify_with_key_history(
+    signed.verify_with_key_history_and_limits(
         metadata.signer_id,
         signer_public_keys,
         MtpProtectionPurpose::RelayContentSignature.into(),
-        policy,
+        options.policy,
+        options.encode_limits,
     )?;
     let content = signed
         .value
-        .as_container()
+        .container_entries()
         .ok_or(RelayError::InvalidLayout("content is not a container"))?;
-    let content = DataValue::Container(content);
-    let message_type = string_field(&content, DataType::MessageType, type_map)?;
+    let message_type = string_field(content, DataType::MessageType, type_map)?;
     validate_application_message_type(&message_type, type_map)?;
     Ok(VerifiedRelayContent {
         signer_id: signed.signer_id,
         final_recipient_id: metadata.final_recipient_id,
         message_type,
-        content: field(&content, DataType::Content, type_map)?.clone(),
+        content: field(content, DataType::Content, type_map)?.clone(),
     })
+}
+
+fn restrict_decode_limits(left: DecodeLimits, right: DecodeLimits) -> DecodeLimits {
+    DecodeLimits {
+        max_depth: left.max_depth.min(right.max_depth),
+        max_values: left.max_values.min(right.max_values),
+        max_blob_size: left.max_blob_size.min(right.max_blob_size),
+        max_recipients: left.max_recipients.min(right.max_recipients),
+        max_allocated_bytes: left.max_allocated_bytes.min(right.max_allocated_bytes),
+    }
+}
+
+fn restrict_encode_limits(left: EncodeLimits, right: EncodeLimits) -> EncodeLimits {
+    EncodeLimits {
+        max_depth: left.max_depth.min(right.max_depth),
+        max_values: left.max_values.min(right.max_values),
+        max_output_size: left.max_output_size.min(right.max_output_size),
+    }
+}
+
+fn restrict_protected_limits(left: ProtectedLimits, right: ProtectedLimits) -> ProtectedLimits {
+    ProtectedLimits {
+        max_message_id_bytes: left.max_message_id_bytes.min(right.max_message_id_bytes),
+        max_metadata_encoded_bytes: left
+            .max_metadata_encoded_bytes
+            .min(right.max_metadata_encoded_bytes),
+        max_signer_key_history: left
+            .max_signer_key_history
+            .min(right.max_signer_key_history),
+        max_decryption_key_history: left
+            .max_decryption_key_history
+            .min(right.max_decryption_key_history),
+    }
 }
 
 /// Change only the clear next-hop routing field of a sealed relay frame.
@@ -636,11 +1015,76 @@ pub fn forward_relay_frame(
 mod tests {
     use super::*;
     use crate::InMemoryReplayGuard;
-    use mtp_crypto::{Ed25519Signer, Keyring};
+    use mtp_crypto::{Ed25519Signer, Keyring, PublicKeyBundle};
     use mtp_type_map::DataTypeId;
 
     fn ed_signer(keyring: &Keyring) -> Ed25519Signer {
         Ed25519Signer::new(&keyring.sig_cl_secret_key).expect("Ed25519 signer")
+    }
+
+    // Test-only compatibility shims keep older fixture setup readable while
+    // routing every invocation to an explicit replay choice in production.
+    fn open_relay_metadata(
+        frame: &CommunicationValue,
+        keyring: &Keyring,
+        expected_signer_id: u64,
+        signer_public_key: &PublicKeyBundle,
+        policy: ProtectionPolicy,
+    ) -> Result<VerifiedRelayMetadata, RelayError> {
+        super::open_relay_metadata_without_replay(
+            frame,
+            keyring,
+            expected_signer_id,
+            signer_public_key,
+            RelayOpenOptions::new(policy),
+        )
+    }
+
+    fn open_relay_metadata_with<F>(
+        frame: &CommunicationValue,
+        keyrings: &[&Keyring],
+        expected_signer_id: Option<u64>,
+        resolve_signer_keys: F,
+        policy: ProtectionPolicy,
+        replay_guard: Option<&mut dyn ReplayGuard>,
+    ) -> Result<VerifiedRelayMetadata, RelayError>
+    where
+        F: Fn(u64) -> Option<Vec<PublicKeyBundle>>,
+    {
+        match replay_guard {
+            Some(replay_guard) => super::open_relay_metadata_with_checked(
+                frame,
+                keyrings,
+                expected_signer_id,
+                resolve_signer_keys,
+                RelayOpenOptions::new(policy),
+                replay_guard,
+            ),
+            None => super::open_relay_metadata_with_without_replay(
+                frame,
+                keyrings,
+                expected_signer_id,
+                resolve_signer_keys,
+                RelayOpenOptions::new(policy),
+            ),
+        }
+    }
+
+    fn open_relay_metadata_with_keys(
+        frame: &CommunicationValue,
+        keyrings: &[&Keyring],
+        expected_signer_id: u64,
+        signer_public_keys: &[PublicKeyBundle],
+        policy: ProtectionPolicy,
+    ) -> Result<VerifiedRelayMetadata, RelayError> {
+        let signer_public_keys = signer_public_keys.to_vec();
+        super::open_relay_metadata_with_limits_without_replay(
+            frame,
+            keyrings,
+            Some(expected_signer_id),
+            move |_| Some(signer_public_keys),
+            RelayOpenOptions::new(policy),
+        )
     }
 
     fn relay_frame_with_version(
@@ -873,6 +1317,22 @@ mod tests {
         assert_eq!(metadata.message_id(), "message-1");
         assert_eq!(metadata.created_at(), 123);
         assert_eq!(metadata.metadata(), Some(&application_metadata));
+
+        let mut limited_options = RelayOpenOptions::new(policy);
+        limited_options.protected_limits.max_message_id_bytes = 1;
+        let mut limited_guard = InMemoryReplayGuard::default();
+        assert!(matches!(
+            open_relay_metadata_with_limits_checked(
+                &frame,
+                &[&metadata_recipient],
+                None,
+                |signer_id| (signer_id == 7).then(|| vec![sender.public_key_bundle()]),
+                limited_options,
+                &mut limited_guard,
+            ),
+            Err(RelayError::ResourceLimit("message ID"))
+        ));
+        assert_eq!(limited_guard.len(), 0);
 
         // A final recipient may be included in the metadata recipient set and
         // therefore open both authenticated layers directly.

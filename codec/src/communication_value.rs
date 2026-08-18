@@ -2,7 +2,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::fmt;
 use std::io::Cursor;
 
-use crate::data_value::{DataKind, DataValue, DecodeLimits};
+use crate::data_value::{DataKind, DataValue, DecodeError, DecodeLimits, EncodeLimits};
 use crate::rand_u32;
 use mtp_common::CodecError;
 use mtp_type_map::{
@@ -260,23 +260,50 @@ impl CommunicationValue {
 
     #[must_use]
     pub fn reply_to(&self, comm_type: CommunicationType) -> Self {
-        let mut response = Self::new(comm_type);
+        let type_map = self
+            .type_map
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(TypeMap::latest);
+        let mut response = Self::new_with_type_map(comm_type, &type_map);
         response.sender = self.receiver;
         response.receiver = self.sender;
         response
     }
 
-    pub fn merge(&mut self, other: &Self) {
-        if self.mapping_error.is_none() {
-            self.mapping_error.clone_from(&other.mapping_error);
+    /// Merge clear container fields after confirming both values use the same
+    /// negotiated type map.
+    pub fn try_merge(&mut self, other: &Self) -> Result<(), CodecError> {
+        if let Some(error) = &self.mapping_error {
+            return Err(error.clone());
         }
-        let Some(other_entries) = other.payload.container_entries() else {
-            self.mapping_error
-                .get_or_insert(CodecError::InvalidEncoding);
-            return;
-        };
+        let left = self.type_map().ok_or(CodecError::MissingTypeMap)?;
+        let right = other.type_map().ok_or(CodecError::MissingTypeMap)?;
+        if left.version != right.version {
+            return Err(CodecError::TypeMapMismatch {
+                expected: left.version.to_string(),
+                actual: right.version.to_string(),
+            });
+        }
+        if let Some(error) = &other.mapping_error {
+            return Err(error.clone());
+        }
+        let other_entries = other
+            .payload
+            .container_entries()
+            .ok_or(CodecError::InvalidEncoding)?;
         for (id, value) in other_entries {
-            let _ = self.insert_data(*id, value.clone());
+            self.insert_data(*id, value.clone())?;
+        }
+        Ok(())
+    }
+
+    // Migrate to `try_merge` so a map mismatch cannot be silently recorded in
+    // a frame that is later sent over the wire.
+    #[deprecated(note = "migrate to try_merge to handle negotiated type-map mismatches")]
+    pub fn merge(&mut self, other: &Self) {
+        if let Err(error) = self.try_merge(other) {
+            self.mapping_error.get_or_insert(error);
         }
     }
 
@@ -315,9 +342,22 @@ impl CommunicationValue {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, CodecError> {
+        self.to_bytes_with_limits(EncodeLimits::default())
+    }
+
+    pub fn to_bytes_with_limits(&self, limits: EncodeLimits) -> Result<Vec<u8>, CodecError> {
         if let Some(error) = &self.mapping_error {
             return Err(error.clone());
         }
+        let header_len = self.frame_header_len();
+        let payload_limit = limits
+            .max_output_size
+            .checked_sub(header_len)
+            .ok_or(CodecError::TooManyEntries)?;
+        let payload = self.payload.to_bytes_with_limits(EncodeLimits {
+            max_output_size: payload_limit,
+            ..limits
+        })?;
         let mut body = Vec::new();
         body.write_u16::<BigEndian>(self.comm_type.0)
             .map_err(|_| CodecError::InvalidEncoding)?;
@@ -344,13 +384,27 @@ impl CommunicationValue {
             body.write_u64::<BigEndian>(receiver)
                 .map_err(|_| CodecError::InvalidEncoding)?;
         }
-        body.extend_from_slice(&self.payload.to_bytes()?);
+        body.extend_from_slice(&payload);
         let length = u32::try_from(body.len()).map_err(|_| CodecError::TooManyEntries)?;
-        let mut out = Vec::with_capacity(4 + body.len());
+        let total_len = 4usize
+            .checked_add(body.len())
+            .ok_or(CodecError::TooManyEntries)?;
+        if total_len > limits.max_output_size {
+            return Err(CodecError::TooManyEntries);
+        }
+        let mut out = Vec::with_capacity(total_len);
         out.write_u32::<BigEndian>(length)
             .map_err(|_| CodecError::InvalidEncoding)?;
         out.extend_from_slice(&body);
         Ok(out)
+    }
+
+    fn frame_header_len(&self) -> usize {
+        4 + 2
+            + 1
+            + self.id.is_some() as usize * 4
+            + self.sender.is_some() as usize * 8
+            + self.receiver.is_some() as usize * 8
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CodecError> {
@@ -358,30 +412,43 @@ impl CommunicationValue {
     }
 
     pub fn from_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Self, CodecError> {
+        Self::try_from_bytes_with_limits(bytes, limits).map_err(|_| CodecError::InvalidEncoding)
+    }
+
+    pub fn try_from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::try_from_bytes_with_limits(bytes, DecodeLimits::default())
+    }
+
+    pub fn try_from_bytes_with_limits(
+        bytes: &[u8],
+        limits: DecodeLimits,
+    ) -> Result<Self, DecodeError> {
         let mut cursor = Cursor::new(bytes);
         let length = cursor
             .read_u32::<BigEndian>()
-            .map_err(|_| CodecError::InvalidEncoding)? as usize;
+            .map_err(|_| DecodeError::MalformedEncoding)? as usize;
         let end = 4usize
             .checked_add(length)
-            .ok_or(CodecError::InvalidEncoding)?;
+            .ok_or(DecodeError::MalformedEncoding)?;
         if end != bytes.len() {
-            return Err(CodecError::InvalidEncoding);
+            return Err(DecodeError::MalformedEncoding);
         }
         let comm_type = CommunicationTypeId(
             cursor
                 .read_u16::<BigEndian>()
-                .map_err(|_| CodecError::InvalidEncoding)?,
+                .map_err(|_| DecodeError::MalformedEncoding)?,
         );
-        let flags = cursor.read_u8().map_err(|_| CodecError::InvalidEncoding)?;
+        let flags = cursor
+            .read_u8()
+            .map_err(|_| DecodeError::MalformedEncoding)?;
         if flags & !FLAG_KNOWN != 0 {
-            return Err(CodecError::InvalidEncoding);
+            return Err(DecodeError::MalformedEncoding);
         }
         let id = if flags & FLAG_HAS_ID != 0 {
             Some(
                 cursor
                     .read_u32::<BigEndian>()
-                    .map_err(|_| CodecError::InvalidEncoding)?,
+                    .map_err(|_| DecodeError::MalformedEncoding)?,
             )
         } else {
             None
@@ -390,7 +457,7 @@ impl CommunicationValue {
             Some(
                 cursor
                     .read_u64::<BigEndian>()
-                    .map_err(|_| CodecError::InvalidEncoding)?,
+                    .map_err(|_| DecodeError::MalformedEncoding)?,
             )
         } else {
             None
@@ -399,14 +466,14 @@ impl CommunicationValue {
             Some(
                 cursor
                     .read_u64::<BigEndian>()
-                    .map_err(|_| CodecError::InvalidEncoding)?,
+                    .map_err(|_| DecodeError::MalformedEncoding)?,
             )
         } else {
             None
         };
-        let payload = DataValue::read_from_with_limits(&mut cursor, limits)?;
+        let payload = DataValue::read_from_with_diagnostics(&mut cursor, limits)?;
         if cursor.position() as usize != end {
-            return Err(CodecError::InvalidEncoding);
+            return Err(DecodeError::MalformedEncoding);
         }
         Ok(Self {
             id,
@@ -420,13 +487,36 @@ impl CommunicationValue {
     }
 
     pub fn from_bytes_with(bytes: &[u8], type_map: &TypeMap) -> Result<Self, CodecError> {
-        let mut value = Self::from_bytes(bytes)?;
+        Self::try_from_bytes_with(bytes, type_map).map_err(|_| CodecError::InvalidEncoding)
+    }
+
+    pub fn try_from_bytes_with(bytes: &[u8], type_map: &TypeMap) -> Result<Self, DecodeError> {
+        Self::try_from_bytes_with_type_map_and_limits(bytes, type_map, DecodeLimits::default())
+    }
+
+    pub fn try_from_bytes_with_type_map_and_limits(
+        bytes: &[u8],
+        type_map: &TypeMap,
+        limits: DecodeLimits,
+    ) -> Result<Self, DecodeError> {
+        let mut value = Self::try_from_bytes_with_limits(bytes, limits)?;
         value.set_type_map(type_map);
         Ok(value)
     }
 
     #[cfg(feature = "registry")]
     pub fn migrate(&self, target: &TypeMap) -> Result<Self, CodecError> {
+        self.migrate_with_limits(target, EncodeLimits::default())
+    }
+
+    /// Migrate a clear frame while bounding the recursive traversal used to
+    /// translate its type IDs.
+    #[cfg(feature = "registry")]
+    pub fn migrate_with_limits(
+        &self,
+        target: &TypeMap,
+        limits: EncodeLimits,
+    ) -> Result<Self, CodecError> {
         if let Some(error) = &self.mapping_error {
             return Err(error.clone());
         }
@@ -441,7 +531,8 @@ impl CommunicationValue {
                 .comm_id_enum(comm)
                 .ok_or_else(|| CodecError::UnknownCommunicationType(comm_name.to_string()))?,
         );
-        let payload = migrate_data_value(&self.payload, source, target)?;
+        let mut context = MigrationContext::new(limits);
+        let payload = migrate_data_value(&self.payload, source, target, &mut context)?;
         Ok(Self {
             id: self.id,
             comm_type,
@@ -455,14 +546,62 @@ impl CommunicationValue {
 }
 
 #[cfg(feature = "registry")]
+struct MigrationContext {
+    limits: EncodeLimits,
+    depth: usize,
+    values: usize,
+}
+
+#[cfg(feature = "registry")]
+impl MigrationContext {
+    fn new(limits: EncodeLimits) -> Self {
+        Self {
+            limits,
+            depth: 0,
+            values: 0,
+        }
+    }
+
+    fn value(&mut self) -> Result<(), CodecError> {
+        self.values = self
+            .values
+            .checked_add(1)
+            .ok_or(CodecError::TooManyEntries)?;
+        if self.values > self.limits.max_values {
+            return Err(CodecError::TooManyEntries);
+        }
+        Ok(())
+    }
+
+    fn enter(&mut self) -> Result<(), CodecError> {
+        self.depth = self
+            .depth
+            .checked_add(1)
+            .ok_or(CodecError::TooManyEntries)?;
+        if self.depth > self.limits.max_depth {
+            return Err(CodecError::TooManyEntries);
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+}
+
+#[cfg(feature = "registry")]
 fn migrate_data_value(
     value: &DataValue,
     source: &TypeMap,
     target: &TypeMap,
+    context: &mut MigrationContext,
 ) -> Result<DataValue, CodecError> {
+    context.value()?;
     match value {
         DataValue::Container(entries) => {
-            let mut migrated = Vec::with_capacity(entries.len());
+            context.enter()?;
+            let count = u16::try_from(entries.len()).map_err(|_| CodecError::TooManyEntries)?;
+            let mut migrated = Vec::with_capacity(usize::from(count));
             for (old_id, value) in entries {
                 let name = source
                     .data_type_name(old_id.0)
@@ -474,16 +613,20 @@ fn migrate_data_value(
                         .data_id_enum(data)
                         .ok_or_else(|| CodecError::UnknownDataType(name.to_string()))?,
                 );
-                migrated.push((new_id, migrate_data_value(value, source, target)?));
+                migrated.push((new_id, migrate_data_value(value, source, target, context)?));
             }
+            context.leave();
             Ok(DataValue::Container(migrated))
         }
-        DataValue::Array(values) => Ok(DataValue::Array(
-            values
-                .iter()
-                .map(|value| migrate_data_value(value, source, target))
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
+        DataValue::Array(values) => {
+            context.enter()?;
+            let mut migrated = Vec::with_capacity(values.len());
+            for value in values {
+                migrated.push(migrate_data_value(value, source, target, context)?);
+            }
+            context.leave();
+            Ok(DataValue::Array(migrated))
+        }
         #[cfg(feature = "crypto")]
         DataValue::Signed(_) | DataValue::Encrypted(_) => Err(CodecError::InvalidEncoding),
         scalar => Ok(scalar.clone()),
@@ -639,6 +782,39 @@ mod tests {
             .with_payload(DataValue::Bytes(vec![1]));
         assert!(frame.data().is_none());
         assert_eq!(frame.get_data(DataType::Version), None);
+    }
+
+    #[test]
+    fn replies_retain_the_request_type_map() {
+        let type_map = TypeMap::new(mtp_type_map::Version::new(3, 0));
+        let request = CommunicationValue::new_with_type_map(CommunicationType::Ping, &type_map)
+            .with_sender(7)
+            .with_receiver(9);
+        let reply = request.reply_to(CommunicationType::Pong);
+
+        assert_eq!(
+            reply.type_map().map(|map| &map.version),
+            Some(&type_map.version)
+        );
+        assert_eq!(reply.sender(), Some(9));
+        assert_eq!(reply.receiver(), Some(7));
+    }
+
+    #[test]
+    fn try_merge_rejects_frames_from_different_type_maps() {
+        let left_map = TypeMap::new(mtp_type_map::Version::new(3, 0));
+        let right_map = TypeMap::new(mtp_type_map::Version::new(4, 0));
+        let mut left = CommunicationValue::new_with_type_map(CommunicationType::Ping, &left_map);
+        let right = CommunicationValue::new_with_type_map(CommunicationType::Ping, &right_map);
+
+        assert_eq!(
+            left.try_merge(&right),
+            Err(CodecError::TypeMapMismatch {
+                expected: "3.0".into(),
+                actual: "4.0".into(),
+            })
+        );
+        assert_eq!(left.data_len(), 0);
     }
 
     #[test]

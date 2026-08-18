@@ -1,10 +1,11 @@
 use base64::Engine;
 use base64::engine::general_purpose;
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, ReadBytesExt};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
+use std::mem::size_of;
 
 use mtp_common::CodecError;
 use mtp_type_map::DataTypeId;
@@ -46,7 +47,7 @@ pub enum DataKind {
 /// limits. These are conservative defaults for transported frames; callers
 /// handling a different trust boundary can opt into stricter limits with
 /// [`DataValue::from_bytes_with_limits`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DecodeLimits {
     /// Maximum number of nested `Array`, `Container`, and `Signed` wrappers.
     pub max_depth: usize,
@@ -57,6 +58,8 @@ pub struct DecodeLimits {
     pub max_blob_size: usize,
     /// Maximum number of recipients in one encrypted envelope.
     pub max_recipients: usize,
+    /// Maximum aggregate memory allocated for owned decoder output.
+    pub max_allocated_bytes: usize,
 }
 
 impl Default for DecodeLimits {
@@ -66,9 +69,16 @@ impl Default for DecodeLimits {
             max_values: 65_536,
             max_blob_size: 16 * 1024 * 1024,
             max_recipients: 64,
+            max_allocated_bytes: 64 * 1024 * 1024,
         }
     }
 }
+
+/// Conservative multiplier used when deriving decoder allocation capacity
+/// from an admitted transport frame.  A frame can result in owned wrapper,
+/// recipient, ciphertext, and value allocations, so this is intentionally
+/// larger than the number of bytes on the wire.
+pub const DEFAULT_TRANSPORT_ALLOCATION_FACTOR: u64 = 4;
 
 impl DecodeLimits {
     /// Derive codec allocation limits from the transport's admitted complete
@@ -76,11 +86,63 @@ impl DecodeLimits {
     /// from being rejected by an unrelated hard-coded blob bound while still
     /// preserving recursive and recipient-count limits.
     pub fn for_transport_message_size(max_message_size: u64) -> Self {
+        Self::for_transport_message_size_with_allocation_factor(
+            max_message_size,
+            DEFAULT_TRANSPORT_ALLOCATION_FACTOR,
+        )
+    }
+
+    /// Derive transport limits with an explicit allocation multiplier.
+    ///
+    /// The multiplier is a deployment knob for transports whose crypto or
+    /// framing implementation has a different copy profile. A zero value is
+    /// treated as one so the allocation budget never becomes accidentally
+    /// unbounded by arithmetic underflow or unusably small by configuration.
+    pub fn for_transport_message_size_with_allocation_factor(
+        max_message_size: u64,
+        allocation_factor: u64,
+    ) -> Self {
         let max_blob_size = usize::try_from(max_message_size.saturating_sub(4))
             .unwrap_or(usize::MAX)
             .min(u32::MAX as usize);
+        let allocation_factor = allocation_factor.max(1);
+        let max_allocated_bytes =
+            usize::try_from(max_message_size.saturating_mul(allocation_factor))
+                .unwrap_or(usize::MAX);
         Self {
             max_blob_size,
+            max_allocated_bytes,
+            ..Self::default()
+        }
+    }
+}
+
+/// Resource limits applied while encoding recursive `DataValue` structures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EncodeLimits {
+    /// Maximum number of nested `Array`, `Container`, and `Signed` wrappers.
+    pub max_depth: usize,
+    /// Maximum number of `DataValue` nodes in one encoded value.
+    pub max_values: usize,
+    /// Maximum serialized size of the encoded value.
+    pub max_output_size: usize,
+}
+
+impl Default for EncodeLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: 64,
+            max_values: 65_536,
+            max_output_size: 16 * 1024 * 1024,
+        }
+    }
+}
+
+impl EncodeLimits {
+    /// Derive encoder limits from the transport's admitted complete frame size.
+    pub fn for_transport_message_size(max_message_size: u64) -> Self {
+        Self {
+            max_output_size: usize::try_from(max_message_size).unwrap_or(usize::MAX),
             ..Self::default()
         }
     }
@@ -91,6 +153,36 @@ struct DecodeContext {
     limits: DecodeLimits,
     depth: usize,
     values: usize,
+    allocated_bytes: usize,
+}
+
+/// Structured failures returned by the diagnostic decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DecodeError {
+    #[error("malformed encoding")]
+    MalformedEncoding,
+    #[error("decoder nesting depth limit exceeded")]
+    DepthLimit,
+    #[error("decoder value-count limit exceeded")]
+    ValueCountLimit,
+    #[error("decoder blob-size limit exceeded")]
+    BlobLimit,
+    #[error("decoder allocation limit exceeded")]
+    AllocationLimit,
+    #[error("decoder recipient-count limit exceeded")]
+    RecipientLimit,
+    #[error("duplicate container field")]
+    DuplicateField,
+}
+
+// Keep the name used by the original internal diagnostics in this module.
+type DecodeFailure = DecodeError;
+
+#[derive(Debug, Clone, Copy)]
+struct EncodeContext {
+    limits: EncodeLimits,
+    depth: usize,
+    values: usize,
 }
 
 impl DecodeContext {
@@ -99,25 +191,86 @@ impl DecodeContext {
             limits,
             depth: 0,
             values: 0,
+            allocated_bytes: 0,
         }
     }
 
-    fn value(&mut self) -> Option<()> {
-        self.values = self.values.checked_add(1)?;
-        (self.values <= self.limits.max_values).then_some(())
+    fn allocate(&mut self, bytes: usize) -> Result<(), DecodeFailure> {
+        self.allocated_bytes = self
+            .allocated_bytes
+            .checked_add(bytes)
+            .ok_or(DecodeFailure::AllocationLimit)?;
+        if self.allocated_bytes > self.limits.max_allocated_bytes {
+            return Err(DecodeFailure::AllocationLimit);
+        }
+        Ok(())
     }
 
-    fn enter(&mut self) -> Option<()> {
-        self.depth = self.depth.checked_add(1)?;
-        if self.depth <= self.limits.max_depth {
-            Some(())
-        } else {
-            None
-        }
+    fn value(&mut self) -> Result<(), DecodeFailure> {
+        self.values = self
+            .values
+            .checked_add(1)
+            .ok_or(DecodeFailure::ValueCountLimit)?;
+        (self.values <= self.limits.max_values)
+            .then_some(())
+            .ok_or(DecodeFailure::ValueCountLimit)
+    }
+
+    fn enter(&mut self) -> Result<(), DecodeFailure> {
+        self.depth = self.depth.checked_add(1).ok_or(DecodeFailure::DepthLimit)?;
+        (self.depth <= self.limits.max_depth)
+            .then_some(())
+            .ok_or(DecodeFailure::DepthLimit)
     }
 
     fn leave(&mut self) {
         self.depth = self.depth.saturating_sub(1);
+    }
+}
+
+impl EncodeContext {
+    fn new(limits: EncodeLimits) -> Self {
+        Self {
+            limits,
+            depth: 0,
+            values: 0,
+        }
+    }
+
+    fn value(&mut self) -> Result<(), CodecError> {
+        self.values = self
+            .values
+            .checked_add(1)
+            .ok_or(CodecError::TooManyEntries)?;
+        if self.values > self.limits.max_values {
+            return Err(CodecError::TooManyEntries);
+        }
+        Ok(())
+    }
+
+    fn enter(&mut self) -> Result<(), CodecError> {
+        self.depth = self
+            .depth
+            .checked_add(1)
+            .ok_or(CodecError::TooManyEntries)?;
+        if self.depth > self.limits.max_depth {
+            return Err(CodecError::TooManyEntries);
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    fn check_output(&self, current: usize, additional: usize) -> Result<(), CodecError> {
+        let next = current
+            .checked_add(additional)
+            .ok_or(CodecError::TooManyEntries)?;
+        if next > self.limits.max_output_size {
+            return Err(CodecError::TooManyEntries);
+        }
+        Ok(())
     }
 }
 
@@ -273,6 +426,31 @@ pub struct ProtectionPolicy {
 #[cfg(feature = "crypto")]
 impl Default for ProtectionPolicy {
     fn default() -> Self {
+        // Boundary verification should not silently widen when a new
+        // signature suite is compiled in. Callers that intentionally need
+        // the historical permissive behavior must opt into
+        // `ProtectionPolicy::any_supported()` explicitly.
+        Self::ed25519()
+    }
+}
+
+#[cfg(feature = "crypto")]
+impl ProtectionPolicy {
+    pub const fn ed25519() -> Self {
+        Self {
+            signature: SignaturePolicy::Ed25519,
+        }
+    }
+
+    pub const fn dual() -> Self {
+        Self {
+            signature: SignaturePolicy::Dual,
+        }
+    }
+
+    /// Explicit compatibility profile for callers that must accept every
+    /// signature suite compiled into the current build.
+    pub const fn any_supported() -> Self {
         Self {
             signature: SignaturePolicy::AnySupported,
         }
@@ -310,6 +488,8 @@ pub enum ProtectionError {
     SignerIdMismatch { expected: u64, actual: u64 },
     #[error("no verification key for signer ID {0}")]
     SignerKeyNotFound(u64),
+    #[error("protected resource limit exceeded: {0}")]
+    ResourceLimit(&'static str),
     #[error("codec error: {0}")]
     Codec(#[from] CodecError),
     #[error("crypto error: {0}")]
@@ -557,7 +737,20 @@ impl DataValue {
         purpose: ProtectionPurpose,
         signer: &(impl SignatureScheme + ?Sized),
     ) -> Result<Self, ProtectionError> {
-        let inner = self.to_bytes()?;
+        self.sign_with_limits(signer_id, purpose, signer, EncodeLimits::default())
+    }
+
+    /// Sign after bounding the recursive serialization used to construct the
+    /// authenticated bytes.
+    #[cfg(feature = "crypto")]
+    pub fn sign_with_limits(
+        self,
+        signer_id: u64,
+        purpose: ProtectionPurpose,
+        signer: &(impl SignatureScheme + ?Sized),
+        limits: EncodeLimits,
+    ) -> Result<Self, ProtectionError> {
+        let inner = self.to_bytes_with_limits(limits)?;
         let algorithm = signer.algorithm();
         let signing_bytes = signed_message(algorithm, purpose.0, signer_id, &inner);
         let signature = signer.sign(&signing_bytes)?;
@@ -572,6 +765,7 @@ impl DataValue {
     }
 
     #[cfg(feature = "crypto")]
+    #[deprecated(note = "migrate to verify_with_policy with an explicit ProtectionPolicy")]
     /// Verify with the compatibility policy that accepts any supported suite.
     /// Protocol boundaries should prefer [`Self::verify_with_policy`].
     pub fn verify(
@@ -584,7 +778,7 @@ impl DataValue {
             expected_signer_id,
             public_keys,
             expected_purpose,
-            ProtectionPolicy::default(),
+            ProtectionPolicy::any_supported(),
         )
     }
 
@@ -605,6 +799,7 @@ impl DataValue {
     }
 
     #[cfg(feature = "crypto")]
+    #[deprecated(note = "migrate to verify_with_resolver_policy with an explicit ProtectionPolicy")]
     pub fn verify_with<F>(
         &self,
         resolve: F,
@@ -613,7 +808,11 @@ impl DataValue {
     where
         F: FnOnce(u64) -> Option<PublicKeyBundle>,
     {
-        self.verify_with_resolver_policy(resolve, expected_purpose, ProtectionPolicy::default())
+        self.verify_with_resolver_policy(
+            resolve,
+            expected_purpose,
+            ProtectionPolicy::any_supported(),
+        )
     }
 
     #[cfg(feature = "crypto")]
@@ -637,6 +836,7 @@ impl DataValue {
     }
 
     #[cfg(feature = "crypto")]
+    #[deprecated(note = "migrate to into_verified_with_policy with an explicit ProtectionPolicy")]
     /// Consume a signed value using the compatibility policy that accepts any
     /// supported suite. Protocol boundaries should prefer the policy-aware
     /// counterpart.
@@ -650,7 +850,7 @@ impl DataValue {
             expected_signer_id,
             public_keys,
             expected_purpose,
-            ProtectionPolicy::default(),
+            ProtectionPolicy::any_supported(),
         )
     }
 
@@ -679,7 +879,18 @@ impl DataValue {
         recipients: &[PublicKeyBundle],
         purpose: ProtectionPurpose,
     ) -> Result<Self, ProtectionError> {
-        let plaintext = self.to_bytes()?;
+        self.encrypt_for_with_limits(recipients, purpose, EncodeLimits::default())
+    }
+
+    /// Encrypt after bounding the recursive serialization of the plaintext.
+    #[cfg(feature = "crypto")]
+    pub fn encrypt_for_with_limits(
+        self,
+        recipients: &[PublicKeyBundle],
+        purpose: ProtectionPurpose,
+        limits: EncodeLimits,
+    ) -> Result<Self, ProtectionError> {
+        let plaintext = self.to_bytes_with_limits(limits)?;
         let message = mtp_crypto::encrypt_multi_for(
             EncryptionType::MlKemChaCha20Poly1305,
             purpose.0,
@@ -703,21 +914,52 @@ impl DataValue {
         self.decrypt_with_limits(keyring, expected_purpose, DecodeLimits::default())
     }
 
-    /// Try a local key history without exposing recipient-key identifiers on
-    /// the wire. Entries are attempted in the caller's preferred order.
+    // Migrate to `decrypt_with_limits` or
+    // `decrypt_with_keyrings_and_limits` at a protocol boundary so the
+    // receive policy is not replaced by an intermediate default.
+    #[deprecated(note = "migrate to decrypt_with_keyrings_and_limits with explicit DecodeLimits")]
     #[cfg(feature = "crypto")]
     pub fn decrypt_with_keyrings(
         &self,
         keyrings: &[&Keyring],
         expected_purpose: ProtectionPurpose,
     ) -> Result<Self, ProtectionError> {
+        self.decrypt_with_keyrings_and_limits(keyrings, expected_purpose, DecodeLimits::default())
+    }
+
+    /// Try a local key history without exposing recipient-key identifiers on
+    /// the wire, parsing each successful plaintext with the supplied policy.
+    #[cfg(feature = "crypto")]
+    pub fn decrypt_with_keyrings_and_limits(
+        &self,
+        keyrings: &[&Keyring],
+        expected_purpose: ProtectionPurpose,
+        limits: DecodeLimits,
+    ) -> Result<Self, ProtectionError> {
         if keyrings.is_empty() {
             return Err(ProtectionError::NoMatchingRecipient);
         }
+        let ciphertext_len = match self {
+            Self::Encrypted(value) => value.ciphertext.len(),
+            _ => return Err(ProtectionError::NotEncrypted),
+        };
+        let mut remaining_allocations = limits.max_allocated_bytes;
         for keyring in keyrings {
-            match self.decrypt(keyring, expected_purpose) {
+            if ciphertext_len > remaining_allocations {
+                return Err(ProtectionError::ResourceLimit("decryption attempts"));
+            }
+            let attempt_limits = DecodeLimits {
+                max_allocated_bytes: remaining_allocations,
+                ..limits
+            };
+            match self.decrypt_with_limits(keyring, expected_purpose, attempt_limits) {
                 Ok(value) => return Ok(value),
-                Err(ProtectionError::NoMatchingRecipient) => {}
+                Err(ProtectionError::NoMatchingRecipient) => {
+                    /* A failed attempt may have allocated a plaintext buffer
+                    as large as the ciphertext. Reserve that upper bound
+                    before trying the next historical key. */
+                    remaining_allocations -= ciphertext_len;
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -737,83 +979,180 @@ impl DataValue {
             Self::Encrypted(value) => value,
             _ => return Err(ProtectionError::NotEncrypted),
         };
-        let message = mtp_crypto::MultiEncryptedMessage {
-            encryption_type: value.encryption_type,
-            purpose: value.purpose,
-            recipients: value.recipients.clone(),
-            ciphertext: value.ciphertext.clone(),
-        };
-        let plaintext = mtp_crypto::decrypt_multi_for(&message, expected_purpose.0, keyring)
-            .map_err(protection_error_from_decryption)?;
-        Self::from_bytes_with_limits(&plaintext, limits).ok_or(ProtectionError::Malformed)
+        if value.ciphertext.len() > limits.max_allocated_bytes {
+            return Err(ProtectionError::ResourceLimit("decrypted plaintext"));
+        }
+        let plaintext = mtp_crypto::decrypt_multi_for_parts_with_limit(
+            value.encryption_type,
+            value.purpose,
+            &value.recipients,
+            &value.ciphertext,
+            expected_purpose.0,
+            keyring,
+            limits.max_allocated_bytes,
+        )
+        .map_err(protection_error_from_decryption)?;
+        if plaintext.len() > limits.max_allocated_bytes {
+            return Err(ProtectionError::ResourceLimit("decrypted plaintext"));
+        }
+        let mut decode_limits = limits;
+        decode_limits.max_allocated_bytes -= plaintext.len();
+        Self::try_from_bytes_with_limits(&plaintext, decode_limits).map_err(|error| match error {
+            DecodeError::DepthLimit => ProtectionError::ResourceLimit("decrypted value depth"),
+            DecodeError::ValueCountLimit => ProtectionError::ResourceLimit("decrypted value count"),
+            DecodeError::BlobLimit => ProtectionError::ResourceLimit("decrypted blob"),
+            DecodeError::AllocationLimit => {
+                ProtectionError::ResourceLimit("decrypted value allocation")
+            }
+            DecodeError::RecipientLimit => ProtectionError::ResourceLimit("decrypted recipients"),
+            DecodeError::MalformedEncoding | DecodeError::DuplicateField => {
+                ProtectionError::Malformed
+            }
+        })
     }
 
+    /// Encode with the compatibility resource policy.
+    ///
+    /// New protocol boundaries should pass an explicit [`EncodeLimits`] value
+    /// derived from their admission policy.
     pub fn to_bytes(&self) -> Result<Vec<u8>, CodecError> {
+        self.to_bytes_with_limits(EncodeLimits::default())
+    }
+
+    pub fn to_bytes_with_limits(&self, limits: EncodeLimits) -> Result<Vec<u8>, CodecError> {
         let mut out = Vec::new();
-        self.write_to(&mut out)?;
+        self.write_to_with_limits(&mut out, limits)?;
         Ok(out)
     }
 
+    /// Encode into an existing output buffer while enforcing depth, node, and
+    /// serialized-size limits before recursive output is produced.
     pub fn write_to(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.push(Self::kind_marker(self));
-        match self {
-            Self::BoolTrue | Self::BoolFalse | Self::Bool(_) | Self::Null => {}
-            Self::SignedNumber(value) => out
-                .write_i128::<BigEndian>(*value)
-                .map_err(|_| CodecError::InvalidEncoding)?,
-            Self::UnsignedNumber(value) => out
-                .write_u128::<BigEndian>(*value)
-                .map_err(|_| CodecError::InvalidEncoding)?,
-            Self::Float(value) => out
-                .write_f64::<BigEndian>(*value)
-                .map_err(|_| CodecError::InvalidEncoding)?,
-            Self::Str(value) => write_blob(out, value.as_bytes())?,
-            Self::Bytes(value) => write_blob(out, value)?,
+        self.write_to_with_limits(out, EncodeLimits::default())
+    }
+
+    pub fn write_to_with_limits(
+        &self,
+        out: &mut Vec<u8>,
+        limits: EncodeLimits,
+    ) -> Result<(), CodecError> {
+        let mut sizing = EncodeContext::new(limits);
+        let size = self.encoded_len_with_context(&mut sizing)?;
+        sizing.check_output(out.len(), size)?;
+
+        let mut context = EncodeContext::new(limits);
+        self.write_to_with_context(out, &mut context)
+    }
+
+    fn encoded_len_with_context(&self, context: &mut EncodeContext) -> Result<usize, CodecError> {
+        context.value()?;
+        let size = match self {
+            Self::BoolTrue | Self::BoolFalse | Self::Bool(_) | Self::Null => 1,
+            Self::SignedNumber(_) | Self::UnsignedNumber(_) => 1 + 16,
+            Self::Float(_) => 1 + 8,
+            Self::Str(value) => checked_add(1, blob_len(value.as_bytes())?)?,
+            Self::Bytes(value) => checked_add(1, blob_len(value)?)?,
             Self::Array(values) => {
-                write_count(out, values.len())?;
+                context.enter()?;
+                let _ = checked_count(values.len())?;
+                let mut size = 1 + 2;
                 for value in values {
-                    value.write_to(out)?;
+                    size = checked_add(size, value.encoded_len_with_context(context)?)?;
                 }
+                context.leave();
+                size
             }
             Self::Container(entries) => {
                 ensure_unique_container_fields(entries)?;
-                write_count(out, entries.len())?;
-                for (id, value) in entries {
-                    out.write_u16::<BigEndian>(id.0)
-                        .map_err(|_| CodecError::InvalidEncoding)?;
-                    value.write_to(out)?;
+                context.enter()?;
+                let _ = checked_count(entries.len())?;
+                let mut size = 1 + 2;
+                for (_, value) in entries {
+                    size = checked_add(
+                        checked_add(size, 2)?,
+                        value.encoded_len_with_context(context)?,
+                    )?;
                 }
+                context.leave();
+                size
             }
             #[cfg(feature = "crypto")]
             Self::Signed(value) => {
-                let mut wrapper = Vec::new();
-                wrapper.push(value.algorithm);
-                wrapper.push(value.purpose);
-                wrapper
-                    .write_u64::<BigEndian>(value.signer_id)
-                    .map_err(|_| CodecError::InvalidEncoding)?;
-                let expected =
+                context.enter()?;
+                let signature_len =
                     SigAlgorithm::length(value.algorithm).ok_or(CodecError::InvalidEncoding)?;
-                if value.signature.len() != expected {
+                if value.signature.len() != signature_len {
                     return Err(CodecError::InvalidEncoding);
                 }
-                wrapper.extend_from_slice(&value.signature);
-                value.value.write_to(&mut wrapper)?;
-                write_blob(out, &wrapper)?;
+                let inner_len = value.value.encoded_len_with_context(context)?;
+                context.leave();
+                let wrapper_len = checked_add(1 + 1 + 8 + signature_len, inner_len)?;
+                checked_add(1, checked_add(4, wrapper_len)?)?
             }
             #[cfg(feature = "crypto")]
             Self::Encrypted(value) => {
-                let message = mtp_crypto::MultiEncryptedMessage {
-                    encryption_type: value.encryption_type,
-                    purpose: value.purpose,
-                    recipients: value.recipients.clone(),
-                    ciphertext: value.ciphertext.clone(),
-                };
-                let envelope = message
-                    .to_bytes()
-                    .map_err(|_| CodecError::InvalidEncoding)?;
-                write_blob(out, &envelope)?;
+                let envelope_len = encrypted_envelope_len(value)?;
+                checked_add(1, checked_add(4, envelope_len)?)?
             }
+        };
+        Ok(size)
+    }
+
+    fn write_to_with_context(
+        &self,
+        out: &mut Vec<u8>,
+        context: &mut EncodeContext,
+    ) -> Result<(), CodecError> {
+        context.value()?;
+        append_bytes(out, context, &[Self::kind_marker(self)])?;
+        match self {
+            Self::BoolTrue | Self::BoolFalse | Self::Bool(_) | Self::Null => {}
+            Self::SignedNumber(value) => append_bytes(out, context, &value.to_be_bytes())?,
+            Self::UnsignedNumber(value) => append_bytes(out, context, &value.to_be_bytes())?,
+            Self::Float(value) => append_bytes(out, context, &value.to_bits().to_be_bytes())?,
+            Self::Str(value) => write_blob_with_context(out, context, value.as_bytes())?,
+            Self::Bytes(value) => write_blob_with_context(out, context, value)?,
+            Self::Array(values) => {
+                context.enter()?;
+                append_bytes(out, context, &checked_count(values.len())?.to_be_bytes())?;
+                for value in values {
+                    value.write_to_with_context(out, context)?;
+                }
+                context.leave();
+            }
+            Self::Container(entries) => {
+                ensure_unique_container_fields(entries)?;
+                context.enter()?;
+                append_bytes(out, context, &checked_count(entries.len())?.to_be_bytes())?;
+                for (id, value) in entries {
+                    append_bytes(out, context, &id.0.to_be_bytes())?;
+                    value.write_to_with_context(out, context)?;
+                }
+                context.leave();
+            }
+            #[cfg(feature = "crypto")]
+            Self::Signed(value) => {
+                context.enter()?;
+                let signature_len =
+                    SigAlgorithm::length(value.algorithm).ok_or(CodecError::InvalidEncoding)?;
+                if value.signature.len() != signature_len {
+                    return Err(CodecError::InvalidEncoding);
+                }
+                let inner_len = value
+                    .value
+                    .encoded_len_with_context(&mut EncodeContext::new(context.limits))?;
+                let wrapper_len = checked_add(1 + 1 + 8 + signature_len, inner_len)?;
+                let wrapper_len =
+                    u32::try_from(wrapper_len).map_err(|_| CodecError::InvalidEncoding)?;
+                append_bytes(out, context, &wrapper_len.to_be_bytes())?;
+                append_bytes(out, context, &[value.algorithm, value.purpose])?;
+                append_bytes(out, context, &value.signer_id.to_be_bytes())?;
+                append_bytes(out, context, &value.signature)?;
+                value.value.write_to_with_context(out, context)?;
+                context.leave();
+            }
+            #[cfg(feature = "crypto")]
+            Self::Encrypted(value) => write_encrypted_with_context(out, context, value)?,
         }
         Ok(())
     }
@@ -823,9 +1162,23 @@ impl DataValue {
     }
 
     pub fn from_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Option<Self> {
+        Self::try_from_bytes_with_limits(bytes, limits).ok()
+    }
+
+    pub fn try_from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::try_from_bytes_with_limits(bytes, DecodeLimits::default())
+    }
+
+    pub fn try_from_bytes_with_limits(
+        bytes: &[u8],
+        limits: DecodeLimits,
+    ) -> Result<Self, DecodeError> {
         let mut cursor = Cursor::new(bytes);
-        let value = Self::read_from_with_limits(&mut cursor, limits).ok()?;
-        (cursor.position() as usize == bytes.len()).then_some(value)
+        let value = Self::read_from_with_diagnostics(&mut cursor, limits)?;
+        if cursor.position() as usize != bytes.len() {
+            return Err(DecodeError::MalformedEncoding);
+        }
+        Ok(value)
     }
 
     pub fn read_from(cursor: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
@@ -836,8 +1189,15 @@ impl DataValue {
         cursor: &mut Cursor<&[u8]>,
         limits: DecodeLimits,
     ) -> Result<Self, CodecError> {
+        Self::read_from_with_diagnostics(cursor, limits).map_err(|_| CodecError::InvalidEncoding)
+    }
+
+    pub fn read_from_with_diagnostics(
+        cursor: &mut Cursor<&[u8]>,
+        limits: DecodeLimits,
+    ) -> Result<Self, DecodeError> {
         let mut context = DecodeContext::new(limits);
-        Self::read_value(cursor, &mut context).ok_or(CodecError::InvalidEncoding)
+        Self::read_value(cursor, &mut context)
     }
 
     pub fn to_base64(&self) -> Result<String, CodecError> {
@@ -877,67 +1237,124 @@ impl DataValue {
         }
     }
 
-    fn read_value(cursor: &mut Cursor<&[u8]>, context: &mut DecodeContext) -> Option<Self> {
+    fn read_value(
+        cursor: &mut Cursor<&[u8]>,
+        context: &mut DecodeContext,
+    ) -> Result<Self, DecodeFailure> {
         context.value()?;
-        match cursor.read_u8().ok()? {
-            Self::KIND_BOOL_TRUE => Some(Self::BoolTrue),
-            Self::KIND_BOOL_FALSE => Some(Self::BoolFalse),
-            Self::KIND_SIGNED_NUMBER => {
-                Some(Self::SignedNumber(cursor.read_i128::<BigEndian>().ok()?))
-            }
-            Self::KIND_UNSIGNED_NUMBER => {
-                Some(Self::UnsignedNumber(cursor.read_u128::<BigEndian>().ok()?))
-            }
-            Self::KIND_FLOAT => Some(Self::Float(cursor.read_f64::<BigEndian>().ok()?)),
+        match cursor
+            .read_u8()
+            .map_err(|_| DecodeFailure::MalformedEncoding)?
+        {
+            Self::KIND_BOOL_TRUE => Ok(Self::BoolTrue),
+            Self::KIND_BOOL_FALSE => Ok(Self::BoolFalse),
+            Self::KIND_SIGNED_NUMBER => Ok(Self::SignedNumber(
+                cursor
+                    .read_i128::<BigEndian>()
+                    .map_err(|_| DecodeFailure::MalformedEncoding)?,
+            )),
+            Self::KIND_UNSIGNED_NUMBER => Ok(Self::UnsignedNumber(
+                cursor
+                    .read_u128::<BigEndian>()
+                    .map_err(|_| DecodeFailure::MalformedEncoding)?,
+            )),
+            Self::KIND_FLOAT => Ok(Self::Float(
+                cursor
+                    .read_f64::<BigEndian>()
+                    .map_err(|_| DecodeFailure::MalformedEncoding)?,
+            )),
             Self::KIND_STR => {
-                let bytes = read_blob(cursor, context.limits.max_blob_size)?;
-                Some(Self::Str(String::from_utf8(bytes).ok()?))
+                let bytes = read_blob_owned(cursor, context)?;
+                Ok(Self::Str(
+                    String::from_utf8(bytes).map_err(|_| DecodeFailure::MalformedEncoding)?,
+                ))
             }
-            Self::KIND_BYTES => Some(Self::Bytes(read_blob(
-                cursor,
-                context.limits.max_blob_size,
-            )?)),
+            Self::KIND_BYTES => Ok(Self::Bytes(read_blob_owned(cursor, context)?)),
             Self::KIND_ARRAY => {
                 context.enter()?;
-                let count = cursor.read_u16::<BigEndian>().ok()? as usize;
-                let mut values = Vec::with_capacity(count.min(remaining(cursor)));
+                let count = cursor
+                    .read_u16::<BigEndian>()
+                    .map_err(|_| DecodeFailure::MalformedEncoding)?
+                    as usize;
+                context.allocate(
+                    count
+                        .checked_mul(size_of::<DataValue>())
+                        .ok_or(DecodeFailure::AllocationLimit)?,
+                )?;
+                let mut values = Vec::with_capacity(count);
                 for _ in 0..count {
                     values.push(Self::read_value(cursor, context)?);
                 }
                 context.leave();
-                Some(Self::Array(values))
+                Ok(Self::Array(values))
             }
             Self::KIND_CONTAINER => {
                 context.enter()?;
-                let count = cursor.read_u16::<BigEndian>().ok()? as usize;
-                let mut values = Vec::with_capacity(count.min(remaining(cursor) / 3));
-                let mut seen = BTreeSet::new();
+                let count = cursor
+                    .read_u16::<BigEndian>()
+                    .map_err(|_| DecodeFailure::MalformedEncoding)?
+                    as usize;
+                context.allocate(
+                    count
+                        .checked_mul(size_of::<(DataTypeId, DataValue)>())
+                        .ok_or(DecodeFailure::AllocationLimit)?,
+                )?;
+                let mut values = Vec::with_capacity(count);
+                /* DataTypeId is a u16, so a fixed bitset gives duplicate
+                detection a predictable allocation instead of hidden
+                per-node BTreeSet allocations. */
+                let seen_words = (usize::from(u16::MAX) + 1) / 64;
+                context.allocate(
+                    seen_words
+                        .checked_mul(size_of::<u64>())
+                        .ok_or(DecodeFailure::AllocationLimit)?,
+                )?;
+                let mut seen = vec![0_u64; seen_words];
                 for _ in 0..count {
-                    let id = DataTypeId(cursor.read_u16::<BigEndian>().ok()?);
-                    if !seen.insert(id) {
-                        return None;
+                    let id = DataTypeId(
+                        cursor
+                            .read_u16::<BigEndian>()
+                            .map_err(|_| DecodeFailure::MalformedEncoding)?,
+                    );
+                    let index = usize::from(id.0);
+                    let word = index / 64;
+                    let bit = 1_u64 << (index % 64);
+                    if seen[word] & bit != 0 {
+                        return Err(DecodeFailure::DuplicateField);
                     }
+                    seen[word] |= bit;
                     values.push((id, Self::read_value(cursor, context)?));
                 }
                 context.leave();
-                Some(Self::Container(values))
+                Ok(Self::Container(values))
             }
             #[cfg(feature = "crypto")]
             Self::KIND_SIGNED => {
                 context.enter()?;
-                let wrapper = read_blob(cursor, context.limits.max_blob_size)?;
-                let mut inner = Cursor::new(wrapper.as_slice());
-                let algorithm = inner.read_u8().ok()?;
-                let purpose = inner.read_u8().ok()?;
-                let signer_id = inner.read_u64::<BigEndian>().ok()?;
-                let signature_len = SigAlgorithm::length(algorithm)?;
-                let signature = read_slice(&mut inner, signature_len)?.to_vec();
+                let wrapper = read_blob_slice(cursor, context.limits.max_blob_size)?;
+                let mut inner = Cursor::new(wrapper);
+                let algorithm = inner
+                    .read_u8()
+                    .map_err(|_| DecodeFailure::MalformedEncoding)?;
+                let purpose = inner
+                    .read_u8()
+                    .map_err(|_| DecodeFailure::MalformedEncoding)?;
+                let signer_id = inner
+                    .read_u64::<BigEndian>()
+                    .map_err(|_| DecodeFailure::MalformedEncoding)?;
+                let signature_len =
+                    SigAlgorithm::length(algorithm).ok_or(DecodeFailure::MalformedEncoding)?;
+                context.allocate(signature_len)?;
+                let signature = read_slice(&mut inner, signature_len)
+                    .ok_or(DecodeFailure::MalformedEncoding)?
+                    .to_vec();
                 let value = Self::read_value(&mut inner, context)?;
                 if inner.position() as usize != wrapper.len() {
-                    return None;
+                    return Err(DecodeFailure::MalformedEncoding);
                 }
+                context.allocate(size_of::<DataValue>())?;
                 context.leave();
-                Some(Self::Signed(SignedValue {
+                Ok(Self::Signed(SignedValue {
                     algorithm,
                     purpose,
                     signer_id,
@@ -947,27 +1364,51 @@ impl DataValue {
             }
             #[cfg(feature = "crypto")]
             Self::KIND_ENCRYPTED => {
-                let envelope = read_blob(cursor, context.limits.max_blob_size)?;
-                let message = mtp_crypto::MultiEncryptedMessage::from_bytes(&envelope).ok()?;
-                if message.recipients.len() > context.limits.max_recipients {
-                    return None;
+                let envelope = read_blob_slice(cursor, context.limits.max_blob_size)?;
+                let message = mtp_crypto::MultiEncryptedMessageRef::from_bytes(envelope)
+                    .map_err(|_| DecodeFailure::MalformedEncoding)?;
+                if message.recipient_count() > context.limits.max_recipients {
+                    return Err(DecodeFailure::RecipientLimit);
                 }
-                Some(Self::Encrypted(EncryptedValue {
-                    encryption_type: message.encryption_type,
-                    purpose: message.purpose,
-                    recipients: message.recipients,
-                    ciphertext: message.ciphertext,
+                let kem_len = message.encryption_type().kem_ciphertext_len();
+                let wrapped_len = message.encryption_type().wrapped_key_len();
+                let entry_size = size_of::<mtp_crypto::RecipientEntry>()
+                    .checked_add(kem_len)
+                    .and_then(|size| size.checked_add(wrapped_len))
+                    .ok_or(DecodeFailure::AllocationLimit)?;
+                let owned_size = message
+                    .recipient_count()
+                    .checked_mul(entry_size)
+                    .and_then(|size| size.checked_add(message.ciphertext().len()))
+                    .ok_or(DecodeFailure::AllocationLimit)?;
+                context.allocate(owned_size)?;
+                let mut recipients = Vec::with_capacity(message.recipient_count());
+                for index in 0..message.recipient_count() {
+                    let (kem_ciphertext, encrypted_key) = message
+                        .recipient(index)
+                        .ok_or(DecodeFailure::MalformedEncoding)?;
+                    recipients.push(mtp_crypto::RecipientEntry {
+                        kem_ciphertext: kem_ciphertext.to_vec(),
+                        encrypted_key: encrypted_key.to_vec(),
+                    });
+                }
+                Ok(Self::Encrypted(EncryptedValue {
+                    encryption_type: message.encryption_type(),
+                    purpose: message.purpose(),
+                    recipients,
+                    ciphertext: message.ciphertext().to_vec(),
                 }))
             }
-            Self::KIND_NULL => Some(Self::Null),
+            Self::KIND_NULL => Ok(Self::Null),
             // 0x0C was the old SignedEncryptedContainer kind and is reserved.
-            _ => None,
+            _ => Err(DecodeFailure::MalformedEncoding),
         }
     }
 }
 
 #[cfg(feature = "crypto")]
 impl SignedValue {
+    #[deprecated(note = "migrate to verify_with_policy with an explicit ProtectionPolicy")]
     pub fn verify(
         &self,
         expected_signer_id: u64,
@@ -978,7 +1419,7 @@ impl SignedValue {
             expected_signer_id,
             public_keys,
             expected_purpose,
-            ProtectionPolicy::default(),
+            ProtectionPolicy::any_supported(),
         )
     }
 
@@ -988,6 +1429,25 @@ impl SignedValue {
         public_keys: &PublicKeyBundle,
         expected_purpose: ProtectionPurpose,
         policy: ProtectionPolicy,
+    ) -> Result<(), ProtectionError> {
+        self.verify_with_policy_and_limits(
+            expected_signer_id,
+            public_keys,
+            expected_purpose,
+            policy,
+            EncodeLimits::default(),
+        )
+    }
+
+    /// Verify a signed value while bounding the serialization used to
+    /// reconstruct its authenticated bytes.
+    pub fn verify_with_policy_and_limits(
+        &self,
+        expected_signer_id: u64,
+        public_keys: &PublicKeyBundle,
+        expected_purpose: ProtectionPurpose,
+        policy: ProtectionPolicy,
+        limits: EncodeLimits,
     ) -> Result<(), ProtectionError> {
         if self.signer_id != expected_signer_id {
             return Err(ProtectionError::SignerIdMismatch {
@@ -1008,7 +1468,13 @@ impl SignedValue {
             });
         }
         validate_signature(self.algorithm, &self.signature)?;
-        let inner = self.value.to_bytes()?;
+        let inner = self.value.to_bytes_with_limits(limits).map_err(|error| {
+            if matches!(error, CodecError::TooManyEntries) {
+                ProtectionError::ResourceLimit("signed value encoding")
+            } else {
+                ProtectionError::Codec(error)
+            }
+        })?;
         let message = signed_message(self.algorithm, self.purpose, self.signer_id, &inner);
         let result = match self.algorithm {
             SigAlgorithm::ED25519 => mtp_crypto::verify_ed25519(
@@ -1044,6 +1510,7 @@ impl SignedValue {
         result.map_err(|_| ProtectionError::InvalidSignature)
     }
 
+    #[deprecated(note = "migrate to into_verified_with_policy with an explicit ProtectionPolicy")]
     /// Verify this signed wrapper and return its inner value.
     pub fn into_verified(
         self,
@@ -1055,7 +1522,7 @@ impl SignedValue {
             expected_signer_id,
             public_keys,
             expected_purpose,
-            ProtectionPolicy::default(),
+            ProtectionPolicy::any_supported(),
         )
     }
 
@@ -1072,6 +1539,7 @@ impl SignedValue {
         Ok(*self.value)
     }
 
+    #[deprecated(note = "migrate to verify_with_resolver_policy with an explicit ProtectionPolicy")]
     pub fn verify_with<F>(
         &self,
         resolve: F,
@@ -1080,7 +1548,11 @@ impl SignedValue {
     where
         F: FnOnce(u64) -> Option<PublicKeyBundle>,
     {
-        self.verify_with_resolver_policy(resolve, expected_purpose, ProtectionPolicy::default())
+        self.verify_with_resolver_policy(
+            resolve,
+            expected_purpose,
+            ProtectionPolicy::any_supported(),
+        )
     }
 
     pub fn verify_with_resolver_policy<F>(
@@ -1107,11 +1579,32 @@ impl SignedValue {
         expected_purpose: ProtectionPurpose,
         policy: ProtectionPolicy,
     ) -> Result<(), ProtectionError> {
-        self.verify_with_key_history_index(
+        self.verify_with_key_history_index_and_limits(
             expected_signer_id,
             public_keys,
             expected_purpose,
             policy,
+            EncodeLimits::default(),
+        )
+        .map(|_| ())
+    }
+
+    /// Verify against a signing-key history with a bounded authenticated-byte
+    /// reconstruction policy.
+    pub fn verify_with_key_history_and_limits(
+        &self,
+        expected_signer_id: u64,
+        public_keys: &[PublicKeyBundle],
+        expected_purpose: ProtectionPurpose,
+        policy: ProtectionPolicy,
+        limits: EncodeLimits,
+    ) -> Result<(), ProtectionError> {
+        self.verify_with_key_history_index_and_limits(
+            expected_signer_id,
+            public_keys,
+            expected_purpose,
+            policy,
+            limits,
         )
         .map(|_| ())
     }
@@ -1125,10 +1618,34 @@ impl SignedValue {
         expected_purpose: ProtectionPurpose,
         policy: ProtectionPolicy,
     ) -> Result<usize, ProtectionError> {
+        self.verify_with_key_history_index_and_limits(
+            expected_signer_id,
+            public_keys,
+            expected_purpose,
+            policy,
+            EncodeLimits::default(),
+        )
+    }
+
+    /// Verify against a signing-key history and bound every authenticated
+    /// value serialization attempt.
+    pub fn verify_with_key_history_index_and_limits(
+        &self,
+        expected_signer_id: u64,
+        public_keys: &[PublicKeyBundle],
+        expected_purpose: ProtectionPurpose,
+        policy: ProtectionPolicy,
+        limits: EncodeLimits,
+    ) -> Result<usize, ProtectionError> {
         let mut last_error = None;
         for (index, public_key) in public_keys.iter().enumerate() {
-            match self.verify_with_policy(expected_signer_id, public_key, expected_purpose, policy)
-            {
+            match self.verify_with_policy_and_limits(
+                expected_signer_id,
+                public_key,
+                expected_purpose,
+                policy,
+                limits,
+            ) {
                 Ok(()) => return Ok(index),
                 Err(error @ ProtectionError::InvalidSignature) => last_error = Some(error),
                 Err(error @ ProtectionError::Crypto(_)) => last_error = Some(error),
@@ -1165,14 +1682,34 @@ fn protection_error_from_decryption(error: mtp_crypto::CryptoError) -> Protectio
     match error {
         mtp_crypto::CryptoError::MalformedEnvelope => ProtectionError::Malformed,
         mtp_crypto::CryptoError::NoMatchingRecipient => ProtectionError::NoMatchingRecipient,
+        mtp_crypto::CryptoError::AllocationLimit => {
+            ProtectionError::ResourceLimit("decrypted plaintext")
+        }
         other => ProtectionError::Crypto(other),
     }
 }
 
-fn write_count(out: &mut Vec<u8>, count: usize) -> Result<(), CodecError> {
-    let count = u16::try_from(count).map_err(|_| CodecError::TooManyEntries)?;
-    out.write_u16::<BigEndian>(count)
-        .map_err(|_| CodecError::InvalidEncoding)
+fn checked_count(count: usize) -> Result<u16, CodecError> {
+    u16::try_from(count).map_err(|_| CodecError::TooManyEntries)
+}
+
+fn checked_add(left: usize, right: usize) -> Result<usize, CodecError> {
+    left.checked_add(right).ok_or(CodecError::TooManyEntries)
+}
+
+fn blob_len(bytes: &[u8]) -> Result<usize, CodecError> {
+    let _ = u32::try_from(bytes.len()).map_err(|_| CodecError::InvalidEncoding)?;
+    checked_add(4, bytes.len())
+}
+
+fn append_bytes(
+    out: &mut Vec<u8>,
+    context: &EncodeContext,
+    bytes: &[u8],
+) -> Result<(), CodecError> {
+    context.check_output(out.len(), bytes.len())?;
+    out.extend_from_slice(bytes);
+    Ok(())
 }
 
 fn ensure_unique_container_fields(entries: &[(DataTypeId, DataValue)]) -> Result<(), CodecError> {
@@ -1184,20 +1721,85 @@ fn ensure_unique_container_fields(entries: &[(DataTypeId, DataValue)]) -> Result
     }
 }
 
-fn write_blob(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), CodecError> {
+fn write_blob_with_context(
+    out: &mut Vec<u8>,
+    context: &EncodeContext,
+    bytes: &[u8],
+) -> Result<(), CodecError> {
     let len = u32::try_from(bytes.len()).map_err(|_| CodecError::InvalidEncoding)?;
-    out.write_u32::<BigEndian>(len)
-        .map_err(|_| CodecError::InvalidEncoding)?;
-    out.extend_from_slice(bytes);
-    Ok(())
+    append_bytes(out, context, &len.to_be_bytes())?;
+    append_bytes(out, context, bytes)
 }
 
-fn read_blob(cursor: &mut Cursor<&[u8]>, max_size: usize) -> Option<Vec<u8>> {
-    let len = cursor.read_u32::<BigEndian>().ok()? as usize;
-    if len > max_size {
-        return None;
+#[cfg(feature = "crypto")]
+fn encrypted_envelope_len(value: &EncryptedValue) -> Result<usize, CodecError> {
+    let kem_len = value.encryption_type.kem_ciphertext_len();
+    let wrapped_len = value.encryption_type.wrapped_key_len();
+    if value.recipients.is_empty()
+        || value.recipients.len() > mtp_crypto::MAX_RECIPIENTS
+        || value.ciphertext.len() < value.encryption_type.minimum_ciphertext_len()
+        || value.recipients.iter().any(|recipient| {
+            recipient.kem_ciphertext.len() != kem_len
+                || recipient.encrypted_key.len() != wrapped_len
+        })
+    {
+        return Err(CodecError::InvalidEncoding);
     }
-    Some(read_slice(cursor, len)?.to_vec())
+    let _ = checked_count(value.recipients.len())?;
+    let entry_len = kem_len
+        .checked_add(wrapped_len)
+        .ok_or(CodecError::TooManyEntries)?;
+    let entries_len = value
+        .recipients
+        .len()
+        .checked_mul(entry_len)
+        .ok_or(CodecError::TooManyEntries)?;
+    checked_add(4, checked_add(entries_len, value.ciphertext.len())?)
+}
+
+#[cfg(feature = "crypto")]
+fn write_encrypted_with_context(
+    out: &mut Vec<u8>,
+    context: &EncodeContext,
+    value: &EncryptedValue,
+) -> Result<(), CodecError> {
+    let envelope_len = encrypted_envelope_len(value)?;
+    let envelope_len = u32::try_from(envelope_len).map_err(|_| CodecError::InvalidEncoding)?;
+    append_bytes(out, context, &envelope_len.to_be_bytes())?;
+    append_bytes(
+        out,
+        context,
+        &[value.encryption_type.to_byte(), value.purpose],
+    )?;
+    let count = checked_count(value.recipients.len())?;
+    append_bytes(out, context, &count.to_be_bytes())?;
+    for recipient in &value.recipients {
+        append_bytes(out, context, &recipient.kem_ciphertext)?;
+        append_bytes(out, context, &recipient.encrypted_key)?;
+    }
+    append_bytes(out, context, &value.ciphertext)
+}
+
+fn read_blob_slice<'a>(
+    cursor: &mut Cursor<&'a [u8]>,
+    max_size: usize,
+) -> Result<&'a [u8], DecodeFailure> {
+    let len = cursor
+        .read_u32::<BigEndian>()
+        .map_err(|_| DecodeFailure::MalformedEncoding)? as usize;
+    if len > max_size {
+        return Err(DecodeFailure::BlobLimit);
+    }
+    read_slice(cursor, len).ok_or(DecodeFailure::MalformedEncoding)
+}
+
+fn read_blob_owned(
+    cursor: &mut Cursor<&[u8]>,
+    context: &mut DecodeContext,
+) -> Result<Vec<u8>, DecodeFailure> {
+    let bytes = read_blob_slice(cursor, context.limits.max_blob_size)?;
+    context.allocate(bytes.len())?;
+    Ok(bytes.to_vec())
 }
 
 fn read_slice<'a>(cursor: &mut Cursor<&'a [u8]>, len: usize) -> Option<&'a [u8]> {
@@ -1208,13 +1810,6 @@ fn read_slice<'a>(cursor: &mut Cursor<&'a [u8]>, len: usize) -> Option<&'a [u8]>
     }
     cursor.set_position(end as u64);
     Some(&cursor.get_ref()[start..end])
-}
-
-fn remaining(cursor: &Cursor<&[u8]>) -> usize {
-    cursor
-        .get_ref()
-        .len()
-        .saturating_sub(cursor.position() as usize)
 }
 
 impl fmt::Display for DataValue {
@@ -1556,13 +2151,172 @@ mod tests {
     }
 
     #[test]
+    fn decoder_diagnostics_distinguish_policy_rejections() {
+        let nested = DataValue::Array(vec![DataValue::Array(vec![DataValue::BoolTrue])]);
+        let nested_bytes = nested.to_bytes().expect("nested value should encode");
+        let mut limits = DecodeLimits {
+            max_depth: 1,
+            ..DecodeLimits::default()
+        };
+        let mut cursor = Cursor::new(nested_bytes.as_slice());
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, limits),
+            Err(DecodeFailure::DepthLimit)
+        );
+
+        let many = DataValue::Array(vec![DataValue::BoolTrue, DataValue::BoolFalse]);
+        let many_bytes = many.to_bytes().expect("array should encode");
+        limits = DecodeLimits {
+            max_values: 2,
+            ..DecodeLimits::default()
+        };
+        let mut cursor = Cursor::new(many_bytes.as_slice());
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, limits),
+            Err(DecodeFailure::ValueCountLimit)
+        );
+
+        let allocation_blob = DataValue::Bytes(vec![1, 2, 3]);
+        let allocation_blob_bytes = allocation_blob.to_bytes().expect("blob should encode");
+        limits = DecodeLimits {
+            max_blob_size: 2,
+            ..DecodeLimits::default()
+        };
+        let mut cursor = Cursor::new(allocation_blob_bytes.as_slice());
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, limits),
+            Err(DecodeFailure::BlobLimit)
+        );
+
+        let duplicate = [0x09, 0, 2, 0, 1, 0x01, 0, 1, 0x02];
+        let mut cursor = Cursor::new(duplicate.as_slice());
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, DecodeLimits::default()),
+            Err(DecodeFailure::DuplicateField)
+        );
+
+        let mut cursor = Cursor::new([0xFE].as_slice());
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, DecodeLimits::default()),
+            Err(DecodeFailure::MalformedEncoding)
+        );
+
+        let blob = DataValue::Bytes(vec![1, 2, 3]);
+        let blob_bytes = blob.to_bytes().expect("blob should encode");
+        let limits = DecodeLimits {
+            max_allocated_bytes: 2,
+            ..DecodeLimits::default()
+        };
+        let mut cursor = Cursor::new(blob_bytes.as_slice());
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, limits),
+            Err(DecodeFailure::AllocationLimit)
+        );
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn nested_signed_values_hit_cumulative_allocation_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use mtp_crypto::Ed25519Signer;
+
+        let (signer, _, _) = Ed25519Signer::generate();
+        let mut value = DataValue::Null;
+        for _ in 0..3 {
+            value = value.sign(7, ProtectionPurpose::from(1), &signer)?;
+        }
+        let bytes = value.to_bytes()?;
+        let limits = DecodeLimits {
+            max_allocated_bytes: 100,
+            ..DecodeLimits::default()
+        };
+        let mut cursor = Cursor::new(bytes.as_slice());
+
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, limits),
+            Err(DecodeFailure::AllocationLimit)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn encoder_limits_bound_nodes_depth_and_output() {
+        let value = DataValue::Array(vec![DataValue::BoolTrue]);
+
+        let limits = EncodeLimits {
+            max_values: 1,
+            ..EncodeLimits::default()
+        };
+        assert_eq!(
+            value.to_bytes_with_limits(limits),
+            Err(CodecError::TooManyEntries)
+        );
+
+        let limits = EncodeLimits {
+            max_depth: 0,
+            ..EncodeLimits::default()
+        };
+        assert_eq!(
+            value.to_bytes_with_limits(limits),
+            Err(CodecError::TooManyEntries)
+        );
+
+        let limits = EncodeLimits {
+            max_output_size: 1,
+            ..EncodeLimits::default()
+        };
+        assert_eq!(
+            value.to_bytes_with_limits(limits),
+            Err(CodecError::TooManyEntries)
+        );
+    }
+
+    #[test]
     fn transport_decode_limits_follow_admitted_frame_size() {
         let limits = DecodeLimits::for_transport_message_size(1024);
         assert_eq!(limits.max_blob_size, 1020);
+        assert_eq!(
+            limits.max_allocated_bytes,
+            1024 * DEFAULT_TRANSPORT_ALLOCATION_FACTOR as usize
+        );
         assert_eq!(limits.max_depth, DecodeLimits::default().max_depth);
         assert_eq!(
             limits.max_recipients,
             DecodeLimits::default().max_recipients
+        );
+
+        let custom = DecodeLimits::for_transport_message_size_with_allocation_factor(1024, 2);
+        assert_eq!(custom.max_allocated_bytes, 2048);
+    }
+
+    #[test]
+    fn decoder_allocation_budget_counts_utf8_bytes_and_capacity() {
+        let value = DataValue::Str("é".into());
+        let bytes = value.to_bytes().expect("string should encode");
+
+        let mut limits = DecodeLimits {
+            max_allocated_bytes: 1,
+            ..DecodeLimits::default()
+        };
+        let mut cursor = Cursor::new(bytes.as_slice());
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, limits),
+            Err(DecodeFailure::AllocationLimit)
+        );
+
+        limits.max_allocated_bytes = "é".len();
+        assert_eq!(
+            DataValue::try_from_bytes_with_limits(&bytes, limits),
+            Ok(value)
+        );
+
+        let array = DataValue::Array(vec![DataValue::BoolTrue]);
+        let array_bytes = array.to_bytes().expect("array should encode");
+        limits.max_allocated_bytes = size_of::<DataValue>() - 1;
+        let mut cursor = Cursor::new(array_bytes.as_slice());
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, limits),
+            Err(DecodeFailure::AllocationLimit)
         );
     }
 
@@ -1676,6 +2430,58 @@ mod tests {
                 ProtectionPurpose::from(0xA5),
             )?,
             original
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn reordered_containers_have_distinct_signed_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        use mtp_crypto::Ed25519Signer;
+
+        let (signer, _, _) = Ed25519Signer::generate();
+        let first = DataValue::Container(vec![
+            (DataTypeId(1), DataValue::BoolTrue),
+            (DataTypeId(2), DataValue::BoolFalse),
+        ])
+        .sign(1, ProtectionPurpose::from(7), &signer)?;
+        let second = DataValue::Container(vec![
+            (DataTypeId(2), DataValue::BoolFalse),
+            (DataTypeId(1), DataValue::BoolTrue),
+        ])
+        .sign(1, ProtectionPurpose::from(7), &signer)?;
+
+        assert_ne!(first.to_bytes()?, second.to_bytes()?);
+        Ok(())
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn encrypted_decode_limits_bound_owned_entries() -> Result<(), Box<dyn std::error::Error>> {
+        use mtp_crypto::Keyring;
+
+        let keyring = Keyring::generate();
+        let encrypted = DataValue::Bytes(vec![0xAB; 32]).encrypt_for(
+            std::slice::from_ref(&keyring.public_key_bundle()),
+            ProtectionPurpose::from(9),
+        )?;
+        let bytes = encrypted.to_bytes()?;
+        let mut limits = DecodeLimits {
+            max_allocated_bytes: 1,
+            ..DecodeLimits::default()
+        };
+        let mut cursor = Cursor::new(bytes.as_slice());
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, limits),
+            Err(DecodeFailure::AllocationLimit)
+        );
+
+        limits.max_allocated_bytes = usize::MAX;
+        limits.max_recipients = 0;
+        let mut cursor = Cursor::new(bytes.as_slice());
+        assert_eq!(
+            DataValue::read_from_with_diagnostics(&mut cursor, limits),
+            Err(DecodeFailure::RecipientLimit)
         );
         Ok(())
     }

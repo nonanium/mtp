@@ -1,5 +1,6 @@
 use wasm_bindgen::prelude::*;
 
+#[derive(Clone)]
 #[wasm_bindgen]
 pub struct ConnectionConfig {
     pub(crate) url: String,
