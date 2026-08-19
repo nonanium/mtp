@@ -61,7 +61,7 @@
     "pack": "pnpm run release:web",
     "release:web": "node create-web-release.mjs",
     "build:all": "nix run .#build-all",
-    "dup": "jscpd --pattern '**/*.{rs,ts}' --ignore 'target/**' --ignore 'wasm/pkg/**' --ignore '.git/**' --min-lines 8 --min-tokens 80 --threshold 4 --reporters console --noTips .",
+    "dup": "jscpd --pattern '**/*.{rs,ts}' --ignore 'target/**' --ignore 'wasm/pkg/**' --min-lines 8 --min-tokens 80 --threshold 4 --reporters console --no-tips .",
     "test:e2e": "tsc && node test/e2ee.mjs",
     "test:secrets": "tsc && node --test --test-isolation=none test/encrypted-secret.mjs",
     "test:wasm-init": "tsc && node --test test/wasm-init.mjs",
@@ -72,7 +72,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.0.1",
-    "jscpd": "4.2.5",
+    "jscpd": "5.0.14",
     "typescript": "^7.0.0"
   },
   "dependencies": {

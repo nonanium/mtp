@@ -100,10 +100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::to_string_pretty(&*db).ok()
             };
 
-            if let Some(json) = json {
-                if let Err(error) = tokio::fs::write("clients.json", json).await {
-                    eprintln!("Failed to persist clients.json: {error}");
-                }
+            if let Some(json) = json
+                && let Err(error) = tokio::fs::write("clients.json", json).await
+            {
+                eprintln!("Failed to persist clients.json: {error}");
             }
 
             println!("Registered new client with ID: {id}");

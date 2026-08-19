@@ -380,6 +380,7 @@ pub fn build_protected_frame_with_keyring_with_limits(
 /// Read the claimed, unverified signer ID after decrypting the protected
 /// payload. The result may only select trusted keys for the same signer ID.
 #[wasm_bindgen]
+#[allow(deprecated)]
 #[deprecated(note = "use protected_claimed_signer_id_with_limits")]
 pub fn protected_claimed_signer_id(
     frame: &[u8],

@@ -62,7 +62,7 @@ pub fn build_demo_message(
         )
         .add_typed_default(
             DataType::Timestamp,
-            DataValue::UnsignedNumber(timestamp as u128),
+            DataValue::UnsignedNumber(timestamp),
         )
         .add_typed_default(DataType::Data, DataValue::Str("Hello, MTP!".into()))
         .add_typed_default(DataType::Flags, DataValue::BoolTrue)

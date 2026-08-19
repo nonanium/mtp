@@ -47,7 +47,7 @@ fn pong(tm: &TypeMap, data: impl Into<String>) -> Result<CommunicationValue, Str
     CommunicationValue::from_comm(CommunicationType::Pong, tm)
         .add_data(desc_id, DataValue::Str("MTP example response".into()))
         .map_err(|e| e.to_string())?
-        .add_data(ts_id, DataValue::UnsignedNumber(now as u128))
+        .add_data(ts_id, DataValue::UnsignedNumber(now))
         .map_err(|e| e.to_string())?
         .add_data(data_id, DataValue::Str(data.into()))
         .map_err(|e| e.to_string())
@@ -388,7 +388,7 @@ pub fn process_and_respond(
     let response = CommunicationValue::from_comm(CommunicationType::Pong, tm)
         .add_data(desc_id, description)
         .map_err(|e| e.to_string())?
-        .add_data(ts_id, DataValue::UnsignedNumber(now as u128))
+        .add_data(ts_id, DataValue::UnsignedNumber(now))
         .map_err(|e| e.to_string())?
         .add_data(
             data_id,

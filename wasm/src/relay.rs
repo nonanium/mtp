@@ -296,6 +296,7 @@ impl WasmVerifiedRelayContent {
 /// versioned relay metadata parser in the JavaScript SDK. The caller must bind
 /// this value as the expected signer during the subsequent verification call.
 #[wasm_bindgen]
+#[allow(deprecated)]
 #[deprecated(note = "use relay_metadata_claimed_signer_id_with_limits")]
 pub fn relay_metadata_claimed_signer_id(frame: &[u8], keyrings: JsValue) -> Result<u64, JsValue> {
     relay_metadata_claimed_signer_id_impl(frame, keyrings, JsValue::UNDEFINED)

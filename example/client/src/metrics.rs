@@ -79,6 +79,7 @@ pub struct ClientMetrics {
 }
 
 impl ClientMetrics {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             sessions: Vec::new(),

@@ -8,8 +8,22 @@ ignore = []
 
 [bans]
 # Flag multiple versions of the same crate so duplicate trees are visible.
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
+
+# These versions are required by incompatible upstream dependency lines:
+# - pem/rcgen/wtransport still use base64 0.22.
+# - ring and wasm-bindgen still use getrandom 0.2.
+# - current displaydoc/serde/thiserror/tokio and wasm-bindgen trees span syn 2
+#   and syn 3.
+# - ring still uses windows-sys 0.52 while the Tokio/QUIC tree uses 0.61.
+# Keep the duplicate-version policy strict for every other crate/version.
+skip = [
+    { name = "base64", version = "0.22.1" },
+    { name = "getrandom", version = "0.2.17" },
+    { name = "syn", version = "2.0.119" },
+    { name = "windows-sys", version = "0.52.0" },
+]
 
 [licenses]
 # Allowlist of licenses acceptable for this project's dependencies.

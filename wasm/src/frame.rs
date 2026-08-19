@@ -163,6 +163,7 @@ impl JsDataValueEncodeContext {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn js_to_data_value(value: &JsValue, tm: &TypeMap) -> Result<DataValue, JsValue> {
     js_to_data_value_with_limits(value, tm, EncodeLimits::default())
 }
