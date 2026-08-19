@@ -33,6 +33,7 @@ jobs:
             cargo machete
 
             pnpm install --frozen-lockfile
+            pnpm add --save-dev --save-exact --workspace-root jscpd-linux-x64-gnu@5.0.14
             pnpm run dup
 
             RUSTFLAGS="--cfg web_sys_unstable_apis" wasm-pack test --node wasm
