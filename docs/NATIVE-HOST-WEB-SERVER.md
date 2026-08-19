@@ -130,7 +130,7 @@ while let Some(connection) = server.accept().await? {
 ```
 > `MTPWebServer::new` consumes a `HostConfig` (not an `MTPHost` instance). It creates its own QUIC endpoint and does not share a port with a running `MTPHost`.
 
-`server.accept()` returns `Option<WebMTPConnection>` for each WebTransport session. Ordinary HTTP routes do not surface through `accept()` because the server dispatches them internally. `WebMTPConnection` retains the negotiated version, codec, request path, remote address, description, sender, and receiver used by native MTP connections.
+`server.accept()` returns `Option<WebMTPConnection>` for each WebTransport session. Ordinary HTTP routes do not surface through `accept()` because the server dispatches them internally. `WebMTPConnection` retains the negotiated version, codec, `path`, remote address, description, sender, and receiver used by native MTP connections.
 
 ## Deployment
 
@@ -138,7 +138,7 @@ For direct browser access, leave `serve_tcp_https(true)` enabled. The server adv
 
 When a reverse proxy or another process owns TCP, use `WebServerConfig::new().serve_tcp_https(false)`. This retains the UDP HTTP/3/WebTransport endpoint and its shared router without claiming the TCP port.
 
-With port `0` and TCP enabled, construction binds TCP first and binds UDP to the selected TCP port, so `local_addr()` reports the common address. With TCP disabled, Quinn selects the UDP port as before. `shutdown()` stops both accept loops, gracefully finishes active HTTP requests until `drain_timeout`, closes Quinn, and then aborts remaining work. `close()` and dropping the server stop both listeners immediately.
+With port `0` and TCP enabled, construction binds TCP first and binds UDP to the selected TCP port, so `local_addr()` reports the common address. With TCP disabled, Quinn selects the UDP port as before. `shutdown().await` stops both accept loops, gracefully finishes active HTTP requests until `drain_timeout`, closes Quinn, and then aborts remaining work. `close().await` and dropping the server stop both listeners immediately.
 
 ### Authentication
 
@@ -164,12 +164,18 @@ On success, the connection has `AuthState::Authenticated`, the assigned `client_
 
 ## Errors
 
-`MTPWebServer::new` returns `CommunicationError` for certificate parsing, certificate loading, bind failures, and rejected authentication policy.
+`MTPWebServer::new` returns `CommunicationError` for certificate parsing,
+certificate loading, and bind failures. Authentication policy is evaluated when
+WebTransport sessions are accepted, not rejected during construction.
 `accept()` returns `AcceptError` for a missing or unsupported version, a receive failure, or a send failure during the WebTransport opening handshake. HTTP route failures are reported through `WebServerMetrics::error_occurred` when metrics are configured. See [Errors](ERRORS.md) for shared error variants.
 
 `WebServerMetrics` has these callbacks:
 
 ```rust
+use std::time::Duration;
+
+fn connection_accepted(&self)
+fn connection_closed(&self, duration: Duration, reason: &str)
 fn request_started(&self, path: &str)
 fn request_completed(&self, path: &str, status: u16, duration: Duration)
 fn error_occurred(&self, error: &WebServerError)

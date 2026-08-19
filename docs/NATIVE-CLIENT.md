@@ -19,7 +19,7 @@ let request = CommunicationValue::new(CommunicationType::Ping).with_id(1);
 conn.sender.send(&request).await?;
 let response = conn.receive().await?;
 println!("received {:?}", response.id());
-conn.sender.close();
+conn.sender.close().await;
 ```
 
 ## Configuration
@@ -230,7 +230,7 @@ let response = conn
 
 Requests are routed by id through the connection's receive dispatcher. Frames with other ids remain available through `conn.receive()`.
 
-Two send modes (configured via `mtp::transport::Policy`):
+Two send modes (configured via `mtp::client::Policy`):
 - `PersistentStream` (default): reuses one QUIC unidirectional stream
 - `SingleStreamPerMessage`: opens a new stream per message
 
@@ -248,12 +248,16 @@ Inbound frames are queued internally. The `receive()` method returns the next av
 ### Close
 
 ```rust
-conn.sender.close();
+conn.sender.close().await;
 // or
 conn.receiver.close();
 ```
 
-Sends a close frame and signals the peer. The `Sender::close()` spawns an async task that sends the frame, waits for `force_close_delay` (default 300ms), then force-closes the QUIC connection if the peer has not already done so.
+`Sender::close().await` gracefully finishes the active send stream, sends the
+MTP close frame, and waits for `force_close_delay` (default 300ms) before
+force-closing the QUIC connection if necessary. `Sender::close_immediate()` is
+the fire-and-forget variant. `Receiver::close()` closes the local receive
+handle without performing the sender's graceful close sequence.
 
 ### Pipes
 
@@ -309,7 +313,7 @@ For `public_signer`, call `verify` and `into_verified` before calling `decrypt`;
 The `Policy` struct controls transport behaviour:
 
 ```rust
-use mtp::transport::{Policy, SendMode};
+use mtp::client::{Policy, SendMode};
 
 let policy = Policy {
     send_mode: SendMode::PersistentStream,

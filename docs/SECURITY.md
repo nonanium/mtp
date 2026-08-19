@@ -27,7 +27,7 @@ For rotation, publish the replacement certificate or key before changing the ser
 
 ### Development Certificates
 
-The `tls` feature exposes `mtp_crypto::tls::generate_self_signed_cert`. It creates an ECDSA P-256 server certificate for the requested domain, `127.0.0.1`, and `::1`; the certificate is valid for 13 days. `HostConfig::self_signed` provides a transport-level self-signed setup without the crypto certificate helper.
+The `tls` feature exposes `mtp_crypto::tls::generate_self_signed_cert`. It creates an ECDSA P-256 server certificate for the requested domain, `127.0.0.1`, and `::1`; the certificate is valid for 13 days. The lower-level `mtp_transport::HostConfig::self_signed` provides a transport-level self-signed setup without the crypto certificate helper.
 
 Self-signed certificates are for development. Production deployments should use a certificate trusted by the client or an explicitly pinned certificate.
 
@@ -212,6 +212,7 @@ The crate's feature groups are:
 | `serde` | Serialization support for key types |
 | `wasm` | `getrandom` support for WebAssembly |
 | `tls` | Development certificate generation |
+| `password-kdf` | Argon2id password derivation for protected keyring files |
 
 The main types are `Keyring`, `PublicKeyBundle`, `EncryptionType`, `HybridKem`, `XChaCha20Poly1305` (with the legacy `ChaCha20Poly1305` alias), `Aes256Gcm`, `Ed25519Signer`, and `MlDsaSigner`. Hashing and KDF helpers include `sha256`, `sha256_double`, `hkdf_extract`, `hkdf_expand`, and `derive_encryption_key`. Handshake payload builders are in `mtp_crypto::auth`.
 

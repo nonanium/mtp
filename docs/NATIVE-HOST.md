@@ -83,18 +83,18 @@ network metadata, not an authenticated client identity.
 
 ## Version Negotiation
 
-`accept()` uses the version-bearing opening frame and registry flow in [Connector](CONNECTOR.md). The host registry is built from the type maps in `type-maps.yaml` by `Registry::builtin()`.
+`accept()` uses the version-bearing opening frame and registry flow in [Connector](CONNECTOR.md). The host registry is built from the type maps in [`example/type-maps.yaml`](../example/type-maps.yaml) by `Registry::builtin()` in this repository; downstream builds can provide their own `MTP_TYPE_MAPS` configuration.
 
 ### Registry
 
 ```rust
-use mtp::codec::registry::Registry;
+use mtp::codec::Version;
 
 let registry = host.registry();
-assert!(registry.supports(&Version(2, 0)));
+assert!(registry.supports(&Version(3, 0)));
 
-let negotiated = registry.negotiate(&[Version(1, 0), Version(2, 0)]);
-// -> Some(Version(2, 0)) if both versions are registered
+let negotiated = registry.negotiate(&[Version(2, 0), Version(3, 0)]);
+// -> Some(Version(3, 0)) for this repository's builtin map
 ```
 
 ## Authentication Flow
@@ -105,13 +105,15 @@ After a successful handshake, `MTPConnection` exposes `AuthState::Authenticated`
 
 ## Handling Messages
 
-Use `conn.sender` and `conn.receiver` for bidirectional message exchange:
+Use `conn.sender` and `conn.receive()` for bidirectional message exchange. The
+connection dispatcher owns the underlying receiver, especially when `pipes` is
+enabled:
 
 ```rust
 while let Some(conn) = host.accept().await? {
     tokio::spawn(async move {
         loop {
-            match conn.receiver.receive().await {
+            match conn.receive().await {
                 Ok(msg) => {
                     let response = process_message(&msg, &conn);
                     conn.sender.send(&response).await.ok();

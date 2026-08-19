@@ -1,8 +1,14 @@
 # Type Map
 
-This file documents the Type Map & Registry configuration used by the MTP protocol. It will assume you are working with the [example-type-maps.yaml](./../example-type-maps.yaml).
-A type musn't be the version of MTP, it stays independant.
-MTP version defines the codec. The Type-Map version defines the available Types.
+This file documents the type-map and registry configuration used by MTP. The
+repository workspace uses [`example/type-maps.yaml`](../example/type-maps.yaml)
+through [`.cargo/config.toml`](../.cargo/config.toml); that map currently
+selects protocol version 3.0. The root [`example-type-maps.yaml`](../example-type-maps.yaml)
+is a separate illustrative multi-version configuration used by the manual WASM
+build script. Downstream applications should provide their own map.
+
+The protocol version selects the generated codec/type-map build, while the
+type-map entries define the available application types and their IDs.
 
 ## Binary Frame Format
 
@@ -131,7 +137,7 @@ After editing the config and rebuilding, `CommunicationType` and `DataType` enum
 use mtp::type_map::{CommunicationType, DataType, TypeMap};
 
 let tm = TypeMap::v3_0();
-let id = tm.data_id_enum(DataType::SomeType).unwrap();
+let id = tm.data_id_enum(DataType::ExampleText).unwrap();
 ```
 
 For native builds with the `registry` feature, the enums are a **union across
@@ -145,30 +151,31 @@ compiled by the Vite plugin.
 Encoding/decoding uses a `TypeMap` to resolve type names to wire IDs:
 
 ```rust
-use mtp::codec::{encode, decode, DataValue};
+use mtp::codec::{CommunicationType, CommunicationValue, DataType, DataValue};
 use mtp::type_map::TypeMap;
 
-let tm = TypeMap::v2_0();
-let value = DataValue::Str("hello".into());
+let tm = TypeMap::v3_0();
+let value = CommunicationValue::new_with_type_map(CommunicationType::Ping, &tm)
+    .add_typed(DataType::Description, &tm, DataValue::Str("hello".into()));
 
-let bytes = encode(&value, &tm).unwrap();
-let decoded = decode(&bytes, &tm).unwrap();
+let bytes = value.to_bytes().unwrap();
+let decoded = CommunicationValue::from_bytes_with(&bytes, &tm).unwrap();
 ```
 
 ```rust
 let tm_v3 = TypeMap::v3_0();
-assert!(tm_v3.data_id_enum(DataType::SomeType).is_some());
+assert!(tm_v3.data_id_enum(DataType::ExampleText).is_some());
 ```
 
-When communicating with a peer on another version, encode only variants that map in the negotiated version. If an incoming frame names a type absent from the selected map, reject it as a protocol or type-map compatibility error; do not reinterpret its wire ID using another version's map. The self-delimiting codec begins at protocol version `3.0`; older versions are not codec fallbacks.
+When communicating with a peer on another version, encode only variants that map in the negotiated version. If an incoming frame names a type absent from the selected map, reject it as a protocol or type-map compatibility error; do not reinterpret its wire ID using another version's map. The current repository map uses the self-delimiting codec format for protocol version `3.0`; a custom registry may register other version numbers, but those maps are not legacy wire-format fallbacks.
 
 ### Forward/Backward Compatibility Between Versions
 
 Because enums are a union of all types across versions, a variant might exist that has no wire mapping in the *negotiated* version:
 
 ```
-v3.0 client sends DataType::SomeType    → host encodes with v3.0 TypeMap → wire ID 32
-v3.0 host receives an unsupported pre-v3.0 peer                    → version negotiation error
+v3.0 client sends DataType::ExampleText → host encodes with v3.0 TypeMap → wire ID 43
+v3.0 host receives a version absent from the registry                 → version negotiation error
 ```
 
 Encoding a frame with an unmapped communication or data type returns `CodecError::UnknownCommunicationType` or `CodecError::UnknownDataType`. Select a mapped variant from the compiled-in version before sending it.

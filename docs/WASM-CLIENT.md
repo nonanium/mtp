@@ -602,8 +602,19 @@ The SDK logger receives parsed events:
 
 ```typescript
 type MTPLogEvent =
-  | { hint: "info" | "warning"; type: string; data: unknown }
-  | { hint: "error"; type: string | "error"; error: string };
+  | {
+      hint: "info" | "warning";
+      type: string;
+      data: unknown;
+      direction?: "send" | "recv";
+    }
+  | {
+      hint: "error";
+      type: string | "error";
+      error: string;
+      data?: unknown;
+      direction?: "send" | "recv";
+    };
 ```
 
 Incoming non-error frames and sent frames are logged as `info`. Error frames and transport errors are logged as `error`.

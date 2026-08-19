@@ -47,18 +47,29 @@ Feature summary:
 
 | Feature | Pulls in | Enables |
 | --- | --- | --- |
-| `crypto` | `mtp::crypto` | AEAD, signatures, KEM, KDF, hashing |
-| `host` | `mtp::host`, codec registry | QUIC host and version negotiation |
-| `client` | `mtp::client` | QUIC client connections |
-| `webserver` | `mtp::webserver` | HTTPS server with HTTP/1.1, HTTP/2, HTTP/3, and WebTransport MTP sessions |
+| `serde` | Crypto serialization support | Serde implementations for crypto key types |
+| `crypto` | `mtp::crypto` | AEAD, signatures, KEM, KDF, hashing, and connection authentication support |
+| `host` | `mtp::host` | Native QUIC host and version negotiation |
+| `client` | `mtp::client` | Native QUIC client connections |
+| `transport` | `mtp-transport` dependency | Low-level transport support; enabled automatically by `host` and `client` |
+| `pipes` | Pipe support in transport, host, client, and web server | Raw and encrypted byte streams |
+| `files` | `mtp::files` | `.mk` keyrings and `.mpkb` public bundles; also enables `crypto` |
+| `raw` | Raw file APIs | Legacy plaintext keyring migration APIs |
+| `web-server` | `mtp::webserver` | HTTPS server with HTTP/1.1, HTTP/2, HTTP/3, and WebTransport MTP sessions |
+| `full-server` | Native host and web-server surface | `host`, `web-server`, `crypto`, and `pipes` together |
+| `tls` | `mtp::crypto::tls` | Development self-signed certificate generation |
+| `insecure-tls` | Lower-level transport | Development-only certificate verification bypass, gated by `MTP_INSECURE_TLS=1` |
 
-The core crates are always available: `codec`, `transport`, `common`, and `type_map`. See the [native client](./docs/NATIVE-CLIENT.md) and [native host](./docs/NATIVE-HOST.md)
+The core modules always available from the facade are `codec`, `common`, and
+`type_map`. Native `client` and `host` modules re-export the transport policy
+types; the low-level transport crate is not exposed as `mtp::transport`. See the [native client](./docs/NATIVE-CLIENT.md) and [native host](./docs/NATIVE-HOST.md)
 guides for configuration and usage. See [Security](./docs/SECURITY.md) for security boundaries.
 
 ## Sub-crates
 
 The `mtp` facade re-exports the following modules:
-`mtp::codec`, `mtp::transport`, `mtp::common`, `mtp::type_map`, `mtp::crypto`, `mtp::host`, and `mtp::client`.
+`mtp::codec`, `mtp::common`, `mtp::type_map`, `mtp::crypto`, `mtp::host`,
+`mtp::client`, `mtp::files`, and `mtp::webserver` when their features are enabled.
 
 ### Codec
 

@@ -112,4 +112,9 @@ identity-specific response for deployments where IDs are public.
 
 The client sends one compiled-in protocol version. The host compares it with the versions in its registry and returns the selected version in the opening response. Subsequent frames use that version's type map. An unsupported version closes the connection with `AcceptError::UnsupportedVersion`.
 
-The self-delimiting `DataValue` codec and the three-bit communication header begin at protocol version `3.0`. A peer offering an older codec version is rejected during version negotiation; the new decoder does not attempt legacy flag, ID, or crypto-container fallbacks.
+The current self-delimiting `DataValue` codec and three-bit communication header
+are used by the repository's protocol 3.0 map. The checked-in builtin registry
+contains only 3.0, so its native clients and hosts do not provide legacy map
+fallbacks. Type-map versions are configuration-driven; a custom registry may
+register another version number, but its map must use the current codec format
+and is not a fallback for a different legacy wire format.

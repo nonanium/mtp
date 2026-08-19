@@ -12,6 +12,8 @@ MTP reports codec failures separately from connection and transport failures.
 | `ReservedCommunicationType` | An application attempted to use a reserved communication type ID. |
 | `InvalidEncoding` | Bytes do not match the MTP value or frame format. |
 | `TooManyEntries` | A serialized value or frame exceeds its representable size. |
+| `MissingTypeMap` | A versioned codec was asked to encode a value without a retained negotiated type map. |
+| `TypeMapMismatch` | A value was created with a different protocol type map from the codec or peer operation. |
 | `CryptoFailed` | Signing, verification, encryption, or decryption failed while encoding or decoding. |
 | `MissingField` | A required typed field is absent. |
 
@@ -43,4 +45,4 @@ Native builds may expose additional variants wrapping QUIC and WebTransport erro
 
 ## Authentication Rejections
 
-The host reports unsupported or missing protocol versions through `AcceptError`. Authentication failures return `AcceptError::AuthenticationFailed` after the host sends a rejected handshake response. The authentication flow and its signed fields are defined in [Security](SECURITY.md).
+The host reports unsupported or missing protocol versions through `AcceptError`. Authentication failures return `AcceptError::AuthenticationFailed` after the host sends a rejected handshake response; a handshake that exceeds the configured limit returns `AcceptError::AuthenticationTimedOut`. The authentication flow and its signed fields are defined in [Security](SECURITY.md).

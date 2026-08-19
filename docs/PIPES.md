@@ -167,6 +167,9 @@ if let Some(writer) = handle.wait().await? {
 ```rust
 // Host
 use mtp_transport::{PipeSessionParameters, accept_pipe_session};
+use sha2::{Digest, Sha256};
+
+// The streaming digest below requires `sha2` as a direct application dependency.
 
 while let Ok(request) = conn.receive_pipe().await {
     if request.description() != "file-upload" {
@@ -182,7 +185,7 @@ while let Ok(request) = conn.receive_pipe().await {
     let mut reader = accept_pipe_session(
         reader.into_inner(), &params, &own_keyring, &client_public_bundle,
     ).await?;
-    let mut hasher = sha2::Sha256::new();
+    let mut hasher = Sha256::new();
     while let Some(chunk) = reader.read_record().await? {
         hasher.update(&chunk);
         process_chunk(&chunk).await?;
