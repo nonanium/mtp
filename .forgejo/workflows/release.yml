@@ -14,16 +14,10 @@ on:
         required: true
         type: string
 
-env:
-  NIX_CONFIG: experimental-features = nix-command flakes
-
 jobs:
   release:
     runs-on: nixos
     steps:
-      - name: Install node & bun
-        run: nix profile add nixpkgs#nodejs_24 nixpkgs#bun
-
       - name: Check out repo
         uses: https://data.forgejo.org/actions/checkout@v7
         with:
@@ -31,9 +25,6 @@ jobs:
 
       - name: Install dependencies
         run: bun install
-
-      - name: Install cc linker, sed & jq
-        run: nix profile add nixpkgs#stdenv.cc nixpkgs#gnused nixpkgs#jq
 
       - name: Build all
         run: bun build:all
