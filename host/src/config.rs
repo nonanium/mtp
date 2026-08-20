@@ -251,6 +251,8 @@ pub struct HostConfig {
     #[cfg(feature = "crypto")]
     pub authentication_policy: AuthenticationPolicy,
     #[cfg(feature = "crypto")]
+    authentication_policy_explicit: bool,
+    #[cfg(feature = "crypto")]
     pub auth_timeout: Duration,
     #[cfg(feature = "crypto")]
     pub require_pq: bool,
@@ -287,6 +289,8 @@ impl HostConfig {
             send_pongs: true,
             #[cfg(feature = "crypto")]
             authentication_policy: AuthenticationPolicy::Unauthenticated,
+            #[cfg(feature = "crypto")]
+            authentication_policy_explicit: false,
             #[cfg(feature = "crypto")]
             auth_timeout: Duration::from_secs(30),
             #[cfg(feature = "crypto")]
@@ -341,7 +345,9 @@ impl HostConfig {
         get_existing_client: GetExistingClient,
         complete_register: CompleteRegister,
     ) -> Self {
-        self.authentication_policy = AuthenticationPolicy::ForceAuthentication;
+        if !self.authentication_policy_explicit {
+            self.authentication_policy = AuthenticationPolicy::ForceAuthentication;
+        }
         self.host_keyring = host_keyring;
         self.get_existing_client = Box::new(get_existing_client);
         self.complete_register = Box::new(complete_register);
@@ -351,6 +357,7 @@ impl HostConfig {
     #[cfg(feature = "crypto")]
     pub fn with_authentication_policy(mut self, policy: AuthenticationPolicy) -> Self {
         self.authentication_policy = policy;
+        self.authentication_policy_explicit = true;
         self
     }
 
@@ -439,6 +446,80 @@ mod tests {
             !limiter
                 .allow(&registration)
                 .expect("repeated registration decision")
+        );
+    }
+
+    fn test_keyring() -> mtp_crypto::Keyring {
+        mtp_crypto::Keyring::new(
+            mtp_crypto::KemPublicKey::new(Vec::new()),
+            mtp_crypto::KemPrivateKey::new(Vec::new()),
+            mtp_crypto::SignaturePqPublicKey::new(Vec::new()),
+            mtp_crypto::SignaturePqPrivateKey::new(Vec::new()),
+            mtp_crypto::SignaturePublicKey::new(Vec::new()),
+            mtp_crypto::SignaturePrivateKey::new(Vec::new()),
+        )
+    }
+
+    fn test_get_existing_client() -> GetExistingClient {
+        Box::new(|_, _| Box::pin(async { None }))
+    }
+
+    fn test_complete_register() -> CompleteRegister {
+        Box::new(|_, _| Box::pin(async { 1 }))
+    }
+
+    fn test_config() -> HostConfig {
+        HostConfig::new(
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            4433,
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn with_authentication_defaults_to_force_authentication() {
+        let config = test_config().with_authentication(
+            test_keyring(),
+            test_get_existing_client(),
+            test_complete_register(),
+        );
+
+        assert_eq!(
+            config.authentication_policy,
+            AuthenticationPolicy::ForceAuthentication
+        );
+    }
+
+    #[test]
+    fn explicit_authentication_policy_before_with_authentication_is_preserved() {
+        let config = test_config()
+            .with_authentication_policy(AuthenticationPolicy::AllowAuthentication)
+            .with_authentication(
+                test_keyring(),
+                test_get_existing_client(),
+                test_complete_register(),
+            );
+
+        assert_eq!(
+            config.authentication_policy,
+            AuthenticationPolicy::AllowAuthentication
+        );
+    }
+
+    #[test]
+    fn explicit_authentication_policy_after_with_authentication_is_preserved() {
+        let config = test_config()
+            .with_authentication(
+                test_keyring(),
+                test_get_existing_client(),
+                test_complete_register(),
+            )
+            .with_authentication_policy(AuthenticationPolicy::AllowAuthentication);
+
+        assert_eq!(
+            config.authentication_policy,
+            AuthenticationPolicy::AllowAuthentication
         );
     }
 }
