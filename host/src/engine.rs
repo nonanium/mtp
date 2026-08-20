@@ -309,6 +309,12 @@ impl HandshakeEngine {
             ) || registration
                 || first_msg.get_data(DataType::PublicKeys).is_some()
                 || claimed_client_id.is_some_and(|client_id| client_id != 0);
+            tracing::info!(
+                claimed_client_id = ?claimed_client_id,
+                registration,
+                authentication_requested,
+                "classified MTP opening authentication mode"
+            );
             if authentication_requested {
                 let attempt = crate::config::AuthenticationAttempt {
                     peer_network_identity: _authentication_context.peer_network_identity.clone(),
@@ -566,6 +572,7 @@ impl HandshakeEngine {
             }
 
             // Unknown or zero ID: fall back to guest
+            tracing::info!("allocating MTP guest identity");
             let guest_id_lease = match self.assign_guest_id().await {
                 Ok(lease) => lease,
                 Err(error) => {
@@ -574,6 +581,7 @@ impl HandshakeEngine {
                 }
             };
             let guest_id = guest_id_lease.id;
+            tracing::info!(guest_id, "allocated MTP guest identity");
             send_accepted_generic(sender, &negotiated, tm, Some(guest_id))
                 .await
                 .map_err(AcceptError::Send)?;

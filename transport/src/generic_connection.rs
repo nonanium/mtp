@@ -9,7 +9,7 @@ use crate::{
     connection::{DecodeRejectionCounters, RuntimePolicy, classify_decode_error},
     framing::{RetryClassifier, write_frame},
 };
-use mtp_codec::{CommunicationValue, DecodeLimits, TypeMap};
+use mtp_codec::{CommunicationValue, DataType, DecodeLimits, TypeMap};
 use mtp_common::CommunicationError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,6 +66,15 @@ impl<C: TransportConnection> GenericSender<C> {
         let _lock = self.send_lock.lock().await;
         if self.connection.close_reason().is_some() {
             return Err(CommunicationError::StreamClosed);
+        }
+        if let Some(version) = value.get_str(DataType::Version) {
+            tracing::debug!(
+                message_type = ?value.get_type(),
+                version,
+                connected = ?value.get_data(DataType::Connected),
+                client_id = ?value.get_data(DataType::Id),
+                "sending MTP handshake response frame"
+            );
         }
         match self.policy.send_mode {
             crate::SendMode::SingleStreamPerMessage => {

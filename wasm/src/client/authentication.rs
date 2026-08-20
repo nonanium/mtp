@@ -99,10 +99,19 @@ impl WasmClient {
                 return Err(js_error(message));
             }
 
+            let missing_version = || {
+                js_error(format!(
+                    "host omitted a valid negotiated protocol version (response_type={:?}, connected={:?}, frame_len={})",
+                    outcome.get_type(),
+                    outcome.get_data(DataType::Connected),
+                    outcome_bytes.len(),
+                ))
+            };
+
             let negotiated_version = match outcome.get_data(DataType::Version) {
                 Some(DataValue::Str(version)) => mtp_codec::Version::parse(version)
-                    .ok_or_else(|| js_error("host omitted a valid negotiated protocol version"))?,
-                _ => return Err(js_error("host omitted a valid negotiated protocol version")),
+                    .ok_or_else(|| missing_version())?,
+                _ => return Err(missing_version()),
             };
             if negotiated_version != PROTOCOL_VERSION {
                 return Err(js_error(
