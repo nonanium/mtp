@@ -423,6 +423,12 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                 break;
                             }
                         };
+                        tracing::debug!(
+                            frames,
+                            frame_len,
+                            message_type = ?message.get_type(),
+                            "decoded MTP receive frame"
+                        );
                         let negotiated_type_map = type_map.read().await.clone();
                         message.set_type_map(&negotiated_type_map);
 

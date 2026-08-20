@@ -217,6 +217,12 @@ impl HandshakeEngine {
         _authentication_context: &AuthenticationContext,
     ) -> Result<HandshakeResult, AcceptError> {
         let mut first_msg = receiver.receive().await.map_err(AcceptError::Receive)?;
+        tracing::debug!(
+            message_type = ?first_msg.get_type(),
+            version = ?first_msg.get_str(DataType::Version),
+            client_id = ?first_msg.get_data(DataType::Id),
+            "received MTP opening message"
+        );
 
         let version_str = match first_msg.get_data(DataType::Version) {
             Some(DataValue::Str(s)) => s.clone(),
@@ -271,6 +277,11 @@ impl HandshakeEngine {
                 return Err(AcceptError::UnsupportedVersion(client_version));
             }
         };
+        tracing::debug!(
+            client_version = %client_version,
+            negotiated_version = %negotiated,
+            "MTP protocol version negotiated"
+        );
 
         let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
             .ok_or_else(|| AcceptError::UnsupportedVersion(negotiated.clone()))?;
@@ -1105,6 +1116,12 @@ async fn send_rejection_generic<S: HandshakeSender>(
         .add_typed_default(DataType::Connected, DataValue::BoolFalse)
         .add_typed_default(DataType::ErrorMessage, DataValue::Str(reason.to_string())),
     };
+    tracing::debug!(
+        reason = %reason,
+        response_type = ?response.get_type(),
+        has_version = response.get_data(DataType::Version).is_some(),
+        "sending MTP handshake rejection"
+    );
     let _ = sender.send(&response).await;
 }
 
@@ -1138,6 +1155,11 @@ async fn send_accepted_generic<S: HandshakeSender>(
     if let Some(id) = assigned_id {
         response = response.add_typed_default(DataType::Id, DataValue::UnsignedNumber(id as u128));
     }
+    tracing::debug!(
+        version = %version,
+        assigned_id = ?assigned_id,
+        "sending accepted MTP handshake response"
+    );
     sender.send(&response).await?;
     sender.finish_stream().await
 }

@@ -128,8 +128,6 @@ pub struct WasmTransport {
     buffer: Rc<RefCell<Vec<u8>>>,
     /// Set to `true` when `open_next_stream` succeeds; cleared after the first frame is parsed.
     new_stream_frame: Rc<Cell<bool>>,
-    /// A single ordered browser send stream shared by all cloned transports.
-    outgoing_writer: Rc<RefCell<Option<JsValue>>>,
     /// Serializes stream creation and writes across concurrent callers.
     send_lock: Rc<AsyncMutex<()>>,
     type_map: Rc<RefCell<TypeMap>>,
@@ -209,7 +207,6 @@ impl WasmTransport {
             stream_reader: Rc::new(RefCell::new(None)),
             buffer: Rc::new(RefCell::new(Vec::new())),
             new_stream_frame: Rc::new(Cell::new(false)),
-            outgoing_writer: Rc::new(RefCell::new(None)),
             send_lock: Rc::new(AsyncMutex::new(())),
             type_map: Rc::new(RefCell::new(TypeMap::latest())),
             decode_limits: Rc::new(RefCell::new(decode_limits)),
@@ -247,30 +244,30 @@ impl WasmTransport {
             return Err(js_error("message too large"));
         }
 
-        let writer_val = if let Some(writer) = self.outgoing_writer.borrow().clone() {
-            writer
-        } else {
-            let create_stream = js_sys::Reflect::get(
-                &self.inner,
-                &JsValue::from_str("createUnidirectionalStream"),
-            )?
+        // Use one WebTransport uni-stream per MTP frame. Chromium reliably
+        // publishes a browser-created uni-stream to the peer when it is
+        // closed; leaving a shared stream open can leave the server waiting
+        // in accept_uni() until the authentication deadline. The bytes are
+        // already the canonical MTP self-framed value, so no extra stream
+        // length prefix is added here.
+        let create_stream = js_sys::Reflect::get(
+            &self.inner,
+            &JsValue::from_str("createUnidirectionalStream"),
+        )?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| js_error("createUnidirectionalStream not a function"))?;
+        let stream_promise = create_stream
+            .call0(&self.inner)?
+            .dyn_into::<js_sys::Promise>()
+            .map_err(|_| js_error("createUnidirectionalStream did not return a Promise"))?;
+        let stream = JsFuture::from(stream_promise).await?;
+        let writable_or_stream = resolve_stream_writable(&stream)?;
+        let writer_val = js_sys::Reflect::get(&writable_or_stream, &JsValue::from_str("getWriter"))
+            .map_err(|_| js_error("missing getWriter"))?
             .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("createUnidirectionalStream not a function"))?;
-            let stream_promise = create_stream
-                .call0(&self.inner)?
-                .dyn_into::<js_sys::Promise>()
-                .map_err(|_| js_error("createUnidirectionalStream did not return a Promise"))?;
-            let stream = JsFuture::from(stream_promise).await?;
-            let writable_or_stream = resolve_stream_writable(&stream)?;
-            let writer = js_sys::Reflect::get(&writable_or_stream, &JsValue::from_str("getWriter"))
-                .map_err(|_| js_error("missing getWriter"))?
-                .dyn_into::<js_sys::Function>()
-                .map_err(|_| js_error("getWriter not a function"))?
-                .call0(&writable_or_stream)
-                .map_err(|_| js_error("getWriter call failed"))?;
-            *self.outgoing_writer.borrow_mut() = Some(writer.clone());
-            writer
-        };
+            .map_err(|_| js_error("getWriter not a function"))?
+            .call0(&writable_or_stream)
+            .map_err(|_| js_error("getWriter call failed"))?;
 
         let chunk = js_sys::Uint8Array::from(frame);
 
@@ -283,10 +280,23 @@ impl WasmTransport {
             .map_err(|e| js_error(format!("write failed: {:?}", e)))?;
         if let Err(e) = JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await {
             log_stream_error_code(&e, "send_frame write");
-            self.outgoing_writer.borrow_mut().take();
             release_writer_lock(&writer_val);
             return Err(e);
         }
+
+        let close_fn = js_sys::Reflect::get(&writer_val, &JsValue::from_str("close"))
+            .map_err(|_| js_error("missing close"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("close not a function"))?;
+        let close_promise = close_fn
+            .call0(&writer_val)
+            .map_err(|e| js_error(format!("close failed: {:?}", e)))?;
+        if let Err(e) = JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await {
+            // The frame was already written; do not retry it merely because
+            // FIN failed, as that would duplicate the MTP frame.
+            log_stream_error_code(&e, "send_frame close");
+        }
+        release_writer_lock(&writer_val);
 
         Ok(())
     }
@@ -677,12 +687,6 @@ impl WasmTransport {
     }
 
     pub fn close(&self) {
-        if let Some(writer) = self.outgoing_writer.borrow_mut().take() {
-            // The WebTransport session close below terminates the stream. The
-            // lock must be released first so dropping it is not interpreted as
-            // an application abort.
-            release_writer_lock(&writer);
-        }
         // Release reader locks before closing so they aren't treated as cancels.
         if let Some(reader) = self.stream_reader.borrow_mut().take() {
             release_reader_lock(&reader);

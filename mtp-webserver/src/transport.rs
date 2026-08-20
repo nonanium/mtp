@@ -88,6 +88,7 @@ impl TransportRecvStream for H3TransportReceiver {
                     tracing::debug!(
                         remote = %self.quinn.remote_address(),
                         bytes = buf.len(),
+                        header = ?buf,
                         "received first bytes from WebTransport MTP stream"
                     );
                 }
