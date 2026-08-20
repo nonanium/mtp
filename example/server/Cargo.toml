@@ -1,6 +1,6 @@
 [package]
 name = "server"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [[bin]]
@@ -8,12 +8,12 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
-mtp = { version = "0.2.0", path = "../../", features = ["crypto", "tls", "web-server", "files", "pipes"] }
+mtp = { version = "0.3.0", path = "../../", features = ["crypto", "tls", "web-server", "files", "pipes", "raw"] }
 tokio = { version = "1", features = ["full"] }
 http = "1"
 serde_json = { version = "1" }
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 tracing-subscriber = "0.3.23"
 serde = { version = "1", features = ["derive"] }
 rand = "0.10.1"

@@ -265,7 +265,7 @@ async fn test_regular_messages_still_work_alongside_pipes() -> Result<(), Box<dy
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
-    let msg = CommunicationValue::new(mtp_codec::CommunicationType::Pong);
+    let msg = CommunicationValue::new(mtp_codec::CommunicationType::BadRequest);
     sender.send(&msg).await?;
 
     let _pipe_writer = sender.open_pipe(1, "mixed-pipe").await?;
@@ -273,7 +273,7 @@ async fn test_regular_messages_still_work_alongside_pipes() -> Result<(), Box<dy
     let received = receiver.receive().await?;
     assert_eq!(
         received.get_type(),
-        mtp_codec::CommunicationType::Pong
+        mtp_codec::CommunicationType::BadRequest
             .try_to_id(&mtp_codec::TypeMap::latest())
             .unwrap()
     );

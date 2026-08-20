@@ -14,7 +14,7 @@ jobs:
     runs-on: nixos
     steps:
       - name: Checkout
-        uses: https://data.forgejo.org/actions/checkout@v4
+        uses: https://data.forgejo.org/actions/checkout@v7
 
       - name: Run checks
         run: |
@@ -29,6 +29,7 @@ jobs:
             cargo machete
 
             pnpm install --frozen-lockfile
+            pnpm add --save-dev --save-exact --workspace-root jscpd-linux-x64-gnu@5.0.14
             pnpm run dup
 
             RUSTFLAGS="--cfg web_sys_unstable_apis" wasm-pack test --node wasm
@@ -37,6 +38,9 @@ jobs:
             pnpm --filter mtp-web-client run build
 
             node test/e2ee.mjs
+            pnpm run test:secrets
+            pnpm run test:types
+            pnpm run test:boundary
 
             (
               cd example

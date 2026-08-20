@@ -6,8 +6,18 @@ pub enum CryptoError {
     EncryptionFailed,
     #[error("decryption failed")]
     DecryptionFailed,
+    #[error("decryption output exceeds the caller's allocation limit")]
+    AllocationLimit,
+    #[error("malformed encryption envelope")]
+    MalformedEnvelope,
+    #[error("no encryption recipients")]
+    NoRecipients,
+    #[error("no matching encryption recipient")]
+    NoMatchingRecipient,
     #[error("invalid key length")]
     InvalidKeyLength,
+    #[error("public and private key material do not match")]
+    InvalidKeyMaterial,
     #[error("invalid nonce length")]
     InvalidNonceLength,
     #[error("invalid signature")]

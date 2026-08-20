@@ -1,4 +1,4 @@
-use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, Version};
+use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap, Version};
 use mtp_common::CommunicationError;
 
 pub(crate) fn unexpected_response_type_error(
@@ -24,7 +24,7 @@ pub(crate) async fn verify_host_challenge(
     use mtp_crypto::{auth, verify_ed25519};
 
     let sig = match challenge.get_data(DataType::Signature) {
-        DataValue::Bytes(b) => b.clone(),
+        Some(DataValue::Bytes(b)) => b.clone(),
         _ => {
             return Err(CommunicationError::AuthenticationFailed(
                 "Missing host challenge signature".into(),
@@ -32,11 +32,11 @@ pub(crate) async fn verify_host_challenge(
         }
     };
     let pq_sig = match challenge.get_data(DataType::PqSignature) {
-        DataValue::Bytes(b) => b.clone(),
+        Some(DataValue::Bytes(b)) => b.clone(),
         _ => vec![],
     };
 
-    let host_requires_pq = challenge.get_data(DataType::RequirePq) == &DataValue::BoolTrue;
+    let host_requires_pq = challenge.get_data(DataType::RequirePq) == Some(&DataValue::BoolTrue);
     if host_requires_pq && host_pk.sig_pq_public_key.as_bytes().is_empty() {
         return Err(CommunicationError::AuthenticationFailed(
             "Host requires post-quantum authentication but its PQ public key is absent".into(),
@@ -80,7 +80,7 @@ pub(crate) async fn verify_host_final(
     use mtp_crypto::{auth, verify_ed25519};
 
     match response.get_data(DataType::ClientNonce) {
-        DataValue::UnsignedNumber(n) if *n == client_nonce => {}
+        Some(DataValue::UnsignedNumber(n)) if *n == client_nonce => {}
         _ => {
             return Err(CommunicationError::AuthenticationFailed(
                 "Nonce mismatch".into(),
@@ -89,7 +89,7 @@ pub(crate) async fn verify_host_final(
     }
 
     let sig = match response.get_data(DataType::Signature) {
-        DataValue::Bytes(b) => b.clone(),
+        Some(DataValue::Bytes(b)) => b.clone(),
         _ => {
             return Err(CommunicationError::AuthenticationFailed(
                 "Missing signature".into(),
@@ -97,7 +97,7 @@ pub(crate) async fn verify_host_final(
         }
     };
     let pq_sig = match response.get_data(DataType::PqSignature) {
-        DataValue::Bytes(b) => b.clone(),
+        Some(DataValue::Bytes(b)) => b.clone(),
         _ => vec![],
     };
     if require_pq && pq_sig.is_empty() {
@@ -130,8 +130,8 @@ pub(crate) fn check_connected(
     reject_msg: &str,
 ) -> Result<(), CommunicationError> {
     match response.get_data(DataType::Connected) {
-        DataValue::BoolTrue => Ok(()),
-        DataValue::BoolFalse => Err(CommunicationError::AuthenticationFailed(
+        Some(DataValue::BoolTrue) => Ok(()),
+        Some(DataValue::BoolFalse) => Err(CommunicationError::AuthenticationFailed(
             response
                 .get_str(DataType::ErrorMessage)
                 .unwrap_or(reject_msg)
@@ -147,7 +147,7 @@ pub(crate) fn negotiated_version(
     response: &CommunicationValue,
 ) -> Result<Version, CommunicationError> {
     match response.get_data(DataType::Version) {
-        DataValue::Str(version) => Version::parse(version).ok_or_else(|| {
+        Some(DataValue::Str(version)) => Version::parse(version).ok_or_else(|| {
             CommunicationError::AuthenticationFailed(
                 "Host returned an invalid negotiated protocol version".into(),
             )
@@ -162,16 +162,18 @@ pub(crate) async fn signed_challenge_response(
     keys: &mtp_crypto::Keyring,
     proof_payload: Vec<u8>,
     client_nonce: u128,
+    type_map: &TypeMap,
 ) -> Result<CommunicationValue, CommunicationError> {
     use mtp_crypto::{Ed25519Signer, MlDsaSigner, SignatureScheme};
 
     let signer = Ed25519Signer::new(&keys.sig_cl_secret_key)
         .map_err(|e| CommunicationError::Other(e.to_string()))?;
-    let mut proof = CommunicationValue::new(CommunicationType::ChallengeResponse)
-        .add_typed_default(
-            DataType::ClientNonce,
-            DataValue::UnsignedNumber(client_nonce),
-        );
+    let mut proof =
+        CommunicationValue::new_with_type_map(CommunicationType::ChallengeResponse, type_map)
+            .add_typed_default(
+                DataType::ClientNonce,
+                DataValue::UnsignedNumber(client_nonce),
+            );
 
     if keys.sig_pq_secret_key.as_bytes().is_empty() {
         let signature = signer
@@ -213,14 +215,14 @@ pub(crate) async fn receive_verified_challenge(
     }
 
     let server_challenge = match challenge.get_data(DataType::ServerNonce) {
-        DataValue::UnsignedNumber(n) => *n,
+        Some(DataValue::UnsignedNumber(n)) => *n,
         _ => {
             return Err(CommunicationError::AuthenticationFailed(
                 "Missing server challenge".into(),
             ));
         }
     };
-    if challenge.get_data(DataType::RequirePq) == &DataValue::BoolTrue && !client_has_pq_key {
+    if challenge.get_data(DataType::RequirePq) == Some(&DataValue::BoolTrue) && !client_has_pq_key {
         return Err(CommunicationError::AuthenticationFailed(
             "Host requires post-quantum authentication but the client PQ key is absent".into(),
         ));

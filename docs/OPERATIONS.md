@@ -39,4 +39,4 @@ Back up host keyrings and client keyrings as protected secrets. Test restoring a
 
 ### Graceful Shutdown
 
-Stop accepting new connections, reject new work at the application layer, and allow active requests and pipe writers to finish. For `MTPWebServer`, call `shutdown()`; its `drain_timeout` controls graceful TCP HTTP completion and the QUIC drain period before remaining connection tasks are terminated.
+Stop accepting new connections, reject new work at the application layer, and allow active requests and pipe writers to finish. For `MTPWebServer`, call `shutdown().await`; its `drain_timeout` controls graceful TCP HTTP completion and the QUIC drain period before remaining connection tasks are terminated.

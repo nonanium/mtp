@@ -31,20 +31,22 @@ mod error {
     }
 }
 
-use mtp_codec::{CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Version};
+use mtp_codec::{
+    CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Version,
+    registry::{Registry, VersionedCodec},
+};
 use mtp_common::{CommunicationError, HandshakeOutcome, RejectionReason};
 
 use connection::connection_from_parts;
 
 fn parse_handshake_response(
     response: &CommunicationValue,
+    type_map: &mtp_codec::TypeMap,
 ) -> Result<HandshakeOutcome, CommunicationError> {
-    let tm = mtp_codec::TypeMap::latest();
-
-    let bad_version = mtp_codec::CommunicationType::ErrorBadVersion.try_to_id(&tm);
+    let bad_version = mtp_codec::CommunicationType::ErrorBadVersion.try_to_id(type_map);
     if Some(response.get_type()) == bad_version {
         let supported_versions = match response.get_data(DataType::Version) {
-            DataValue::Str(v) if !v.is_empty() => v.split(',').map(String::from).collect(),
+            Some(DataValue::Str(v)) if !v.is_empty() => v.split(',').map(String::from).collect(),
             _ => vec![],
         };
         return Ok(HandshakeOutcome::Rejected {
@@ -53,7 +55,7 @@ fn parse_handshake_response(
     }
 
     let expected = mtp_codec::CommunicationType::IdentificationResponse
-        .try_to_id(&tm)
+        .try_to_id(type_map)
         .ok_or_else(|| {
             CommunicationError::Other("IdentificationResponse is absent from the type map".into())
         })?;
@@ -68,9 +70,9 @@ fn parse_handshake_response(
     }
 
     match response.get_data(DataType::Connected) {
-        DataValue::BoolTrue => {
+        Some(DataValue::BoolTrue) => {
             let version = match response.get_data(DataType::Version) {
-                DataValue::Str(v) => v.clone(),
+                Some(DataValue::Str(v)) => v.clone(),
                 _ => {
                     return Err(CommunicationError::Other(
                         "host omitted the negotiated version".into(),
@@ -78,15 +80,21 @@ fn parse_handshake_response(
                 }
             };
             let assigned_id = match response.get_data(DataType::Id) {
-                DataValue::UnsignedNumber(n) => *n as u64,
-                _ => 0,
+                Some(DataValue::UnsignedNumber(n)) => u64::try_from(*n).map_err(|_| {
+                    CommunicationError::Other("host returned an out-of-range client id".into())
+                })?,
+                _ => {
+                    return Err(CommunicationError::Other(
+                        "host omitted the assigned client id".into(),
+                    ));
+                }
             };
             Ok(HandshakeOutcome::Accepted {
                 version,
                 assigned_id,
             })
         }
-        DataValue::BoolFalse => {
+        Some(DataValue::BoolFalse) => {
             let detail = response
                 .get_str(DataType::ErrorMessage)
                 .unwrap_or("host rejected the connection")
@@ -99,20 +107,34 @@ fn parse_handshake_response(
     }
 }
 
+fn codec_for_version(version: &Version) -> Result<VersionedCodec, CommunicationError> {
+    VersionedCodec::for_version(Registry::builtin(), version.clone()).ok_or_else(|| {
+        CommunicationError::Other(format!(
+            "host returned unsupported protocol version {version}"
+        ))
+    })
+}
+
 pub struct MTPClient;
 
 impl MTPClient {
     pub async fn connect(config: ClientConfig) -> Result<MTPConnection, CommunicationError> {
         let (sender, receiver) =
             mtp_transport::connect(&config.url, config.server_cert(), config.policy).await?;
+        let opening_codec = codec_for_version(&PROTOCOL_VERSION)?;
+        sender.set_type_map(opening_codec.type_map()).await;
+        receiver.set_type_map(opening_codec.type_map()).await;
 
         let version_str = format!("{}", PROTOCOL_VERSION);
-        let mut ident = CommunicationValue::new(mtp_codec::CommunicationType::Identification)
-            .add_typed_default(DataType::Version, DataValue::Str(version_str))
-            .add_typed_default(
-                DataType::Id,
-                DataValue::UnsignedNumber(config.client_id.into()),
-            );
+        let mut ident = CommunicationValue::new_with_type_map(
+            mtp_codec::CommunicationType::Identification,
+            opening_codec.type_map(),
+        )
+        .add_typed_default(DataType::Version, DataValue::Str(version_str))
+        .add_typed_default(
+            DataType::Id,
+            DataValue::UnsignedNumber(config.client_id.into()),
+        );
         if let Some(desc) = &config.description {
             ident = ident.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
         }
@@ -120,32 +142,47 @@ impl MTPClient {
         sender.send(&ident).await?;
 
         let response = receiver.receive().await?;
-        let outcome = parse_handshake_response(&response)?;
-        let negotiated = match outcome {
-            mtp_common::HandshakeOutcome::Accepted { version, .. } => Version::parse(&version)
-                .ok_or_else(|| {
+        let outcome = parse_handshake_response(&response, opening_codec.type_map())?;
+        let (negotiated, assigned_id) = match outcome {
+            mtp_common::HandshakeOutcome::Accepted {
+                version,
+                assigned_id,
+            } => (
+                Version::parse(&version).ok_or_else(|| {
                     CommunicationError::Other("host returned an invalid negotiated version".into())
                 })?,
+                assigned_id,
+            ),
             mtp_common::HandshakeOutcome::Rejected { reason } => {
                 sender.close().await;
                 return Err(CommunicationError::Other(reason.to_string()));
             }
         };
+        #[cfg(not(feature = "crypto"))]
+        let _ = assigned_id;
+        if negotiated != PROTOCOL_VERSION {
+            sender.close().await;
+            return Err(CommunicationError::Other(
+                "host selected a protocol version the client did not offer".into(),
+            ));
+        }
+        let codec = codec_for_version(&negotiated)?;
 
         #[cfg(feature = "crypto")]
-        let client_id = config.client_id;
+        let client_id = assigned_id;
         #[cfg(feature = "crypto")]
         return Ok(connection_from_parts(
             config,
             sender,
             receiver,
             negotiated,
+            codec,
             error::AuthState::Unauthenticated,
             client_id,
         )
         .await);
         #[cfg(not(feature = "crypto"))]
-        Ok(connection_from_parts(config, sender, receiver, negotiated).await)
+        Ok(connection_from_parts(config, sender, receiver, negotiated, codec).await)
     }
 }
 
@@ -180,15 +217,27 @@ impl MTPClient {
         let (sender, receiver) =
             mtp_transport::connect(&config.url, config.server_cert(), config.policy).await?;
 
-        let tm = mtp_codec::TypeMap::latest();
+        let handshake_codec = codec_for_version(&PROTOCOL_VERSION)?;
+        let tm = handshake_codec.type_map().clone();
+        sender.set_type_map(&tm).await;
+        receiver.set_type_map(&tm).await;
         let version_str = format!("{}", PROTOCOL_VERSION);
+        let public_key_bytes = keys
+            .public_key_bundle()
+            .try_as_bytes()
+            .map_err(|error| CommunicationError::ParseError(error.to_string()))?;
 
-        let mut ident = CommunicationValue::new(CommunicationType::Identification)
-            .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
-            .add_typed_default(
-                DataType::Id,
-                DataValue::UnsignedNumber(config.client_id as u128),
-            );
+        let mut ident =
+            CommunicationValue::new_with_type_map(CommunicationType::Identification, &tm)
+                .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
+                .add_typed_default(
+                    DataType::Id,
+                    DataValue::UnsignedNumber(config.client_id as u128),
+                )
+                // This capability marker lets a non-crypto host reject an
+                // authentication attempt instead of treating it as a plain
+                // unauthenticated connection.
+                .add_typed_default(DataType::PublicKeys, DataValue::Bytes(public_key_bytes));
         if let Some(desc) = &config.description {
             ident = ident.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
         }
@@ -223,14 +272,14 @@ impl MTPClient {
             client_nonce,
         );
 
-        let proof = match crypto::signed_challenge_response(keys, proof_payload, client_nonce).await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                sender.close().await;
-                return Err(e);
-            }
-        };
+        let proof =
+            match crypto::signed_challenge_response(keys, proof_payload, client_nonce, &tm).await {
+                Ok(p) => p,
+                Err(e) => {
+                    sender.close().await;
+                    return Err(e);
+                }
+            };
         if let Err(e) = sender.send(&proof).await {
             sender.close().await;
             return Err(e);
@@ -276,12 +325,41 @@ impl MTPClient {
             return Err(e);
         }
 
+        let assigned_id = match response.get_data(DataType::Id) {
+            Some(DataValue::UnsignedNumber(id)) => u64::try_from(*id).map_err(|_| {
+                CommunicationError::AuthenticationFailed(
+                    "host returned an out-of-range client id".into(),
+                )
+            })?,
+            _ => {
+                sender.close().await;
+                return Err(CommunicationError::AuthenticationFailed(
+                    "host omitted the authenticated client id".into(),
+                ));
+            }
+        };
+        if assigned_id != config.client_id {
+            sender.close().await;
+            return Err(CommunicationError::AuthenticationFailed(
+                "host returned a different authenticated client id".into(),
+            ));
+        }
+
+        let negotiated = crypto::negotiated_version(&response)?;
+        if negotiated != PROTOCOL_VERSION {
+            sender.close().await;
+            return Err(CommunicationError::AuthenticationFailed(
+                "host selected a protocol version the client did not offer".into(),
+            ));
+        }
+        let codec = codec_for_version(&negotiated)?;
         let client_id = config.client_id;
         Ok(connection_from_parts(
             config,
             sender,
             receiver,
-            crypto::negotiated_version(&response)?,
+            negotiated,
+            codec,
             error::AuthState::Authenticated,
             client_id,
         )
@@ -332,12 +410,17 @@ impl MTPClient {
         let (sender, receiver) =
             mtp_transport::connect(&config.url, config.server_cert(), config.policy).await?;
 
-        let tm = mtp_codec::TypeMap::latest();
+        let handshake_codec = codec_for_version(&PROTOCOL_VERSION)?;
+        let tm = handshake_codec.type_map().clone();
+        sender.set_type_map(&tm).await;
+        receiver.set_type_map(&tm).await;
         let version_str = format!("{}", PROTOCOL_VERSION);
         let pk_bundle = keys.public_key_bundle();
-        let pk_bytes = pk_bundle.as_bytes();
+        let pk_bytes = pk_bundle
+            .try_as_bytes()
+            .map_err(|error| CommunicationError::ParseError(error.to_string()))?;
 
-        let mut register = CommunicationValue::new(CommunicationType::Register)
+        let mut register = CommunicationValue::new_with_type_map(CommunicationType::Register, &tm)
             .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
             .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
         if let Some(desc) = &config.description {
@@ -375,14 +458,14 @@ impl MTPClient {
             client_nonce,
         );
 
-        let proof = match crypto::signed_challenge_response(keys, proof_payload, client_nonce).await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                sender.close().await;
-                return Err(e);
-            }
-        };
+        let proof =
+            match crypto::signed_challenge_response(keys, proof_payload, client_nonce, &tm).await {
+                Ok(p) => p,
+                Err(e) => {
+                    sender.close().await;
+                    return Err(e);
+                }
+            };
         if let Err(e) = sender.send(&proof).await {
             sender.close().await;
             return Err(e);
@@ -413,7 +496,11 @@ impl MTPClient {
             return Err(e);
         }
         let assigned_id = match response.get_data(DataType::Id) {
-            DataValue::UnsignedNumber(n) => *n as u64,
+            Some(DataValue::UnsignedNumber(n)) => u64::try_from(*n).map_err(|_| {
+                CommunicationError::AuthenticationFailed(
+                    "host returned an out-of-range client id".into(),
+                )
+            })?,
             _ => {
                 sender.close().await;
                 return Err(CommunicationError::AuthenticationFailed(
@@ -435,11 +522,20 @@ impl MTPClient {
             return Err(e);
         }
 
+        let negotiated = crypto::negotiated_version(&response)?;
+        if negotiated != PROTOCOL_VERSION {
+            sender.close().await;
+            return Err(CommunicationError::AuthenticationFailed(
+                "host selected a protocol version the client did not offer".into(),
+            ));
+        }
+        let codec = codec_for_version(&negotiated)?;
         Ok(connection_from_parts(
             config,
             sender,
             receiver,
-            crypto::negotiated_version(&response)?,
+            negotiated,
+            codec,
             error::AuthState::Authenticated,
             assigned_id,
         )
@@ -504,8 +600,13 @@ mod tests {
 
         let dispatcher = pipe::PipeDispatcher {
             pending_requests: Mutex::new(HashMap::new()),
+            expired_requests: Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]
-            pending_creations: Mutex::new(HashMap::new()),
+            type_map: mtp_codec::TypeMap::latest(),
+            #[cfg(feature = "pipes")]
+            pending_creations: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(feature = "pipes")]
+            expired_creations: std::sync::Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]
             pending_pipes: Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]
@@ -523,11 +624,49 @@ mod tests {
 
         let unrelated = CommunicationValue::new(mtp_codec::CommunicationType::Ping).with_id(8);
         assert!(pipe::route_message(unrelated, &app_tx, &dispatcher).await);
-        assert_eq!(app_rx.recv().await.unwrap().unwrap().get_id(), 8);
+        assert_eq!(app_rx.recv().await.unwrap().unwrap().id(), Some(8));
 
         let response = CommunicationValue::new(mtp_codec::CommunicationType::Pong).with_id(7);
         assert!(pipe::route_message(response, &app_tx, &dispatcher).await);
-        assert_eq!(response_rx.await.unwrap().unwrap().get_id(), 7);
+        assert_eq!(response_rx.await.unwrap().unwrap().id(), Some(7));
+        assert!(app_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_expired_request_response_is_consumed() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let dispatcher = pipe::PipeDispatcher {
+            pending_requests: Mutex::new(HashMap::new()),
+            expired_requests: Mutex::new(HashMap::new()),
+            #[cfg(feature = "pipes")]
+            type_map: mtp_codec::TypeMap::latest(),
+            #[cfg(feature = "pipes")]
+            pending_creations: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(feature = "pipes")]
+            expired_creations: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(feature = "pipes")]
+            pending_pipes: Mutex::new(HashMap::new()),
+            #[cfg(feature = "pipes")]
+            policy: Arc::new(Policy::default()),
+        };
+        let token = Arc::new(());
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        dispatcher.pending_requests.lock().await.insert(
+            9,
+            pipe::PendingRequest {
+                token: token.clone(),
+                sender: response_tx,
+            },
+        );
+        pipe::expire_pending_request(&dispatcher, 9, &token).await;
+
+        let (app_tx, mut app_rx) = tokio::sync::mpsc::channel(1);
+        let response = CommunicationValue::new(mtp_codec::CommunicationType::Pong).with_id(9);
+        assert!(pipe::route_message(response, &app_tx, &dispatcher).await);
+        assert!(response_rx.await.is_err());
         assert!(app_rx.try_recv().is_err());
     }
 

@@ -6,6 +6,15 @@ use zeroize::Zeroizing;
 #[cfg(any(feature = "chacha20poly1305", feature = "aes-gcm"))]
 use getrandom::fill;
 
+/// Authentication-tag length shared by the supported AEAD constructions.
+pub const AUTH_TAG_LEN: usize = 16;
+
+/// Nonce length stored at the front of an XChaCha20-Poly1305 output.
+pub const XCHACHA20POLY1305_NONCE_LEN: usize = 24;
+
+/// Nonce length stored at the front of an AES-256-GCM output.
+pub const AES256GCM_NONCE_LEN: usize = 12;
+
 pub trait AeadEncrypt {
     fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError>;
 }
@@ -27,12 +36,12 @@ fn prepend_nonce(nonce: &[u8], ciphertext: &mut Vec<u8>) -> Vec<u8> {
 }
 
 #[cfg(feature = "chacha20poly1305")]
-pub struct ChaCha20Poly1305 {
+pub struct XChaCha20Poly1305 {
     key: Zeroizing<[u8; 32]>,
 }
 
 #[cfg(feature = "chacha20poly1305")]
-impl ChaCha20Poly1305 {
+impl XChaCha20Poly1305 {
     pub fn new(key: [u8; 32]) -> Self {
         Self {
             key: Zeroizing::new(key),
@@ -41,7 +50,7 @@ impl ChaCha20Poly1305 {
 }
 
 #[cfg(feature = "chacha20poly1305")]
-impl AeadEncrypt for ChaCha20Poly1305 {
+impl AeadEncrypt for XChaCha20Poly1305 {
     fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
@@ -50,7 +59,7 @@ impl AeadEncrypt for ChaCha20Poly1305 {
         let key = chacha20poly1305::Key::from_slice(self.key.as_ref());
         let cipher = XChaCha20Poly1305::new(key);
 
-        let mut nonce = [0u8; 24];
+        let mut nonce = [0u8; XCHACHA20POLY1305_NONCE_LEN];
         fill(&mut nonce).map_err(|_| CryptoError::EncryptionFailed)?;
         let nonce_ref = XNonce::from_slice(&nonce);
 
@@ -68,17 +77,17 @@ impl AeadEncrypt for ChaCha20Poly1305 {
 }
 
 #[cfg(feature = "chacha20poly1305")]
-impl AeadDecrypt for ChaCha20Poly1305 {
+impl AeadDecrypt for XChaCha20Poly1305 {
     fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
         use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 
-        if ciphertext.len() < 24 {
+        if ciphertext.len() < XCHACHA20POLY1305_NONCE_LEN + AUTH_TAG_LEN {
             return Err(CryptoError::InvalidNonceLength);
         }
 
-        let (nonce, ct) = ciphertext.split_at(24);
+        let (nonce, ct) = ciphertext.split_at(XCHACHA20POLY1305_NONCE_LEN);
         let key = chacha20poly1305::Key::from_slice(self.key.as_ref());
         let cipher = XChaCha20Poly1305::new(key);
         let nonce_ref = XNonce::from_slice(nonce);
@@ -92,11 +101,16 @@ impl AeadDecrypt for ChaCha20Poly1305 {
 }
 
 #[cfg(feature = "chacha20poly1305")]
-impl AeadCipher for ChaCha20Poly1305 {
+impl AeadCipher for XChaCha20Poly1305 {
     fn key_size() -> usize {
         32
     }
 }
+
+/// Compatibility alias for the original public name. The implementation is
+/// XChaCha20-Poly1305, including its 24-byte nonce format.
+#[cfg(feature = "chacha20poly1305")]
+pub type ChaCha20Poly1305 = XChaCha20Poly1305;
 
 #[cfg(feature = "aes-gcm")]
 pub struct Aes256Gcm {
@@ -122,7 +136,7 @@ impl AeadEncrypt for Aes256Gcm {
         let key = aes_gcm::Key::<AesGcmInner>::from_slice(self.key.as_ref());
         let cipher = AesGcmInner::new(key);
 
-        let mut nonce = [0u8; 12];
+        let mut nonce = [0u8; AES256GCM_NONCE_LEN];
         fill(&mut nonce).map_err(|_| CryptoError::EncryptionFailed)?;
         let nonce_ref = Nonce::from_slice(&nonce);
 
@@ -146,11 +160,11 @@ impl AeadDecrypt for Aes256Gcm {
         use aes_gcm::Nonce;
         use aes_gcm::aead::{Aead, KeyInit, Payload};
 
-        if ciphertext.len() < 12 {
+        if ciphertext.len() < AES256GCM_NONCE_LEN + AUTH_TAG_LEN {
             return Err(CryptoError::InvalidNonceLength);
         }
 
-        let (nonce, ct) = ciphertext.split_at(12);
+        let (nonce, ct) = ciphertext.split_at(AES256GCM_NONCE_LEN);
         let key = aes_gcm::Key::<AesGcmInner>::from_slice(self.key.as_ref());
         let cipher = AesGcmInner::new(key);
         let nonce_ref = Nonce::from_slice(nonce);

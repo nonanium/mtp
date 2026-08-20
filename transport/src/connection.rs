@@ -1,12 +1,14 @@
 use crate::ConnectionHandle;
+use crate::framing::RetryClassifier;
 #[cfg(feature = "pipes")]
 use crate::pipe::PipeReader;
-use mtp_codec::CommunicationValue;
+use mtp_codec::{CommunicationValue, DecodeError, DecodeLimits, EncodeLimits, TypeMap};
 use mtp_common::CommunicationError;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore, mpsc};
-use tokio::time::{Duration, sleep, timeout};
+use tokio::time::{Duration, Instant, sleep, timeout, timeout_at};
 use tracing::{debug, info, instrument, trace, warn};
 use wtransport::Connection;
 
@@ -18,6 +20,63 @@ pub enum TransportEvent<R = wtransport::RecvStream> {
 }
 
 const APPLICATION_CLOSE_REASON: &str = "mtp-close";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodeRejectionClass {
+    Malformed,
+    ResourceLimit,
+    DuplicateField,
+}
+
+pub fn classify_decode_error(error: &DecodeError) -> DecodeRejectionClass {
+    match error {
+        DecodeError::MalformedEncoding => DecodeRejectionClass::Malformed,
+        DecodeError::DepthLimit
+        | DecodeError::ValueCountLimit
+        | DecodeError::BlobLimit
+        | DecodeError::AllocationLimit
+        | DecodeError::RecipientLimit => DecodeRejectionClass::ResourceLimit,
+        DecodeError::DuplicateField => DecodeRejectionClass::DuplicateField,
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct DecodeRejectionCounters {
+    malformed: AtomicU64,
+    resource_limit: AtomicU64,
+    duplicate_field: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecodeRejectionCounts {
+    pub malformed: u64,
+    pub resource_limit: u64,
+    pub duplicate_field: u64,
+}
+
+impl DecodeRejectionCounters {
+    pub(crate) fn record(&self, error: &DecodeError) {
+        match classify_decode_error(error) {
+            DecodeRejectionClass::Malformed => {
+                self.malformed.fetch_add(1, Ordering::Relaxed);
+            }
+            DecodeRejectionClass::ResourceLimit => {
+                self.resource_limit.fetch_add(1, Ordering::Relaxed);
+            }
+            DecodeRejectionClass::DuplicateField => {
+                self.duplicate_field.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> DecodeRejectionCounts {
+        DecodeRejectionCounts {
+            malformed: self.malformed.load(Ordering::Relaxed),
+            resource_limit: self.resource_limit.load(Ordering::Relaxed),
+            duplicate_field: self.duplicate_field.load(Ordering::Relaxed),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendMode {
@@ -135,30 +194,72 @@ impl Policy {
     }
 }
 
+/// A validated policy snapshot used after a public [`Policy`] crosses into a
+/// transport implementation.  `Policy` intentionally remains a plain public
+/// struct for source compatibility, so callers can construct it directly and
+/// bypass builder methods.  Every transport constructor takes this snapshot
+/// before creating channels or semaphores.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RuntimePolicy(Policy);
+
+impl RuntimePolicy {
+    pub(crate) fn from_public(policy: &Policy) -> Self {
+        let mut policy = *policy;
+        policy.receiver_queue_capacity = policy.receiver_queue_capacity.max(1);
+        policy.max_concurrent_stream_tasks = policy.max_concurrent_stream_tasks.max(1);
+        Self(policy)
+    }
+}
+
+impl Deref for RuntimePolicy {
+    type Target = Policy;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 enum ReceivedFrame {
     Message(CommunicationValue),
     ClosedByPeer,
     Idle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SenderState {
+    Open,
+    Closing,
+    Closed,
+}
+
 #[derive(Clone)]
 pub struct Sender {
     send_guard: Arc<Mutex<()>>,
     stream_guard: Arc<Mutex<Option<wtransport::SendStream>>>,
+    state: Arc<Mutex<SenderState>>,
     handle: Arc<ConnectionHandle>,
     connection: Connection,
-    policy: Arc<Policy>,
+    policy: Arc<RuntimePolicy>,
+    type_map: Arc<RwLock<TypeMap>>,
 }
 
 impl Sender {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>, policy: Arc<Policy>) -> Self {
+        let policy = Arc::new(RuntimePolicy::from_public(&policy));
         Self {
             send_guard: Arc::new(Mutex::new(())),
             stream_guard: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(SenderState::Open)),
             handle,
             connection,
             policy,
+            type_map: Arc::new(RwLock::new(TypeMap::latest())),
         }
+    }
+
+    /// Bind control frames created by this sender to the negotiated protocol map.
+    pub async fn set_type_map(&self, type_map: &TypeMap) {
+        *self.type_map.write().await = type_map.clone();
     }
 
     #[instrument(skip(stream, data, policy), level = "trace")]
@@ -167,16 +268,18 @@ impl Sender {
         data: &CommunicationValue,
         policy: &Policy,
     ) -> Result<(), CommunicationError> {
-        let bytes = data.to_bytes().map_err(|_| CommunicationError::Encode)?;
+        let bytes = data
+            .to_bytes_with_limits(EncodeLimits::for_transport_message_size(
+                policy.max_message_size,
+            ))
+            .map_err(|_| CommunicationError::Encode)?;
         if bytes.len() as u64 > policy.max_message_size
             || bytes.len() as u64 >= policy.close_frame_len as u64
         {
             return Err(CommunicationError::MessageTooLarge);
         }
 
-        let len_bytes = (bytes.len() as u32).to_be_bytes();
         let write_result = async {
-            stream.write_all(&len_bytes).await?;
             stream.write_all(&bytes).await?;
             Ok::<(), wtransport::error::StreamWriteError>(())
         };
@@ -264,11 +367,11 @@ impl Sender {
                 return Ok(());
             }
 
-            let err = res.err().unwrap_or(CommunicationError::StreamError);
-            if !matches!(
-                err,
-                CommunicationError::StreamError | CommunicationError::StreamClosed
-            ) {
+            let err = match res {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            if !RetryClassifier::retry_persistent_stream(&err) {
                 return Err(err);
             }
             *stream_opt = None;
@@ -351,20 +454,24 @@ impl Sender {
 
     #[instrument(skip(self, data), level = "trace")]
     pub async fn send(&self, data: &CommunicationValue) -> Result<(), CommunicationError> {
-        if self.handle.is_closed() {
-            return Err(self
-                .handle
-                .close_reason()
-                .unwrap_or(CommunicationError::UseAfterClosed));
-        }
-
         let _send_lock = self.send_guard.lock().await;
+
+        {
+            let state = self.state.lock().await;
+            if *state != SenderState::Open {
+                return Err(self
+                    .handle
+                    .close_reason()
+                    .unwrap_or(CommunicationError::StreamClosed));
+            }
+        }
 
         if self.connection.quic_connection().close_reason().is_some() {
             let reason = self
                 .handle
                 .close_reason()
                 .unwrap_or(CommunicationError::StreamClosed);
+            *self.state.lock().await = SenderState::Closed;
             self.handle.close(Some(reason.clone()));
             return Err(reason);
         }
@@ -397,6 +504,7 @@ impl Sender {
                 if self.connection.quic_connection().close_reason().is_some()
                     || matches!(normalized, CommunicationError::StreamClosed)
                 {
+                    *self.state.lock().await = SenderState::Closed;
                     self.handle.close(Some(normalized.clone()));
                 }
 
@@ -408,6 +516,12 @@ impl Sender {
     #[instrument(skip(self), level = "trace")]
     pub async fn finish_stream(&self) -> Result<(), CommunicationError> {
         let _send_lock = self.send_guard.lock().await;
+        if *self.state.lock().await != SenderState::Open {
+            return Err(self
+                .handle
+                .close_reason()
+                .unwrap_or(CommunicationError::StreamClosed));
+        }
         let mut stream_opt = self.stream_guard.lock().await;
         if let Some(mut stream) = stream_opt.take() {
             match timeout(self.policy.write_timeout, stream.finish()).await {
@@ -440,11 +554,12 @@ impl Sender {
         pipe_id: u32,
         description: &str,
     ) -> Result<crate::pipe::PipeWriter, CommunicationError> {
-        if self.handle.is_closed() {
+        let _send_lock = self.send_guard.lock().await;
+        if *self.state.lock().await != SenderState::Open {
             return Err(self
                 .handle
                 .close_reason()
-                .unwrap_or(CommunicationError::UseAfterClosed));
+                .unwrap_or(CommunicationError::StreamClosed));
         }
 
         if self.connection.quic_connection().close_reason().is_some() {
@@ -458,12 +573,16 @@ impl Sender {
 
         let mut stream = Self::open_uni_stream(&self.connection, &self.policy).await?;
 
-        let request = CommunicationValue::new(mtp_codec::CommunicationType::PipeRequest)
-            .with_id(pipe_id)
-            .add_typed_default(
-                mtp_codec::DataType::Description,
-                mtp_codec::DataValue::Str(description.to_string()),
-            );
+        let type_map = self.type_map.read().await.clone();
+        let request = CommunicationValue::new_with_type_map(
+            mtp_codec::CommunicationType::PipeRequest,
+            &type_map,
+        )
+        .with_id(pipe_id)
+        .add_typed_default(
+            mtp_codec::DataType::Description,
+            mtp_codec::DataValue::Str(description.to_string()),
+        );
 
         Self::write_frame(&mut stream, &request, &self.policy).await?;
 
@@ -477,31 +596,47 @@ impl Sender {
         let handle = self.handle.clone();
         let policy = self.policy.clone();
         let stream_guard = self.stream_guard.clone();
+        let send_guard = self.send_guard.clone();
+        let state = self.state.clone();
 
         tokio::spawn(async move {
+            let _send_lock = send_guard.lock().await;
+            {
+                let mut sender_state = state.lock().await;
+                if *sender_state != SenderState::Open {
+                    return;
+                }
+                *sender_state = SenderState::Closing;
+            }
+
             if connection.quic_connection().close_reason().is_some() || handle.is_closed() {
+                *state.lock().await = SenderState::Closed;
                 handle.close(Some(CommunicationError::StreamClosed));
                 return;
             }
 
-            if let Some(mut stream) = stream_guard.lock().await.take() {
-                match timeout(policy.write_timeout, stream.finish()).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => warn!(
-                        "[Sender] persistent stream finish failed: peer sent STOP_SENDING (error code {code})"
-                    ),
-                    Ok(Err(e)) => {
-                        warn!("[Sender] persistent stream finish failed: {e}")
+            {
+                if let Some(mut stream) = stream_guard.lock().await.take() {
+                    match timeout(policy.write_timeout, stream.finish()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => warn!(
+                            "[Sender] persistent stream finish failed: peer sent STOP_SENDING (error code {code})"
+                        ),
+                        Ok(Err(e)) => {
+                            warn!("[Sender] persistent stream finish failed: {e}")
+                        }
+                        Err(_) => warn!("[Sender] persistent stream finish timed out"),
                     }
-                    Err(_) => warn!("[Sender] persistent stream finish timed out"),
                 }
             }
 
             let _ = Self::send_close_frame(&connection, &policy).await;
 
+            *state.lock().await = SenderState::Closed;
             handle.close(Some(CommunicationError::StreamClosed));
             info!(target = "mtp.transport", "connection closed");
 
+            drop(_send_lock);
             sleep(policy.force_close_delay).await;
             if connection.quic_connection().close_reason().is_none() {
                 connection.quic_connection().close(
@@ -519,35 +654,48 @@ impl Sender {
         let connection = self.connection.clone();
         let handle = self.handle.clone();
         let policy = self.policy.clone();
-        let mut stream_opt = self.stream_guard.lock().await;
+        let _send_lock = self.send_guard.lock().await;
+        {
+            let mut state = self.state.lock().await;
+            if *state != SenderState::Open {
+                return;
+            }
+            *state = SenderState::Closing;
+        }
 
         if connection.quic_connection().close_reason().is_some() || handle.is_closed() {
+            *self.state.lock().await = SenderState::Closed;
             handle.close(Some(CommunicationError::StreamClosed));
             return;
         }
 
-        if let Some(mut stream) = stream_opt.take() {
-            let close_bytes = policy.close_frame_len.to_be_bytes();
-            let close_write = async {
-                stream.write_all(&close_bytes).await?;
-                stream.finish().await
-            };
+        {
+            let mut stream_opt = self.stream_guard.lock().await;
+            if let Some(mut stream) = stream_opt.take() {
+                let close_bytes = policy.close_frame_len.to_be_bytes();
+                let close_write = async {
+                    stream.write_all(&close_bytes).await?;
+                    stream.finish().await
+                };
 
-            match timeout(policy.write_timeout, close_write).await {
-                Ok(Ok(())) => {}
-                Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
-                    warn!("[Sender] close failed: peer sent STOP_SENDING (error code {code})")
+                match timeout(policy.write_timeout, close_write).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
+                        warn!("[Sender] close failed: peer sent STOP_SENDING (error code {code})")
+                    }
+                    Ok(Err(e)) => warn!("[Sender] close failed: {e}"),
+                    Err(_) => warn!("[Sender] close timed out"),
                 }
-                Ok(Err(e)) => warn!("[Sender] close failed: {e}"),
-                Err(_) => warn!("[Sender] close timed out"),
+            } else {
+                let _ = Self::send_close_frame(&connection, &policy).await;
             }
-        } else {
-            let _ = Self::send_close_frame(&connection, &policy).await;
         }
 
+        *self.state.lock().await = SenderState::Closed;
         handle.close(Some(CommunicationError::StreamClosed));
         info!(target = "mtp.transport", "connection closed");
 
+        drop(_send_lock);
         sleep(policy.force_close_delay).await;
         if connection.quic_connection().close_reason().is_none() {
             connection.quic_connection().close(
@@ -595,6 +743,8 @@ struct ReceiverInner {
     ping_control: Arc<RwLock<PingControl>>,
     queue_notify: Arc<Notify>,
     max_message_size: Arc<AtomicU64>,
+    type_map: Arc<RwLock<TypeMap>>,
+    decode_rejections: Arc<DecodeRejectionCounters>,
 }
 
 impl Clone for Receiver {
@@ -616,19 +766,35 @@ impl Drop for Receiver {
 #[derive(Clone, Default)]
 struct PingControl {
     pong_sender: Option<Sender>,
-    pong_observer: Option<mpsc::UnboundedSender<CommunicationValue>>,
+    pong_observer: Option<mpsc::Sender<CommunicationValue>>,
+    expected_pong_id: Option<u32>,
+}
+
+impl PingControl {
+    fn accepts_pong(&mut self, id: Option<u32>) -> bool {
+        if self.expected_pong_id == id && id.is_some() {
+            self.expected_pong_id = None;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Receiver {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>, policy: Arc<Policy>) -> Self {
-        Self::new_with_max_message_size(connection, handle, policy.clone(), policy.max_message_size)
+        let policy = Arc::new(RuntimePolicy::from_public(&policy));
+        let max_message_size = policy.max_message_size;
+        Self::new_with_max_message_size(connection, handle, policy, max_message_size)
     }
 
+    #[cfg(feature = "host")]
     pub(crate) fn new_for_handshake(
         connection: Connection,
         handle: Arc<ConnectionHandle>,
         policy: Arc<Policy>,
     ) -> Self {
+        let policy = Arc::new(RuntimePolicy::from_public(&policy));
         let initial_max = policy
             .handshake_max_message_size
             .min(policy.max_message_size);
@@ -638,7 +804,7 @@ impl Receiver {
     fn new_with_max_message_size(
         connection: Connection,
         handle: Arc<ConnectionHandle>,
-        policy: Arc<Policy>,
+        policy: Arc<RuntimePolicy>,
         initial_max_message_size: u64,
     ) -> Self {
         #[cfg(feature = "pipes")]
@@ -661,6 +827,10 @@ impl Receiver {
         let accept_queue_notify = queue_notify.clone();
         let max_message_size = Arc::new(AtomicU64::new(initial_max_message_size));
         let accept_max_message_size = max_message_size.clone();
+        let type_map = Arc::new(RwLock::new(TypeMap::latest()));
+        let accept_type_map = type_map.clone();
+        let decode_rejections = Arc::new(DecodeRejectionCounters::default());
+        let accept_decode_rejections = decode_rejections.clone();
         let stream_limit = Arc::new(Semaphore::new(policy.max_concurrent_stream_tasks.max(1)));
         let accept_stream_limit = stream_limit.clone();
         debug!(
@@ -728,6 +898,8 @@ impl Receiver {
                                 let stream_policy = accept_policy.clone();
                                 let stream_ping_control = accept_ping_control.clone();
                                 let stream_max_message_size = accept_max_message_size.clone();
+                                let stream_type_map = accept_type_map.clone();
+                                let stream_decode_rejections = accept_decode_rejections.clone();
 
                                 tokio::spawn(async move {
                                     let _permit = permit;
@@ -747,19 +919,33 @@ impl Receiver {
                                         }
 
                                         let frame_limit = stream_max_message_size.load(Ordering::Relaxed);
-                                        match Self::read_one_frame(&mut s, &stream_policy, frame_limit).await {
-                                            Ok(ReceivedFrame::Message(msg)) => {
+                                        match Self::read_one_frame(
+                                            &mut s,
+                                            &stream_policy,
+                                            frame_limit,
+                                            &stream_decode_rejections,
+                                        )
+                                        .await
+                                        {
+                                            Ok(ReceivedFrame::Message(mut msg)) => {
+                                                let negotiated_type_map =
+                                                    stream_type_map.read().await.clone();
+                                                msg.set_type_map(&negotiated_type_map);
                                                 frame_count += 1;
 
                                                 #[cfg(feature = "pipes")]
                                                 {
-                                                    let pipe_request_type =
-                                                        mtp_codec::CommunicationType::PipeRequest
-                                                            .try_to_id(&mtp_codec::TypeMap::latest());
-                                                    if Some(msg.get_type()) == pipe_request_type
+                                                    if msg.is_type(mtp_codec::CommunicationType::PipeRequest)
                                                         && frame_count == 1
                                                     {
-                                                        let pipe_id = msg.get_id();
+                                                        let Some(pipe_id) = msg.id().filter(|id| *id != 0) else {
+                                                            let error = CommunicationError::Other(
+                                                                "PipeRequest frame must contain a non-zero id".into(),
+                                                            );
+                                                            let _ = msg_tx_stream.send(Err(error.clone())).await;
+                                                            stream_handle.close(Some(error));
+                                                            break;
+                                                        };
                                                         let description = msg
                                                             .get_str(mtp_codec::DataType::Description)
                                                             .unwrap_or("")
@@ -784,31 +970,27 @@ impl Receiver {
                                                     }
                                                 }
 
-                                                let ping_type = mtp_codec::CommunicationType::Ping
-                                                    .try_to_id(&mtp_codec::TypeMap::latest());
-                                                let pong_type = mtp_codec::CommunicationType::Pong
-                                                    .try_to_id(&mtp_codec::TypeMap::latest());
-                                                let control = {
-                                                    let control = stream_ping_control.read().await;
-                                                    if Some(msg.get_type()) == ping_type {
-                                                        control
-                                                            .pong_sender
-                                                            .clone()
-                                                            .map(|sender| (Some(sender), None))
-                                                    } else if Some(msg.get_type()) == pong_type {
-                                                        control
-                                                            .pong_observer
-                                                            .clone()
-                                                            .map(|observer| (None, Some(observer)))
-                                                    } else {
-                                                        None
-                                                    }
+                                                let pong_sender = if msg.is_type(mtp_codec::CommunicationType::Ping) {
+                                                    stream_ping_control
+                                                        .read()
+                                                        .await
+                                                        .pong_sender
+                                                        .clone()
+                                                } else {
+                                                    None
                                                 };
 
-                                                if let Some((Some(sender), _)) = control {
-                                                    let mut pong = CommunicationValue::new(mtp_codec::CommunicationType::Pong)
-                                                        .with_id(msg.get_id());
-                                                    if let Some(timestamp) = msg.get_data_opt(mtp_codec::DataType::Timestamp) {
+                                                if let Some(sender) = pong_sender {
+                                                    let mut pong = CommunicationValue::new_with_type_map(
+                                                        mtp_codec::CommunicationType::Pong,
+                                                        &negotiated_type_map,
+                                                    );
+                                                    if let Some(id) = msg.id() {
+                                                        pong = pong.with_id(id);
+                                                    } else {
+                                                        pong = pong.without_id();
+                                                    }
+                                                    if let Some(timestamp) = msg.get_data(mtp_codec::DataType::Timestamp) {
                                                             pong = pong.add_typed_default(
                                                                 mtp_codec::DataType::Timestamp,
                                                                 timestamp.clone(),
@@ -820,8 +1002,18 @@ impl Receiver {
                                                     continue;
                                                 }
 
-                                                if let Some((_, Some(observer))) = control {
-                                                    let _ = observer.send(msg);
+                                                if msg.is_type(mtp_codec::CommunicationType::Pong) {
+                                                    let observer = {
+                                                        let mut control = stream_ping_control.write().await;
+                                                        if control.accepts_pong(msg.id()) {
+                                                            control.pong_observer.clone()
+                                                        } else {
+                                                            None
+                                                        }
+                                                    };
+                                                    if let Some(observer) = observer {
+                                                        let _ = observer.try_send(msg);
+                                                    }
                                                     continue;
                                                 }
 
@@ -917,6 +1109,8 @@ impl Receiver {
                 ping_control,
                 queue_notify,
                 max_message_size,
+                type_map,
+                decode_rejections,
             }),
         }
     }
@@ -928,6 +1122,19 @@ impl Receiver {
             .store(max_message_size, Ordering::Relaxed);
     }
 
+    /// Bind subsequently decoded frames to the negotiated protocol version.
+    pub async fn set_type_map(&self, type_map: &TypeMap) {
+        *self.inner.type_map.write().await = type_map.clone();
+    }
+
+    /// Return local counts for frames rejected by the structured decoder.
+    ///
+    /// These counters are intentionally local-only; peers continue to receive
+    /// the generic protocol parse failure.
+    pub fn decode_rejection_counts(&self) -> DecodeRejectionCounts {
+        self.inner.decode_rejections.snapshot()
+    }
+
     /* Respond to reserved Ping frames without exposing them to application I/O. */
     pub fn respond_to_pings(&self, sender: Sender) {
         if let Ok(mut control) = self.inner.ping_control.try_write() {
@@ -937,16 +1144,21 @@ impl Receiver {
         }
     }
 
-    /* Route reserved Pong frames to a connection-level observer. */
-    pub async fn observe_pongs(&self, observer: mpsc::UnboundedSender<CommunicationValue>) {
+    /* Route only the currently expected reserved Pong through a bounded observer. */
+    pub async fn observe_pongs_bounded(&self, observer: mpsc::Sender<CommunicationValue>) {
         self.inner.ping_control.write().await.pong_observer = Some(observer);
     }
 
-    #[instrument(skip(stream, policy), level = "trace")]
+    pub async fn set_expected_pong_id(&self, expected_pong_id: Option<u32>) {
+        self.inner.ping_control.write().await.expected_pong_id = expected_pong_id;
+    }
+
+    #[instrument(skip(stream, policy, decode_rejections), level = "trace")]
     async fn read_one_frame(
         stream: &mut wtransport::RecvStream,
-        policy: &Policy,
+        policy: &RuntimePolicy,
         max_message_size: u64,
+        decode_rejections: &DecodeRejectionCounters,
     ) -> Result<ReceivedFrame, CommunicationError> {
         use wtransport::error::{StreamReadError, StreamReadExactError};
 
@@ -981,35 +1193,39 @@ impl Receiver {
         if len == policy.close_frame_len {
             return Ok(ReceivedFrame::ClosedByPeer);
         }
+        let deadline = Instant::now() + policy.read_timeout;
 
-        let len_usize = len as usize;
-        if len as u64 > max_message_size {
+        let body_len = len as usize;
+        let frame_len = body_len
+            .checked_add(4)
+            .ok_or(CommunicationError::MessageTooLarge)?;
+        if frame_len as u64 > max_message_size {
             return Err(CommunicationError::MessageTooLarge);
         }
 
-        // Grow in bounded chunks instead of trusting the peer's length prefix
-        // enough to allocate the complete frame up front.
-        let mut buf = Vec::new();
-        buf.try_reserve(len_usize.min(16 * 1024))
+        // The length has already been checked against the admitted frame
+        // limit, so reserve one bounded framing buffer and decode it without a
+        // second prefix-plus-body allocation/copy.
+        let mut frame = Vec::new();
+        frame
+            .try_reserve_exact(frame_len)
             .map_err(|_| CommunicationError::MessageTooLarge)?;
-        while buf.len() < len_usize {
-            let chunk_len = (len_usize - buf.len()).min(16 * 1024);
-            let mut chunk = [0u8; 16 * 1024];
-            match timeout(
-                policy.read_timeout,
-                stream.read_exact(&mut chunk[..chunk_len]),
+        frame.extend_from_slice(&len_buf);
+        frame.resize(frame_len, 0);
+        let mut body_offset = 4usize;
+        while body_offset < frame_len {
+            let chunk_len = (frame_len - body_offset).min(16 * 1024);
+            match timeout_at(
+                deadline,
+                stream.read_exact(&mut frame[body_offset..body_offset + chunk_len]),
             )
             .await
             {
-                Ok(Ok(())) => {
-                    buf.try_reserve(chunk_len)
-                        .map_err(|_| CommunicationError::MessageTooLarge)?;
-                    buf.extend_from_slice(&chunk[..chunk_len]);
-                }
+                Ok(Ok(())) => body_offset += chunk_len,
                 Ok(Err(StreamReadExactError::FinishedEarly(n))) => {
                     warn!(
-                        "[Receiver] body read ended early ({}/{len_usize} bytes): stream closed by peer",
-                        buf.len() + n
+                        "[Receiver] body read ended early ({}/{body_len} bytes): stream closed by peer",
+                        body_offset.saturating_sub(4) + n
                     );
                     return Err(CommunicationError::StreamError);
                 }
@@ -1024,14 +1240,27 @@ impl Receiver {
                     return Err(CommunicationError::StreamError);
                 }
                 Err(_) => {
-                    warn!("[Receiver] body read timed out (len={len_usize})");
+                    warn!("[Receiver] body read timed out (len={body_len})");
                     return Err(CommunicationError::StreamError);
                 }
             }
         }
 
-        let message = CommunicationValue::from_bytes(&buf)
-            .map_err(|_| CommunicationError::ParseCommunicationValue)?;
+        let message = match CommunicationValue::try_from_bytes_with_limits(
+            &frame,
+            DecodeLimits::for_transport_message_size(max_message_size),
+        ) {
+            Ok(message) => message,
+            Err(error) => {
+                decode_rejections.record(&error);
+                warn!(
+                    ?error,
+                    class = ?classify_decode_error(&error),
+                    "[Receiver] rejected frame during bounded decode"
+                );
+                return Err(CommunicationError::ParseCommunicationValue);
+            }
+        };
 
         Ok(ReceivedFrame::Message(message))
     }
@@ -1039,18 +1268,12 @@ impl Receiver {
     #[instrument(skip(self), level = "trace")]
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
         let mut close_rx = self.inner.handle.subscribe_close();
-        if close_rx.borrow().is_some() {
-            return Err(self
-                .inner
-                .handle
-                .close_reason()
-                .unwrap_or(CommunicationError::StreamClosed));
-        }
 
         #[cfg(feature = "pipes")]
         {
             let mut rx = self.inner.msg_rx.lock().await;
             let result = tokio::select! {
+                biased;
                 message = rx.recv() => message,
                 _ = close_rx.changed() => return Err(close_rx
                     .borrow()
@@ -1074,6 +1297,7 @@ impl Receiver {
         {
             let mut rx = self.inner.rx.lock().await;
             let result = tokio::select! {
+                biased;
                 message = rx.recv() => message,
                 _ = close_rx.changed() => return Err(close_rx
                     .borrow()
@@ -1097,17 +1321,11 @@ impl Receiver {
     #[cfg(feature = "pipes")]
     #[instrument(skip(self), level = "trace")]
     pub async fn receive_event(&self) -> Result<TransportEvent, CommunicationError> {
-        if self.inner.handle.is_closed() {
-            return Err(self
-                .inner
-                .handle
-                .close_reason()
-                .unwrap_or(CommunicationError::StreamClosed));
-        }
-
+        let mut close_rx = self.inner.handle.subscribe_close();
         let mut msg_rx = self.inner.msg_rx.lock().await;
         let mut pipe_rx = self.inner.pipe_rx.lock().await;
         tokio::select! {
+            biased;
             msg = msg_rx.recv() => {
                 match msg {
                     Some(Ok(val)) => {
@@ -1135,6 +1353,10 @@ impl Receiver {
                         .unwrap_or(CommunicationError::StreamClosed)),
                 }
             }
+            _ = close_rx.changed() => Err(close_rx
+                .borrow()
+                .clone()
+                .unwrap_or(CommunicationError::StreamClosed)),
         }
     }
 
@@ -1234,5 +1456,64 @@ mod tests {
         let p = Policy::default();
         let debug_str = format!("{:?}", p);
         assert!(debug_str.contains("Policy"));
+    }
+
+    #[test]
+    fn runtime_policy_normalizes_zero_channel_and_task_limits() {
+        let policy = Policy {
+            receiver_queue_capacity: 0,
+            max_concurrent_stream_tasks: 0,
+            ..Policy::default()
+        };
+
+        let runtime = RuntimePolicy::from_public(&policy);
+
+        assert_eq!(runtime.receiver_queue_capacity, 1);
+        assert_eq!(runtime.max_concurrent_stream_tasks, 1);
+        assert_eq!(policy.receiver_queue_capacity, 0);
+        assert_eq!(policy.max_concurrent_stream_tasks, 0);
+    }
+
+    #[test]
+    fn ping_control_accepts_only_the_current_expected_id() {
+        let mut control = PingControl {
+            expected_pong_id: Some(7),
+            ..PingControl::default()
+        };
+
+        assert!(!control.accepts_pong(Some(6)));
+        assert_eq!(control.expected_pong_id, Some(7));
+        assert!(control.accepts_pong(Some(7)));
+        assert_eq!(control.expected_pong_id, None);
+        assert!(!control.accepts_pong(Some(7)));
+    }
+
+    #[test]
+    fn decode_rejection_classes_are_stable_and_counted() {
+        assert_eq!(
+            classify_decode_error(&DecodeError::MalformedEncoding),
+            DecodeRejectionClass::Malformed
+        );
+        assert_eq!(
+            classify_decode_error(&DecodeError::AllocationLimit),
+            DecodeRejectionClass::ResourceLimit
+        );
+        assert_eq!(
+            classify_decode_error(&DecodeError::DuplicateField),
+            DecodeRejectionClass::DuplicateField
+        );
+
+        let counters = DecodeRejectionCounters::default();
+        counters.record(&DecodeError::MalformedEncoding);
+        counters.record(&DecodeError::DepthLimit);
+        counters.record(&DecodeError::DuplicateField);
+        assert_eq!(
+            counters.snapshot(),
+            DecodeRejectionCounts {
+                malformed: 1,
+                resource_limit: 1,
+                duplicate_field: 1,
+            }
+        );
     }
 }

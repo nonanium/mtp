@@ -18,8 +18,8 @@ let conn = MTPClient::connect(
 let request = CommunicationValue::new(CommunicationType::Ping).with_id(1);
 conn.sender.send(&request).await?;
 let response = conn.receive().await?;
-println!("received {}", response.get_id());
-conn.sender.close();
+println!("received {:?}", response.id());
+conn.sender.close().await;
 ```
 
 ## Configuration
@@ -142,7 +142,7 @@ let conn = MTPClient::auth_register(config, &keyring, &host_pk).await?;
 
 // Save for next session
 let id = conn.client_id;
-let keyring_bytes = keyring.to_bytes();
+let keyring_bytes = keyring.try_to_bytes()?;
 ```
 
 When callers already know whether a saved client ID exists, the convenience helper uses `Some(id)` for login and `None` for registration:
@@ -175,7 +175,7 @@ pub struct Keyring {
 }
 ```
 
-- Serialise: `keyring.to_bytes()` -> `Vec<u8>`
+- Serialise: `keyring.try_to_bytes()` -> `Result<Zeroizing<Vec<u8>>, CryptoError>`
 - Deserialise: `Keyring::from_bytes(&bytes)` -> `Result<Keyring, CryptoError>`
 - Get public half: `keyring.public_key_bundle()` -> `PublicKeyBundle`
 
@@ -230,7 +230,7 @@ let response = conn
 
 Requests are routed by id through the connection's receive dispatcher. Frames with other ids remain available through `conn.receive()`.
 
-Two send modes (configured via `mtp::transport::Policy`):
+Two send modes (configured via `mtp::client::Policy`):
 - `PersistentStream` (default): reuses one QUIC unidirectional stream
 - `SingleStreamPerMessage`: opens a new stream per message
 
@@ -248,65 +248,72 @@ Inbound frames are queued internally. The `receive()` method returns the next av
 ### Close
 
 ```rust
-conn.sender.close();
+conn.sender.close().await;
 // or
 conn.receiver.close();
 ```
 
-Sends a close frame and signals the peer. The `Sender::close()` spawns an async task that sends the frame, waits for `force_close_delay` (default 300ms), then force-closes the QUIC connection if the peer has not already done so.
+`Sender::close().await` gracefully finishes the active send stream, sends the
+MTP close frame, and waits for `force_close_delay` (default 300ms) before
+force-closing the QUIC connection if necessary. `Sender::close_immediate()` is
+the fire-and-forget variant. `Receiver::close()` closes the local receive
+handle without performing the sender's graceful close sequence.
 
 ### Pipes
 
 The complete pipe protocol, native API, browser API, lifecycle, and errors are documented in [Pipes](PIPES.md). Use the connection facade described there when the `pipes` feature is enabled.
 
-## Appendix: Crypto Containers
+## Appendix: Composable Data Protection
 
-With the `crypto` feature, `DataValue` supports encrypted, signed, and signed+encrypted containers. Encryption uses ML-KEM to encapsulate to a recipient's KEM public key (from their `PublicKeyBundle`); only the holder of the matching `Keyring` can decrypt. Signing uses the sender's Ed25519 key.
-
-```rust
-use mtp::crypto::{EncryptionType, Ed25519Signer, SigAlgorithm};
-
-let enc_type = EncryptionType::MlKemChaCha20Poly1305;
-let signer = Ed25519Signer::new(&keyring.sig_cl_secret_key)?;
-
-// `recipient` is the PublicKeyBundle of whoever should be able to decrypt
-// (e.g. the host's bundle, obtained out of band).
-
-// Encrypted container
-let mut enc = DataValue::Container(vec![
-    (DataTypeId(1), DataValue::Str("secret".into())),
-]);
-enc.encrypt_container(enc_type, &recipient, b"aad");
-
-// Signed container
-let mut sig = DataValue::Container(vec![
-    (DataTypeId(1), DataValue::Str("signed".into())),
-]);
-sig.sign_container(SigAlgorithm::ED25519, &signer);
-
-// Signed + encrypted
-let mut sec = DataValue::Container(vec![
-    (DataTypeId(1), DataValue::Str("both".into())),
-]);
-sec.sign_and_encrypt_container(SigAlgorithm::ED25519, &signer, enc_type, &recipient, b"aad");
-```
-> Note: DataTypeId(1) maps intenally to the reserved DataType::Id, uncareful work with reserved DataTypes & CommunicationTypes (0 - 31) may lead to unexpected behaviour.
-> Prefer registring your own.
-
-On the receiving side, the recipient decrypts with its own `Keyring` (each blob is self-describing: its leading byte selects the algorithm and the matching KEM key from the keyring):
+With the `crypto` feature, any `DataValue` can be signed or encrypted. The operations return typed errors and compose by operation order. `Encrypted(Signed(Value))` keeps the signer identity inside the encrypted plaintext; `Signed(Encrypted(Value))` leaves it visible. The example uses different keyrings for the signer and recipient to make the ownership explicit.
 
 ```rust
-enc.decrypt_into_container(&keyring, b"aad");                // -> Container
-sig.verify_into_container(&verifier);                        // verifier: impl SignatureScheme
-sec.decrypt_signed_encrypted_container(&keyring, b"aad");    // -> SignedContainer, then verify_into_container
+use mtp::codec::{ProtectionPurpose, DataTypeId, DataValue};
+use mtp::crypto::{Ed25519Signer, Keyring};
+
+let sender_keyring = Keyring::generate();
+let recipient_keyring = Keyring::generate();
+let signer = Ed25519Signer::new(&sender_keyring.sig_cl_secret_key)?;
+let recipient = recipient_keyring.public_key_bundle();
+let sender_public_keys = sender_keyring.public_key_bundle();
+let value = DataValue::Container(vec![
+    (DataTypeId(32), DataValue::Str("secret".into())),
+]);
+
+// The outer encrypted wrapper hides the signer metadata.
+let private_signer = value.clone().sign(7, ProtectionPurpose::from(1), &signer)?;
+let sealed = private_signer.encrypt_for(
+    std::slice::from_ref(&recipient),
+    ProtectionPurpose::from(2),
+)?;
 ```
+
+Reverse the calls when the signer identity should remain visible to the recipient before opening the encrypted value:
+
+```rust
+let encrypted = value.encrypt_for(
+    std::slice::from_ref(&recipient),
+    ProtectionPurpose::from(2),
+)?;
+let public_signer = encrypted.sign(7, ProtectionPurpose::from(1), &signer)?;
+```
+
+Opening and verification are explicit and return the inner value without mutating the wrapper:
+
+```rust
+let signed = sealed.decrypt(&recipient_keyring, ProtectionPurpose::from(2))?;
+signed.verify(7, &sender_public_keys, ProtectionPurpose::from(1))?;
+let plain = signed.into_verified(7, &sender_public_keys, ProtectionPurpose::from(1))?;
+```
+
+For `public_signer`, call `verify` and `into_verified` before calling `decrypt`; its outer signature is available before the encrypted value is opened.
 
 ### Policy Configuration
 
 The `Policy` struct controls transport behaviour:
 
 ```rust
-use mtp::transport::{Policy, SendMode};
+use mtp::client::{Policy, SendMode};
 
 let policy = Policy {
     send_mode: SendMode::PersistentStream,

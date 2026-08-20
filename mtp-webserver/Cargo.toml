@@ -1,14 +1,14 @@
 [package]
 name = "mtp-webserver"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
-mtp-common = { version = "0.2.0", path = "../common" }
-mtp-codec = { version = "0.2.0", path = "../codec", features = ["registry"] }
-mtp-host = { version = "0.2.0", path = "../host" }
-mtp-transport = { version = "0.2.0", path = "../transport" }
-mtp-crypto = { version = "0.2.0", path = "../crypto" }
+mtp-common = { version = "0.3.0", path = "../common" }
+mtp-codec = { version = "0.3.0", path = "../codec", features = ["registry"] }
+mtp-host = { version = "0.3.0", path = "../host" }
+mtp-transport = { version = "0.3.0", path = "../transport" }
+mtp-crypto = { version = "0.3.0", path = "../crypto" }
 bytes = "1"
 http = "1"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
@@ -25,7 +25,6 @@ rustls = "0.23"
 tracing = "0.1"
 thiserror = "2"
 async-trait = "0.1"
-rand = { version = "0.10.1", optional = true }
 
 [dev-dependencies]
 rcgen = "0.14"
@@ -33,5 +32,5 @@ hyper = { version = "1", features = ["client", "http2"] }
 
 [features]
 default = []
-crypto = ["mtp-host/crypto", "dep:rand"]
+crypto = ["mtp-host/crypto"]
 pipes = ["mtp-host/pipes", "mtp-transport/pipes"]

@@ -1,19 +1,15 @@
 #[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
 use crate::error::CryptoError;
 
-#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
-use crate::kdf::derive_encryption_key;
-#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
+#[cfg(feature = "mlkem-tls")]
 use crate::kem::HybridKem;
-#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
-use crate::keypair::{Keyring, PublicKeyBundle};
 
 /*
- * Algorithm selector for encrypted containers.
+ * Algorithm selector for encrypted values.
  *
  * Mirrors `SigAlgorithm` for signatures: a single marking byte identifies the
  * key-encapsulation mechanism and the AEAD used to seal a container. The byte
- * is stored as the first byte of every encrypted blob so the decryptor can pick
+ * is stored as the first byte of every encrypted envelope so the decryptor can pick
  * the matching algorithm (and the matching keypair from a `Keyring`) without
  * any out-of-band agreement.
  *
@@ -34,7 +30,7 @@ impl EncryptionType {
     pub const ML_KEM_CHACHA20POLY1305: u8 = 0x01;
     pub const ML_KEM_AES256_GCM: u8 = 0x02;
 
-    /// The marking byte written at the front of an encrypted blob.
+    /// The marking byte written at the front of an encrypted envelope.
     pub const fn to_byte(self) -> u8 {
         match self {
             Self::MlKemChaCha20Poly1305 => Self::ML_KEM_CHACHA20POLY1305,
@@ -50,6 +46,50 @@ impl EncryptionType {
             _ => None,
         }
     }
+
+    /// Size of the content-encryption key wrapped for each recipient.
+    pub const CONTENT_ENCRYPTION_KEY_LEN: usize = 32;
+
+    /// The fixed-size ciphertext emitted by the KEM selected by this suite.
+    pub const fn kem_ciphertext_len(self) -> usize {
+        match self {
+            Self::MlKemChaCha20Poly1305 | Self::MlKemAes256Gcm => {
+                #[cfg(feature = "mlkem-tls")]
+                {
+                    HybridKem::ciphertext_len()
+                }
+                #[cfg(not(feature = "mlkem-tls"))]
+                {
+                    0
+                }
+            }
+        }
+    }
+
+    /// Bytes the selected AEAD prepends/appends to an encrypted payload.
+    pub const fn aead_overhead(self) -> usize {
+        match self {
+            Self::MlKemChaCha20Poly1305 => {
+                crate::aead::XCHACHA20POLY1305_NONCE_LEN + crate::aead::AUTH_TAG_LEN
+            }
+            Self::MlKemAes256Gcm => crate::aead::AES256GCM_NONCE_LEN + crate::aead::AUTH_TAG_LEN,
+        }
+    }
+
+    /// Total output length for an encrypted plaintext of `plaintext_len` bytes.
+    pub const fn encrypted_len(self, plaintext_len: usize) -> usize {
+        plaintext_len.saturating_add(self.aead_overhead())
+    }
+
+    /// Minimum valid AEAD output length for this suite.
+    pub const fn minimum_ciphertext_len(self) -> usize {
+        self.encrypted_len(0)
+    }
+
+    /// The size of a wrapped 32-byte content key for this suite.
+    pub const fn wrapped_key_len(self) -> usize {
+        self.encrypted_len(Self::CONTENT_ENCRYPTION_KEY_LEN)
+    }
 }
 
 /*
@@ -59,7 +99,7 @@ impl EncryptionType {
  */
 #[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
 #[allow(unused_variables)]
-fn aead_seal(
+pub fn seal_with_key(
     enc_type: EncryptionType,
     key: [u8; 32],
     plaintext: &[u8],
@@ -70,7 +110,7 @@ fn aead_seal(
     match enc_type {
         #[cfg(feature = "chacha20poly1305")]
         EncryptionType::MlKemChaCha20Poly1305 => {
-            crate::aead::ChaCha20Poly1305::new(key).encrypt(plaintext, aad)
+            crate::aead::XChaCha20Poly1305::new(key).encrypt(plaintext, aad)
         }
         #[cfg(feature = "aes-gcm")]
         EncryptionType::MlKemAes256Gcm => crate::aead::Aes256Gcm::new(key).encrypt(plaintext, aad),
@@ -86,7 +126,7 @@ fn aead_seal(
  */
 #[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
 #[allow(unused_variables)]
-fn aead_open(
+pub fn open_with_key(
     enc_type: EncryptionType,
     key: [u8; 32],
     ciphertext: &[u8],
@@ -97,7 +137,7 @@ fn aead_open(
     match enc_type {
         #[cfg(feature = "chacha20poly1305")]
         EncryptionType::MlKemChaCha20Poly1305 => {
-            crate::aead::ChaCha20Poly1305::new(key).decrypt(ciphertext, aad)
+            crate::aead::XChaCha20Poly1305::new(key).decrypt(ciphertext, aad)
         }
         #[cfg(feature = "aes-gcm")]
         EncryptionType::MlKemAes256Gcm => crate::aead::Aes256Gcm::new(key).decrypt(ciphertext, aad),
@@ -106,75 +146,50 @@ fn aead_open(
     }
 }
 
-#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
-const ENC_KDF_SALT: &[u8] = b"mtp-container-enc";
-#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
-const ENC_KDF_CONTEXT: &[u8] = b"single-recipient";
-
-/*
- * Encrypt `plaintext` for a single recipient, selecting the algorithm with
- * `enc_type` and the recipient's KEM public key from `recipient`.
- *
- * The returned, self-describing blob is laid out as:
- *   [1 byte EncryptionType] [2 bytes u16 kem_ct_len] [kem_ciphertext] [aead_payload]
- * where `aead_payload` is the AEAD output (nonce + ciphertext + tag). The AEAD
- * key is derived from the KEM shared secret via HKDF, so no separate content key
- * is transmitted.
- *
- * Requires the `mlkem-tls` and `hkdf` features, plus the AEAD feature backing
- * `enc_type`.
- */
-#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
-pub fn encrypt_for(
-    enc_type: EncryptionType,
-    recipient: &PublicKeyBundle,
-    plaintext: &[u8],
-    aad: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    let enc = HybridKem::encapsulate(&recipient.kem_public_key)?;
-    let key = derive_encryption_key(&enc.shared_secret, ENC_KDF_SALT, ENC_KDF_CONTEXT)?;
-    let aead_payload = aead_seal(enc_type, key, plaintext, aad)?;
-
-    let kem_ct = enc.ciphertext;
-    let mut out = Vec::with_capacity(1 + 2 + kem_ct.len() + aead_payload.len());
-    out.push(enc_type.to_byte());
-    out.extend_from_slice(&(kem_ct.len() as u16).to_be_bytes());
-    out.extend_from_slice(&kem_ct);
-    out.extend_from_slice(&aead_payload);
-    Ok(out)
-}
-
-/*
- * Decrypt a blob produced by [`encrypt_for`] using `keyring`.
- *
- * The leading byte selects the `EncryptionType` (and thus which keypair to use
- * from the keyring); for the current ML-KEM variants that is `kem_secret_key`.
- * Returns `DecryptionFailed` on any malformed input or authentication failure.
- *
- * Requires the `mlkem-tls` and `hkdf` features, plus the AEAD feature backing
- * the blob's algorithm.
- */
-#[cfg(all(feature = "mlkem-tls", feature = "hkdf"))]
-pub fn decrypt_with(blob: &[u8], keyring: &Keyring, aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    if blob.len() < 3 {
-        return Err(CryptoError::DecryptionFailed);
-    }
-    let enc_type = EncryptionType::from_byte(blob[0]).ok_or(CryptoError::DecryptionFailed)?;
-    let kem_ct_len = u16::from_be_bytes([blob[1], blob[2]]) as usize;
-    let kem_end = 3usize
-        .checked_add(kem_ct_len)
-        .ok_or(CryptoError::DecryptionFailed)?;
-    let kem_ct = blob.get(3..kem_end).ok_or(CryptoError::DecryptionFailed)?;
-    let aead_payload = blob.get(kem_end..).ok_or(CryptoError::DecryptionFailed)?;
-
-    let shared_secret = HybridKem::decapsulate(&keyring.kem_secret_key, kem_ct)?;
-    let key = derive_encryption_key(&shared_secret, ENC_KDF_SALT, ENC_KDF_CONTEXT)?;
-    aead_open(enc_type, key, aead_payload, aad)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "mlkem-tls")]
+    #[test]
+    fn envelope_parser_uses_suite_dependent_fixed_widths() {
+        use crate::helper::{MultiEncryptedMessage, RecipientEntry};
+
+        let suites = [
+            EncryptionType::MlKemChaCha20Poly1305,
+            EncryptionType::MlKemAes256Gcm,
+        ];
+        assert_ne!(suites[0].wrapped_key_len(), suites[1].wrapped_key_len());
+
+        for (index, suite) in suites.into_iter().enumerate() {
+            let marker = u8::try_from(index).unwrap();
+            let message = MultiEncryptedMessage {
+                encryption_type: suite,
+                purpose: 0xA5,
+                recipients: vec![RecipientEntry {
+                    kem_ciphertext: vec![0x10 + marker; suite.kem_ciphertext_len()],
+                    encrypted_key: vec![0x20 + marker; suite.wrapped_key_len()],
+                }],
+                ciphertext: vec![0x30 + marker; suite.minimum_ciphertext_len() + 3],
+            };
+            let encoded = message.to_bytes().expect("synthetic envelope is valid");
+            let kem_end = 4 + suite.kem_ciphertext_len();
+            let wrapped_end = kem_end + suite.wrapped_key_len();
+
+            assert_eq!(&encoded[..4], &[suite.to_byte(), 0xA5, 0, 1]);
+            assert_eq!(&encoded[4..kem_end], message.recipients[0].kem_ciphertext);
+            assert_eq!(
+                &encoded[kem_end..wrapped_end],
+                message.recipients[0].encrypted_key
+            );
+            assert_eq!(&encoded[wrapped_end..], message.ciphertext);
+            assert_eq!(
+                MultiEncryptedMessage::from_bytes(&encoded)
+                    .expect("suite-specific envelope should parse"),
+                message
+            );
+        }
+    }
 
     #[test]
     fn encryption_type_byte_roundtrip() {
@@ -188,59 +203,19 @@ mod tests {
         assert_eq!(EncryptionType::from_byte(0xFF), None);
     }
 
-    #[cfg(all(feature = "mlkem-tls", feature = "hkdf", feature = "chacha20poly1305"))]
     #[test]
-    fn encrypt_for_roundtrip() -> Result<(), CryptoError> {
-        let kr = Keyring::generate();
-        let blob = encrypt_for(
-            EncryptionType::MlKemChaCha20Poly1305,
-            &kr.public_key_bundle(),
-            b"secret payload",
-            b"aad",
-        )?;
-        assert_eq!(blob[0], EncryptionType::ML_KEM_CHACHA20POLY1305);
-
-        let pt = decrypt_with(&blob, &kr, b"aad")?;
-        assert_eq!(pt, b"secret payload");
-        Ok(())
-    }
-
-    #[cfg(all(feature = "mlkem-tls", feature = "hkdf", feature = "chacha20poly1305"))]
-    #[test]
-    fn decrypt_with_wrong_keyring_fails() -> Result<(), CryptoError> {
-        let kr = Keyring::generate();
-        let other = Keyring::generate();
-        let blob = encrypt_for(
-            EncryptionType::MlKemChaCha20Poly1305,
-            &kr.public_key_bundle(),
-            b"secret",
-            b"aad",
-        )?;
-        assert!(decrypt_with(&blob, &other, b"aad").is_err());
-        Ok(())
-    }
-
-    #[cfg(all(feature = "mlkem-tls", feature = "hkdf", feature = "chacha20poly1305"))]
-    #[test]
-    fn decrypt_with_wrong_aad_fails() -> Result<(), CryptoError> {
-        let kr = Keyring::generate();
-        let blob = encrypt_for(
-            EncryptionType::MlKemChaCha20Poly1305,
-            &kr.public_key_bundle(),
-            b"secret",
-            b"right",
-        )?;
-        assert!(decrypt_with(&blob, &kr, b"wrong").is_err());
-        Ok(())
-    }
-
-    #[cfg(all(feature = "mlkem-tls", feature = "hkdf", feature = "chacha20poly1305"))]
-    #[test]
-    fn decrypt_with_malformed_fails() {
-        let kr = Keyring::generate();
-        assert!(decrypt_with(b"", &kr, b"").is_err());
-        assert!(decrypt_with(&[0x01, 0x00], &kr, b"").is_err());
-        // Unknown algorithm byte.
-        assert!(decrypt_with(&[0x7F, 0x00, 0x00], &kr, b"").is_err());
+    fn suite_lengths_are_derived_from_the_selected_primitives() {
+        assert_eq!(
+            EncryptionType::MlKemChaCha20Poly1305.wrapped_key_len(),
+            EncryptionType::CONTENT_ENCRYPTION_KEY_LEN
+                + crate::aead::XCHACHA20POLY1305_NONCE_LEN
+                + crate::aead::AUTH_TAG_LEN
+        );
+        assert_eq!(
+            EncryptionType::MlKemAes256Gcm.wrapped_key_len(),
+            EncryptionType::CONTENT_ENCRYPTION_KEY_LEN
+                + crate::aead::AES256GCM_NONCE_LEN
+                + crate::aead::AUTH_TAG_LEN
+        );
     }
 }

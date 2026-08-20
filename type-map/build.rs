@@ -2,9 +2,9 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const DEFAULT_TYPE_MAPS_PATH: &str = "./type-maps.yaml";
-const FIRST_USER_TYPE_ID: u16 = 32;
 
 #[derive(Deserialize)]
 struct Config {
@@ -22,186 +22,54 @@ struct TypeMapConfig {
     data_types: BTreeMap<String, u16>,
 }
 
-struct ReservedEntry {
-    name: &'static str,
+#[derive(Deserialize)]
+struct ReservedManifest {
+    #[serde(rename = "firstUserTypeId")]
+    first_user_type_id: u16,
+    communication: Vec<ManifestEntry>,
+    data: Vec<ManifestEntry>,
+}
+
+#[derive(Deserialize)]
+struct ManifestEntry {
+    name: String,
     id: u16,
 }
 
-const RESERVED_COMM_TYPES: &[ReservedEntry] = &[
-    ReservedEntry {
-        name: "Identification",
-        id: 0,
-    },
-    ReservedEntry {
-        name: "IdentificationResponse",
-        id: 1,
-    },
-    ReservedEntry {
-        name: "Register",
-        id: 2,
-    },
-    ReservedEntry {
-        name: "RegisterResponse",
-        id: 3,
-    },
-    ReservedEntry {
-        name: "Challenge",
-        id: 4,
-    },
-    ReservedEntry {
-        name: "ChallengeResponse",
-        id: 5,
-    },
-    ReservedEntry {
-        name: "Ping",
-        id: 6,
-    },
-    ReservedEntry {
-        name: "Pong",
-        id: 7,
-    },
-    ReservedEntry {
-        name: "Disconnect",
-        id: 8,
-    },
-    ReservedEntry {
-        name: "Redirect",
-        id: 9,
-    },
-    ReservedEntry {
-        name: "Shutdown",
-        id: 10,
-    },
-    ReservedEntry {
-        name: "Error",
-        id: 11,
-    },
-    ReservedEntry {
-        name: "ErrorParsing",
-        id: 12,
-    },
-    ReservedEntry {
-        name: "ErrorBadVersion",
-        id: 13,
-    },
-    ReservedEntry {
-        name: "BadRequest",
-        id: 14,
-    },
-    ReservedEntry {
-        name: "Unauthorized",
-        id: 15,
-    },
-    ReservedEntry {
-        name: "Forbidden",
-        id: 16,
-    },
-    ReservedEntry {
-        name: "NotFound",
-        id: 17,
-    },
-    ReservedEntry {
-        name: "TooManyRequests",
-        id: 18,
-    },
-    ReservedEntry {
-        name: "InternalServerError",
-        id: 19,
-    },
-    ReservedEntry {
-        name: "BadGateway",
-        id: 20,
-    },
-    ReservedEntry {
-        name: "ServiceUnavailable",
-        id: 21,
-    },
-    ReservedEntry {
-        name: "GatewayTimeout",
-        id: 22,
-    },
-    #[cfg(feature = "pipes")]
-    ReservedEntry {
-        name: "PipeRequest",
-        id: 23,
-    },
-    #[cfg(feature = "pipes")]
-    ReservedEntry {
-        name: "PipeResponse",
-        id: 24,
-    },
-    #[cfg(feature = "pipes")]
-    ReservedEntry {
-        name: "PipeAbort",
-        id: 25,
-    },
-];
+fn reserved_manifest() -> &'static ReservedManifest {
+    static MANIFEST: OnceLock<ReservedManifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        serde_yaml::from_str(include_str!("reserved.json"))
+            .expect("type-map/reserved.json must be valid JSON/YAML")
+    })
+}
 
-const RESERVED_DATA_TYPES: &[ReservedEntry] = &[
-    ReservedEntry {
-        name: "Version",
-        id: 0,
-    },
-    ReservedEntry { name: "Id", id: 1 },
-    ReservedEntry {
-        name: "ClientNonce",
-        id: 2,
-    },
-    ReservedEntry {
-        name: "ServerNonce",
-        id: 3,
-    },
-    ReservedEntry {
-        name: "PublicKeys",
-        id: 4,
-    },
-    ReservedEntry {
-        name: "Signature",
-        id: 5,
-    },
-    ReservedEntry {
-        name: "PqSignature",
-        id: 6,
-    },
-    ReservedEntry {
-        name: "Description",
-        id: 7,
-    },
-    ReservedEntry {
-        name: "Connected",
-        id: 8,
-    },
-    ReservedEntry {
-        name: "Timestamp",
-        id: 9,
-    },
-    ReservedEntry {
-        name: "Error",
-        id: 10,
-    },
-    ReservedEntry {
-        name: "ErrorParsing",
-        id: 11,
-    },
-    ReservedEntry {
-        name: "ErrorMessage",
-        id: 12,
-    },
-    ReservedEntry {
-        name: "Accepted",
-        id: 13,
-    },
-    ReservedEntry {
-        name: "RequirePq",
-        id: 14,
-    },
-];
+fn first_user_type_id() -> u16 {
+    reserved_manifest().first_user_type_id
+}
+
+fn all_reserved_comm_types() -> &'static [ManifestEntry] {
+    &reserved_manifest().communication
+}
+
+fn generated_reserved_comm_types() -> Vec<&'static ManifestEntry> {
+    all_reserved_comm_types()
+        .iter()
+        .filter(|entry| cfg!(feature = "pipes") || !entry.name.starts_with("Pipe"))
+        .collect()
+}
+
+fn all_reserved_data_types() -> &'static [ManifestEntry] {
+    &reserved_manifest().data
+}
 
 fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let multi_version = std::env::var("CARGO_FEATURE_REGISTRY").is_ok();
 
     println!("cargo:rerun-if-env-changed=MTP_TYPE_MAPS");
+    println!("cargo:rerun-if-changed=reserved.json");
+    validate_reserved_manifest();
 
     let loaded = match std::env::var_os("MTP_TYPE_MAPS") {
         Some(config_path) => load_config(&PathBuf::from(config_path)),
@@ -229,6 +97,35 @@ fn main() {
     validate_config(&loaded);
     let code = generate(&loaded.config, multi_version);
     std::fs::write(out.join("types.rs"), code).unwrap();
+}
+
+fn validate_reserved_manifest() {
+    assert!(first_user_type_id() > 0);
+    for (category, entries) in [
+        ("communication", all_reserved_comm_types()),
+        ("data", all_reserved_data_types()),
+    ] {
+        let mut names = BTreeSet::new();
+        let mut ids = BTreeSet::new();
+        for entry in entries {
+            assert!(
+                entry.id < first_user_type_id(),
+                "reserved {category} type {} has a user-range ID {}",
+                entry.name,
+                entry.id
+            );
+            assert!(
+                names.insert(entry.name.as_str()),
+                "duplicate reserved {category} type name {}",
+                entry.name
+            );
+            assert!(
+                ids.insert(entry.id),
+                "duplicate reserved {category} type ID {}",
+                entry.id
+            );
+        }
+    }
 }
 
 struct LoadedConfig {
@@ -292,8 +189,15 @@ fn validate_config(loaded: &LoadedConfig) {
             version,
             "CommunicationTypes",
             &type_map.communication_types,
+            all_reserved_comm_types(),
         );
-        validate_ids(loaded, version, "DataTypes", &type_map.data_types);
+        validate_ids(
+            loaded,
+            version,
+            "DataTypes",
+            &type_map.data_types,
+            all_reserved_data_types(),
+        );
     }
 }
 
@@ -319,16 +223,28 @@ fn validate_ids(
     version: &str,
     category: &str,
     entries: &BTreeMap<String, u16>,
+    reserved: &[ManifestEntry],
 ) {
     let mut names_by_id = BTreeMap::new();
     for (name, id) in entries {
-        if *id < FIRST_USER_TYPE_ID {
+        if reserved.iter().any(|entry| entry.name == *name) {
             validation_error(
                 loaded,
                 &["type_maps", version, category],
                 name,
                 format!(
-                    "{category}.{name} in type-map version {version} uses reserved id {id}; user ids must be {FIRST_USER_TYPE_ID} or greater"
+                    "{category}.{name} in type-map version {version} uses reserved name {name:?}"
+                ),
+            );
+        }
+        if *id < first_user_type_id() {
+            validation_error(
+                loaded,
+                &["type_maps", version, category],
+                name,
+                format!(
+                    "{category}.{name} in type-map version {version} uses reserved id {id}; user ids must be {} or greater",
+                    first_user_type_id()
                 ),
             );
         }
@@ -540,7 +456,7 @@ fn generate_comm_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
     writeln!(out, "#[allow(clippy::enum_variant_names)]").unwrap();
     writeln!(out, "pub enum CommunicationType {{").unwrap();
 
-    for entry in RESERVED_COMM_TYPES {
+    for entry in generated_reserved_comm_types() {
         writeln!(out, "    {},", entry.name).unwrap();
     }
     for name in user_names {
@@ -554,7 +470,7 @@ fn generate_comm_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
     writeln!(out, "    pub fn name(self) -> &'static str {{").unwrap();
     writeln!(out, "        match self {{").unwrap();
 
-    for entry in RESERVED_COMM_TYPES {
+    for entry in generated_reserved_comm_types() {
         writeln!(
             out,
             "            CommunicationType::{} => \"{}\",",
@@ -580,7 +496,7 @@ fn generate_comm_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
     writeln!(out, "    pub fn from_name(s: &str) -> Option<Self> {{").unwrap();
     writeln!(out, "        match s {{").unwrap();
 
-    for entry in RESERVED_COMM_TYPES {
+    for entry in generated_reserved_comm_types() {
         writeln!(
             out,
             "            \"{}\" => Some(CommunicationType::{}),",
@@ -625,7 +541,7 @@ fn generate_data_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
     writeln!(out, "#[allow(clippy::enum_variant_names)]").unwrap();
     writeln!(out, "pub enum DataType {{").unwrap();
 
-    for entry in RESERVED_DATA_TYPES {
+    for entry in all_reserved_data_types() {
         writeln!(out, "    {},", entry.name).unwrap();
     }
     for name in user_names {
@@ -639,7 +555,7 @@ fn generate_data_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
     writeln!(out, "    pub fn name(self) -> &'static str {{").unwrap();
     writeln!(out, "        match self {{").unwrap();
 
-    for entry in RESERVED_DATA_TYPES {
+    for entry in all_reserved_data_types() {
         writeln!(
             out,
             "            DataType::{} => \"{}\",",
@@ -660,7 +576,7 @@ fn generate_data_type_enum(out: &mut String, user_names: &BTreeSet<&str>) {
     writeln!(out, "    pub fn from_name(s: &str) -> Option<Self> {{").unwrap();
     writeln!(out, "        match s {{").unwrap();
 
-    for entry in RESERVED_DATA_TYPES {
+    for entry in all_reserved_data_types() {
         writeln!(
             out,
             "            \"{}\" => Some(DataType::{}),",
@@ -733,7 +649,7 @@ fn generate_lookup_methods(
             major, minor
         )
         .unwrap();
-        for entry in RESERVED_COMM_TYPES {
+        for entry in generated_reserved_comm_types() {
             writeln!(
                 out,
                 "                CommunicationType::{} => Some({}),",
@@ -772,7 +688,7 @@ fn generate_lookup_methods(
             major, minor
         )
         .unwrap();
-        for entry in RESERVED_DATA_TYPES {
+        for entry in all_reserved_data_types() {
             writeln!(
                 out,
                 "                DataType::{} => Some({}),",
@@ -806,7 +722,7 @@ fn generate_lookup_methods(
             major, minor
         )
         .unwrap();
-        for entry in RESERVED_COMM_TYPES {
+        for entry in generated_reserved_comm_types() {
             writeln!(
                 out,
                 "                {} => Some(CommunicationType::{}),",
@@ -844,7 +760,7 @@ fn generate_lookup_methods(
             major, minor
         )
         .unwrap();
-        for entry in RESERVED_DATA_TYPES {
+        for entry in all_reserved_data_types() {
             writeln!(
                 out,
                 "                {} => Some(DataType::{}),",
@@ -877,7 +793,7 @@ fn generate_single_version_lookup(out: &mut String, config: &Config) {
     .unwrap();
     writeln!(out, "        match self.version {{").unwrap();
     writeln!(out, "            PROTOCOL_VERSION => match ct {{").unwrap();
-    for entry in RESERVED_COMM_TYPES {
+    for entry in generated_reserved_comm_types() {
         writeln!(
             out,
             "                CommunicationType::{} => Some({}),",
@@ -910,7 +826,7 @@ fn generate_single_version_lookup(out: &mut String, config: &Config) {
     .unwrap();
     writeln!(out, "        match self.version {{").unwrap();
     writeln!(out, "            PROTOCOL_VERSION => match dt {{").unwrap();
-    for entry in RESERVED_DATA_TYPES {
+    for entry in all_reserved_data_types() {
         writeln!(
             out,
             "                DataType::{} => Some({}),",
@@ -938,7 +854,7 @@ fn generate_single_version_lookup(out: &mut String, config: &Config) {
     .unwrap();
     writeln!(out, "        match self.version {{").unwrap();
     writeln!(out, "            PROTOCOL_VERSION => match id {{").unwrap();
-    for entry in RESERVED_COMM_TYPES {
+    for entry in generated_reserved_comm_types() {
         writeln!(
             out,
             "                {} => Some(CommunicationType::{}),",
@@ -970,7 +886,7 @@ fn generate_single_version_lookup(out: &mut String, config: &Config) {
     .unwrap();
     writeln!(out, "        match self.version {{").unwrap();
     writeln!(out, "            PROTOCOL_VERSION => match id {{").unwrap();
-    for entry in RESERVED_DATA_TYPES {
+    for entry in all_reserved_data_types() {
         writeln!(
             out,
             "                {} => Some(DataType::{}),",
@@ -1077,7 +993,7 @@ fn generate_all_types_methods(
         let tm_cfg = &config.type_maps[version_key];
         write!(out, "            Version({}, {}) => &[", major, minor).unwrap();
         let mut first = true;
-        for entry in RESERVED_COMM_TYPES {
+        for entry in generated_reserved_comm_types() {
             if !first {
                 write!(out, ", ").unwrap();
             }
@@ -1108,7 +1024,7 @@ fn generate_all_types_methods(
         let tm_cfg = &config.type_maps[version_key];
         write!(out, "            Version({}, {}) => &[", major, minor).unwrap();
         let mut first = true;
-        for entry in RESERVED_DATA_TYPES {
+        for entry in all_reserved_data_types() {
             if !first {
                 write!(out, ", ").unwrap();
             }
@@ -1144,7 +1060,7 @@ fn generate_all_types_methods_single(out: &mut String, config: &Config) {
     writeln!(out, "        match self.version {{").unwrap();
     write!(out, "            PROTOCOL_VERSION => &[").unwrap();
     let mut first = true;
-    for entry in RESERVED_COMM_TYPES {
+    for entry in generated_reserved_comm_types() {
         if !first {
             write!(out, ", ").unwrap();
         }
@@ -1174,7 +1090,7 @@ fn generate_all_types_methods_single(out: &mut String, config: &Config) {
     writeln!(out, "        match self.version {{").unwrap();
     write!(out, "            PROTOCOL_VERSION => &[").unwrap();
     let mut first = true;
-    for entry in RESERVED_DATA_TYPES {
+    for entry in all_reserved_data_types() {
         if !first {
             write!(out, ", ").unwrap();
         }

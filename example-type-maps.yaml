@@ -1,3 +1,7 @@
+#################################################################################
+# This is an example, overwrite it for your project to register your own types. #
+#################################################################################
+
 # The version a Client should use
 protocol_version: "0.0"
 
@@ -26,6 +30,7 @@ protocol_version: "0.0"
 #   BadGateway: 20
 #   ServiceUnavailable: 21
 #   GatewayTimeout: 22
+#   Relay: 26
 #   PipeRequest: 23
 #   PipeResponse: 24
 #   PipeAbort: 25
@@ -45,16 +50,29 @@ protocol_version: "0.0"
 #   ErrorParsing: 11
 #   ErrorMessage: 12
 #   Accepted: 13,
+#   RequirePq: 14
+#   MessageId: 15
+#   FinalRecipientId: 18
+#   CreatedAt: 21
+#   MessageType: 22
+#   Content: 23
+#   Metadata: 24
+#   RelayVersion: 25
+#   ProtectedVersion: 26
 #
 # Types absent from a protocol version cannot be encoded for that version.
 
 type_maps:
   "0.0": # Protocol version 0.0
     CommunicationTypes:
+      ProtectedMessage: 32
+      AlternateMessage: 33
     DataTypes:
       ExampleType: 32
   "1.0":
     CommunicationTypes:
+      ProtectedMessage: 32
+      AlternateMessage: 33
     DataTypes:
       # If a v0.0 client connects
       # - the server can't use "AnotherType"
@@ -64,6 +82,8 @@ type_maps:
       SomeType: 34
   "2.0":
     CommunicationTypes:
+      ProtectedMessage: 32
+      AlternateMessage: 33
     DataTypes:
       # If a v0.0 client connects
       # - the server can't use "AnotherType"

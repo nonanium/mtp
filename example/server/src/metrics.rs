@@ -108,6 +108,7 @@ pub struct ServerMetrics {
 }
 
 impl ServerMetrics {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(Inner {
@@ -218,6 +219,7 @@ impl ServerMetrics {
         }
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self) -> ServerMetricsFile {
         let inner = self.inner.lock().unwrap();
         self.to_file(&inner)
@@ -331,7 +333,7 @@ impl ServerMetrics {
 }
 
 // ---------------------------------------------------------------------------
-// Session handle — local accumulators, no mutex contention during connection
+// Session handle, local accumulators, no mutex contention during connection
 // ---------------------------------------------------------------------------
 
 pub struct SessionHandle<'a> {
@@ -553,11 +555,11 @@ mod tests {
         let metrics = ServerMetrics::new();
 
         for i in 0..3 {
-            let mut session = metrics.start_session(1000 + i as u64, format!("session {i}"));
+            let mut session = metrics.start_session(1000 + i, format!("session {i}"));
             for _ in 0..(i + 1) * 2 {
                 session.record_message(Duration::from_millis(1 + i), true);
             }
-            session.record_pipe((i as u64 + 1) * 1000);
+            session.record_pipe((i + 1) * 1000);
             session.finish(format!("exit {i}"));
         }
 

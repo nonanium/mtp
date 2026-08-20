@@ -17,14 +17,22 @@ fn main() -> Result<(), files::FileError> {
     /* Read both back to confirm the files round-trip through the on-disk format. */
     let loaded_keyring = load_keyring_raw(&keyring_path)?;
     let loaded_bundle = load_public_key_bundle(&bundle_path)?;
-    assert_eq!(keyring.to_bytes(), loaded_keyring.to_bytes());
+    assert_eq!(keyring.try_to_bytes()?, loaded_keyring.try_to_bytes()?);
+    let bundle_bytes = keyring.public_key_bundle().try_as_bytes()?;
+    let loaded_bundle_bytes = loaded_bundle.try_as_bytes()?;
     assert_eq!(
-        keyring.public_key_bundle().as_bytes(),
-        loaded_bundle.as_bytes()
+        bundle_bytes,
+        loaded_bundle_bytes
     );
-    println!("\nPrivateKeyRing (base64):\n{}", keyring.to_base64());
+    println!(
+        "\nPrivateKeyRing (base64):\n{}",
+        keyring.try_to_base64()?
+    );
 
-    println!("\nPublicKeyBundle (base64):\n{}", loaded_bundle.to_base64());
+    println!(
+        "\nPublicKeyBundle (base64):\n{}",
+        loaded_bundle.try_to_base64()?
+    );
 
     println!("Wrote keyring  -> {}", keyring_path.display());
     println!("Wrote bundle   -> {}", bundle_path.display());

@@ -1,19 +1,19 @@
 [package]
 name = "mtp-client"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
-mtp-common = { version = "0.2.0", path = "../common" }
-mtp-codec = { version = "0.2.0", path = "../codec" }
-mtp-transport = { version = "0.2.0", path = "../transport" }
-mtp-crypto = { version = "0.2.0", path = "../crypto", optional = true }
+mtp-common = { version = "0.3.0", path = "../common" }
+mtp-codec = { version = "0.3.0", path = "../codec", features = ["registry"] }
+mtp-transport = { version = "0.3.0", path = "../transport" }
+mtp-crypto = { version = "0.3.0", path = "../crypto", optional = true }
 rand = "0.10.1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
-mtp-host = { version = "0.2.0", path = "../host" }
-mtp-transport = { version = "0.2.0", path = "../transport", features = ["host"] }
+mtp-host = { version = "0.3.0", path = "../host" }
+mtp-transport = { version = "0.3.0", path = "../transport", features = ["host"] }
 rcgen = "0.14"
 
 [features]

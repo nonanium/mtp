@@ -16,6 +16,10 @@ pub fn from_crypto_error(e: mtp_crypto::CryptoError) -> JsValue {
     js_error(e.to_string())
 }
 
+pub fn from_protection_error(e: mtp_codec::ProtectionError) -> JsValue {
+    js_error(e.to_string())
+}
+
 #[cfg(test)]
 #[cfg(target_arch = "wasm32")]
 mod tests {

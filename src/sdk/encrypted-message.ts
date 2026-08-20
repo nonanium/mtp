@@ -14,8 +14,8 @@ const HEADER_FIXED_LEN = 1 + 1 + 8 + 8 + 4 + 2 + 4;
 export interface ParsedEncryptedMessage {
   version: 1;
   flags: number;
-  senderClientId: bigint;
-  recipientClientId: bigint;
+  senderId: bigint;
+  recipientId: bigint;
   messageNumber: number;
   kemCiphertext?: Uint8Array;
   ciphertext: Uint8Array;
@@ -28,8 +28,8 @@ export interface ParsedEncryptedMessage {
 export interface EncryptedMessageHeader {
   version: 1;
   flags: number;
-  senderClientId: bigint;
-  recipientClientId: bigint;
+  senderId: bigint;
+  recipientId: bigint;
   messageNumber: number;
   kemCiphertext?: Uint8Array;
 }
@@ -105,8 +105,8 @@ export function serializeEncryptedMessage(
   return concatBytes([
     new Uint8Array([normalized.version]),
     new Uint8Array([normalized.flags]),
-    writeU64BE(normalized.senderClientId),
-    writeU64BE(normalized.recipientClientId),
+    writeU64BE(normalized.senderId),
+    writeU64BE(normalized.recipientId),
     writeU32BE(normalized.messageNumber),
     new Uint8Array([
       (kemCiphertext.length >>> 8) & 0xff,
@@ -131,9 +131,9 @@ export function parseEncryptedMessage(
 
   const version = bytes[offset++];
   const flags = bytes[offset++];
-  const senderClientId = readU64BE(bytes, offset);
+  const senderId = readU64BE(bytes, offset);
   offset += 8;
-  const recipientClientId = readU64BE(bytes, offset);
+  const recipientId = readU64BE(bytes, offset);
   offset += 8;
   const messageNumber =
     ((bytes[offset] << 24) |
@@ -176,8 +176,8 @@ export function parseEncryptedMessage(
   const parsed: ParsedEncryptedMessage = {
     version: version as 1,
     flags,
-    senderClientId,
-    recipientClientId,
+    senderId,
+    recipientId,
     messageNumber,
     kemCiphertext,
     ciphertext,
@@ -185,8 +185,8 @@ export function parseEncryptedMessage(
   parsed.header = {
     version: parsed.version,
     flags: parsed.flags,
-    senderClientId: parsed.senderClientId,
-    recipientClientId: parsed.recipientClientId,
+    senderId: parsed.senderId,
+    recipientId: parsed.recipientId,
     messageNumber: parsed.messageNumber,
     kemCiphertext: parsed.kemCiphertext,
   };
@@ -199,8 +199,8 @@ function buildAAD(header: EncryptedMessageHeader): Uint8Array {
   return concatBytes([
     new Uint8Array([header.version]),
     new Uint8Array([header.flags]),
-    writeU64BE(header.senderClientId),
-    writeU64BE(header.recipientClientId),
+    writeU64BE(header.senderId),
+    writeU64BE(header.recipientId),
     writeU32BE(header.messageNumber),
   ]);
 }
@@ -227,8 +227,8 @@ export async function encryptPayload(args: {
   const header: EncryptedMessageHeader = {
     version: 1,
     flags: args.kemCiphertext ? FLAG_INIT : 0,
-    senderClientId: args.session.ownClientId,
-    recipientClientId: args.session.peerClientId,
+    senderId: args.session.localId,
+    recipientId: args.session.remoteId,
     messageNumber: args.session.sendCount,
     kemCiphertext: args.kemCiphertext,
   };
@@ -257,19 +257,18 @@ export async function encryptPayload(args: {
 export async function decryptPayload(args: {
   payload: Uint8Array;
   session: MTPSessionState;
-  expectedRecipientClientId?: bigint;
+  expectedRecipientId?: bigint;
   aad?: Uint8Array;
 }): Promise<{
   plaintext: Uint8Array;
   session: MTPSessionState;
 }> {
   const parsed = parseEncryptedMessage(args.payload);
-  const expectedRecipientClientId =
-    args.expectedRecipientClientId ?? args.session.ownClientId;
-  if (parsed.recipientClientId !== expectedRecipientClientId) {
+  const expectedRecipientId = args.expectedRecipientId ?? args.session.localId;
+  if (parsed.recipientId !== expectedRecipientId) {
     throw new Error("Encrypted message recipient mismatch");
   }
-  if (parsed.senderClientId !== args.session.peerClientId) {
+  if (parsed.senderId !== args.session.remoteId) {
     throw new Error("Encrypted message sender mismatch");
   }
 
@@ -322,8 +321,8 @@ export async function decryptPayload(args: {
   const header: EncryptedMessageHeader = {
     version: parsed.version,
     flags: parsed.flags,
-    senderClientId: parsed.senderClientId,
-    recipientClientId: parsed.recipientClientId,
+    senderId: parsed.senderId,
+    recipientId: parsed.recipientId,
     messageNumber: parsed.messageNumber,
     kemCiphertext: parsed.kemCiphertext,
   };

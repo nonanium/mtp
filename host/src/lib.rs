@@ -28,7 +28,11 @@ pub use pipe::PipeRequest;
 pub use mtp_codec::registry::Registry;
 
 #[cfg(feature = "crypto")]
-pub use config::{AuthenticationPolicy, CompleteRegister, GetExistingClient, GuestIdGenerator};
+pub use config::{
+    AuthenticationAttempt, AuthenticationAttemptLimiter, AuthenticationContext,
+    AuthenticationLimitError, AuthenticationPolicy, CompleteRegister, FindRegisteredClient,
+    GetExistingClient, GuestIdGenerator, InMemoryAuthenticationAttemptLimiter,
+};
 #[cfg(feature = "crypto")]
 pub use error::AuthState;
 
@@ -51,9 +55,9 @@ mod tests {
     fn version_extraction() {
         let tm = mtp_codec::TypeMap::latest();
         let msg = mtp_codec::CommunicationValue::from_comm(CommunicationType::Identification, &tm)
-            .add_typed(DataType::Version, &tm, DataValue::Str("2.0".to_string()));
+            .add_typed(DataType::Version, &tm, DataValue::Str("3.0".to_string()));
         let version = error::extract_version(&msg);
-        assert_eq!(version, Some(mtp_codec::Version(2, 0)));
+        assert_eq!(version, Some(mtp_codec::Version(3, 0)));
     }
 
     #[test]
@@ -92,7 +96,7 @@ mod tests {
     #[tokio::test]
     async fn alternative_transports_use_the_shared_connection_type() {
         let registry = Registry::builtin();
-        let version = mtp_codec::Version(1, 0);
+        let version = mtp_codec::Version(3, 0);
         let codec = VersionedCodec::for_version(registry, version.clone()).unwrap();
         let connection: MTPConnection<AlternateSender, AlternateReceiver> =
             MTPConnection::from_transport_parts(

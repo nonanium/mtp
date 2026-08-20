@@ -1,3 +1,4 @@
+use mtp::common::unix_time_millis;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -7,6 +8,9 @@ fn now_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+fn now_epoch_millis() -> u64 {
+    unix_time_millis().unwrap_or_default()
 }
 
 fn generate_session_id() -> String {
@@ -75,6 +79,7 @@ pub struct ClientMetrics {
 }
 
 impl ClientMetrics {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             sessions: Vec::new(),
@@ -197,7 +202,7 @@ impl SessionBuilder {
     pub fn new(auth_method: &str, auth_duration: Duration) -> Self {
         Self {
             session_id: generate_session_id(),
-            timestamp: now_epoch_secs(),
+            timestamp: now_epoch_millis(),
             auth_method: auth_method.to_string(),
             auth_duration_ms: auth_duration.as_secs_f64() * 1000.0,
             error: None,
@@ -219,11 +224,7 @@ impl SessionBuilder {
     }
 
     pub fn build(self) -> ClientSessionRecord {
-        let total_pipe_bytes: u64 = self
-            .pipe_results
-            .iter()
-            .map(|r| r.size as u64)
-            .sum();
+        let total_pipe_bytes: u64 = self.pipe_results.iter().map(|r| r.size as u64).sum();
 
         let overall_pipe_avg_total_ms = if self.pipe_results.is_empty() {
             0.0
@@ -235,7 +236,10 @@ impl SessionBuilder {
         let overall_pipe_avg_data_ms = if self.pipe_results.is_empty() {
             0.0
         } else {
-            self.pipe_results.iter().map(|r| r.data_only_ms).sum::<f64>()
+            self.pipe_results
+                .iter()
+                .map(|r| r.data_only_ms)
+                .sum::<f64>()
                 / self.pipe_results.len() as f64
         };
 

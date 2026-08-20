@@ -1,8 +1,9 @@
-use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue};
+use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap};
 use mtp_common::{CommunicationError, PipeError};
 use mtp_transport::{PipeReader, PipeWriter, Policy, TransportEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::{Mutex, mpsc};
 
 /// The sender operations needed by the transport-independent pipe protocol.
@@ -93,14 +94,20 @@ where
     }
 }
 
-pub struct PipeHandle<S: PipeSender> {
+pub struct PipeHandle<S: PipeSender, P = wtransport::RecvStream> {
     pub(crate) pipe_id: u32,
     pub(crate) description: String,
     pub(crate) sender: S,
     pub(crate) response_rx: tokio::sync::oneshot::Receiver<Result<bool, PipeError>>,
+    pub(crate) dispatcher: Arc<PipeDispatcher<P>>,
+    pub(crate) token: Arc<()>,
 }
 
-impl<S: PipeSender> PipeHandle<S> {
+impl<S, P> PipeHandle<S, P>
+where
+    S: PipeSender,
+    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+{
     pub fn pipe_id(&self) -> u32 {
         self.pipe_id
     }
@@ -109,18 +116,39 @@ impl<S: PipeSender> PipeHandle<S> {
         &self.description
     }
 
-    pub async fn wait(self) -> Result<Option<PipeWriter<S::Writer>>, PipeError> {
-        match self.response_rx.await {
-            Ok(Ok(true)) => self
+    pub async fn wait(mut self) -> Result<Option<PipeWriter<S::Writer>>, PipeError> {
+        let response =
+            tokio::time::timeout(self.dispatcher.policy.read_timeout, &mut self.response_rx).await;
+        match response {
+            Ok(Ok(Ok(true))) => self
                 .sender
                 .open_pipe_stream(self.pipe_id, &self.description)
                 .await
                 .map(Some)
                 .map_err(PipeError::from),
-            Ok(Ok(false)) => Ok(None),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(PipeError::StreamClosed),
+            Ok(Ok(Ok(false))) => Ok(None),
+            Ok(Ok(Err(error))) => {
+                expire_pending_creation(&self.dispatcher, self.pipe_id, &self.token);
+                Err(error)
+            }
+            Ok(Err(_)) => {
+                expire_pending_creation(&self.dispatcher, self.pipe_id, &self.token);
+                Err(PipeError::StreamClosed)
+            }
+            Err(_) => {
+                expire_pending_creation(&self.dispatcher, self.pipe_id, &self.token);
+                Err(PipeError::HandshakeTimeout)
+            }
         }
+    }
+}
+
+impl<S, P> Drop for PipeHandle<S, P>
+where
+    S: PipeSender,
+{
+    fn drop(&mut self) {
+        expire_pending_creation(&self.dispatcher, self.pipe_id, &self.token);
     }
 }
 
@@ -152,24 +180,49 @@ where
             .await
             .insert(self.pipe_id, pipe_tx);
 
-        let response = CommunicationValue::new(CommunicationType::PipeResponse)
-            .with_id(self.pipe_id)
-            .add_typed_default(DataType::Accepted, DataValue::BoolTrue);
-        self.sender
-            .send_pipe_message(&response)
-            .await
-            .map_err(PipeError::from)?;
+        let response = CommunicationValue::new_with_type_map(
+            CommunicationType::PipeResponse,
+            &self.dispatcher.type_map,
+        )
+        .with_id(self.pipe_id)
+        .add_typed_default(DataType::Accepted, DataValue::BoolTrue);
+        if let Err(error) = self.sender.send_pipe_message(&response).await {
+            self.dispatcher
+                .pending_pipes
+                .lock()
+                .await
+                .remove(&self.pipe_id);
+            return Err(PipeError::from(error));
+        }
 
-        tokio::time::timeout(self.dispatcher.policy.read_timeout, pipe_rx)
-            .await
-            .map_err(|_| PipeError::HandshakeTimeout)?
-            .map_err(|_| PipeError::StreamClosed)
+        match tokio::time::timeout(self.dispatcher.policy.read_timeout, pipe_rx).await {
+            Ok(Ok(reader)) => Ok(reader),
+            Ok(Err(_)) => {
+                self.dispatcher
+                    .pending_pipes
+                    .lock()
+                    .await
+                    .remove(&self.pipe_id);
+                Err(PipeError::StreamClosed)
+            }
+            Err(_) => {
+                self.dispatcher
+                    .pending_pipes
+                    .lock()
+                    .await
+                    .remove(&self.pipe_id);
+                Err(PipeError::HandshakeTimeout)
+            }
+        }
     }
 
     pub async fn deny(self) -> Result<(), PipeError> {
-        let response = CommunicationValue::new(CommunicationType::PipeResponse)
-            .with_id(self.pipe_id)
-            .add_typed_default(DataType::Accepted, DataValue::BoolFalse);
+        let response = CommunicationValue::new_with_type_map(
+            CommunicationType::PipeResponse,
+            &self.dispatcher.type_map,
+        )
+        .with_id(self.pipe_id)
+        .add_typed_default(DataType::Accepted, DataValue::BoolFalse);
         self.sender
             .send_pipe_message(&response)
             .await
@@ -178,10 +231,130 @@ where
 }
 
 pub(crate) struct PipeDispatcher<P> {
-    pub(crate) pending_creations:
-        Mutex<HashMap<u32, tokio::sync::oneshot::Sender<Result<bool, PipeError>>>>,
+    pub(crate) pending_creations: StdMutex<HashMap<u32, PendingCreation>>,
+    pub(crate) expired_creations: StdMutex<HashMap<u32, tokio::time::Instant>>,
     pub(crate) pending_pipes: Mutex<HashMap<u32, tokio::sync::oneshot::Sender<PipeReader<P>>>>,
     pub(crate) policy: Arc<Policy>,
+    pub(crate) type_map: TypeMap,
+}
+
+pub(crate) struct PendingCreation {
+    pub(crate) token: Arc<()>,
+    pub(crate) sender: tokio::sync::oneshot::Sender<Result<bool, PipeError>>,
+}
+
+pub(crate) struct PendingCreationGuard<P> {
+    dispatcher: Arc<PipeDispatcher<P>>,
+    pipe_id: u32,
+    token: Arc<()>,
+    armed: bool,
+}
+
+impl<P> PendingCreationGuard<P> {
+    pub(crate) fn new(dispatcher: Arc<PipeDispatcher<P>>, pipe_id: u32, token: Arc<()>) -> Self {
+        Self {
+            dispatcher,
+            pipe_id,
+            token,
+            armed: true,
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<P> Drop for PendingCreationGuard<P> {
+    fn drop(&mut self) {
+        if self.armed {
+            expire_pending_creation(&self.dispatcher, self.pipe_id, &self.token);
+        }
+    }
+}
+
+const EXPIRED_CREATION_TOMBSTONE_TTL: tokio::time::Duration = tokio::time::Duration::from_secs(60);
+const MAX_EXPIRED_CREATION_TOMBSTONES: usize = 1024;
+
+pub(crate) fn expire_pending_creation<P>(
+    dispatcher: &PipeDispatcher<P>,
+    pipe_id: u32,
+    token: &Arc<()>,
+) {
+    let removed = dispatcher
+        .pending_creations
+        .lock()
+        .ok()
+        .and_then(|mut pending| {
+            if pending
+                .get(&pipe_id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.token, token))
+            {
+                pending.remove(&pipe_id);
+                Some(())
+            } else {
+                None
+            }
+        });
+    if removed.is_none() {
+        return;
+    }
+    let Ok(mut expired) = dispatcher.expired_creations.lock() else {
+        return;
+    };
+    let now = tokio::time::Instant::now();
+    expired.retain(|_, expires_at| *expires_at > now);
+    if expired.len() >= MAX_EXPIRED_CREATION_TOMBSTONES
+        && let Some(oldest) = expired
+            .iter()
+            .min_by_key(|(_, expires_at)| **expires_at)
+            .map(|(id, _)| *id)
+    {
+        expired.remove(&oldest);
+    }
+    expired.insert(pipe_id, now + EXPIRED_CREATION_TOMBSTONE_TTL);
+}
+
+fn consume_expired_creation<P>(dispatcher: &PipeDispatcher<P>, pipe_id: u32) -> bool {
+    let Ok(mut expired) = dispatcher.expired_creations.lock() else {
+        return false;
+    };
+    let now = tokio::time::Instant::now();
+    expired.retain(|_, expires_at| *expires_at > now);
+    expired.remove(&pipe_id).is_some()
+}
+
+pub(crate) fn is_expired_creation<P>(dispatcher: &PipeDispatcher<P>, pipe_id: u32) -> bool {
+    let Ok(mut expired) = dispatcher.expired_creations.lock() else {
+        return true;
+    };
+    let now = tokio::time::Instant::now();
+    expired.retain(|_, expires_at| *expires_at > now);
+    expired.contains_key(&pipe_id)
+}
+
+pub(crate) fn fail_pending_creations<P>(
+    dispatcher: &PipeDispatcher<P>,
+    error: &CommunicationError,
+) {
+    let pending = dispatcher
+        .pending_creations
+        .lock()
+        .ok()
+        .map(|mut pending| std::mem::take(&mut *pending));
+    if let Some(pending) = pending {
+        let error = PipeError::from(error.clone());
+        for (_, pending) in pending {
+            let _ = pending.sender.send(Err(error.clone()));
+        }
+    }
+    if let Ok(mut expired) = dispatcher.expired_creations.lock() {
+        expired.clear();
+    }
+}
+
+pub(crate) async fn fail_pending_pipes<P>(dispatcher: &PipeDispatcher<P>) {
+    dispatcher.pending_pipes.lock().await.clear();
 }
 
 pub(crate) async fn run_dispatcher<S, R, P>(
@@ -195,15 +368,21 @@ pub(crate) async fn run_dispatcher<S, R, P>(
     R: PipeReceiver<P>,
     P: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
-    let pipe_req_type = CommunicationType::PipeRequest.try_to_id(&mtp_codec::TypeMap::latest());
-    let pipe_resp_type = CommunicationType::PipeResponse.try_to_id(&mtp_codec::TypeMap::latest());
-
     loop {
         match receiver.receive_pipe_event().await {
             Ok(TransportEvent::Message(message)) => {
-                if Some(message.get_type()) == pipe_req_type {
+                if message.is_type(CommunicationType::PipeRequest) {
+                    let Some(pipe_id) = message.id().filter(|id| *id != 0) else {
+                        let error = CommunicationError::Other(
+                            "PipeRequest frame must contain a non-zero id".into(),
+                        );
+                        if app_tx.send(Err(error)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    };
                     let request = PipeRequest {
-                        pipe_id: message.get_id(),
+                        pipe_id,
                         description: message
                             .get_str(DataType::Description)
                             .unwrap_or("")
@@ -214,11 +393,40 @@ pub(crate) async fn run_dispatcher<S, R, P>(
                     let _ = pipe_req_tx.send(request).await;
                     continue;
                 }
-                if Some(message.get_type()) == pipe_resp_type {
-                    let mut pending = dispatcher.pending_creations.lock().await;
-                    if let Some(reply) = pending.remove(&message.get_id()) {
-                        let _ =
-                            reply.send(Ok(message.get_bool(DataType::Accepted).unwrap_or(false)));
+                if message.is_type(CommunicationType::PipeResponse) {
+                    let Some(pipe_id) = message.id().filter(|id| *id != 0) else {
+                        let error = CommunicationError::Other(
+                            "PipeResponse frame must contain a non-zero id".into(),
+                        );
+                        if app_tx.send(Err(error)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    };
+                    let pending = dispatcher
+                        .pending_creations
+                        .lock()
+                        .ok()
+                        .and_then(|mut pending| pending.remove(&pipe_id));
+                    if let Some(entry) = pending {
+                        let _ = entry
+                            .sender
+                            .send(Ok(message.get_bool(DataType::Accepted).unwrap_or(false)));
+                    } else if consume_expired_creation(&dispatcher, pipe_id) {
+                        tracing::debug!(pipe_id, "ignored late pipe creation response");
+                    }
+                    continue;
+                }
+                if !matches!(message.id(), Some(id) if id != 0)
+                    && message
+                        .get_type_name()
+                        .is_some_and(|name| name.ends_with("Response"))
+                {
+                    let error = CommunicationError::Other(
+                        "response frame must contain a non-zero id".into(),
+                    );
+                    if app_tx.send(Err(error)).await.is_err() {
+                        break;
                     }
                     continue;
                 }
@@ -243,9 +451,12 @@ pub(crate) async fn run_dispatcher<S, R, P>(
                 let _ = pipe_req_tx.send(request).await;
             }
             Err(error) => {
+                fail_pending_creations(&dispatcher, &error);
+                fail_pending_pipes(&dispatcher).await;
                 if app_tx.send(Err(error)).await.is_err() {
                     break;
                 }
+                break;
             }
         }
     }

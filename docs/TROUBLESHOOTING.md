@@ -59,11 +59,11 @@ When `require_pq` is true, both Ed25519 and ML-DSA-65 keys and signatures must b
 
 **Prevention:** Treat generated type maps as versioned build artifacts.
 
-`CodecError::UnknownVersion` means the codec was created for a version absent from its registry. `UnknownCommunicationType` and `UnknownDataType` mean the selected `TypeMap` has no mapping for the value being encoded. Select the negotiated type map and do not send an unmapped variant.
+`CodecError::UnknownVersion` means the codec was created for a version absent from its registry. `UnknownCommunicationType` and `UnknownDataType` mean the selected `TypeMap` has no mapping for the value being encoded. `MissingTypeMap` means a versioned value lost its retained negotiated map; `TypeMapMismatch` means it was combined with a value or codec for another version. Select the negotiated type map and do not send an unmapped variant.
 
 `ReservedCommunicationType` means application code attempted to use a reserved wire ID. Use generated communication types instead of assigning protocol IDs manually. `MissingField` means a required typed field was not present.
 
-`InvalidEncoding` indicates truncated, malformed, or structurally invalid bytes. `TooManyEntries` indicates that an array, container, or frame exceeds the codec's representable count or length. `CryptoFailed` indicates that signature verification or encrypted-container processing failed. The complete variant table is in [Errors](ERRORS.md).
+`InvalidEncoding` indicates truncated, malformed, duplicate-field, reserved-kind, or structurally invalid bytes. `TooManyEntries` indicates that an array, container, or frame exceeds the codec's representable count or length. Protection operations return typed errors for malformed envelopes, authentication failures, invalid signatures, and missing recipients. The complete variant table is in [Errors](ERRORS.md).
 
 ## Frames and Message Limits
 

@@ -83,18 +83,18 @@ network metadata, not an authenticated client identity.
 
 ## Version Negotiation
 
-`accept()` uses the version-bearing opening frame and registry flow in [Connector](CONNECTOR.md). The host registry is built from the type maps in `type-maps.yaml` by `Registry::builtin()`.
+`accept()` uses the version-bearing opening frame and registry flow in [Connector](CONNECTOR.md). The host registry is built from the type maps in [`example/type-maps.yaml`](../example/type-maps.yaml) by `Registry::builtin()` in this repository; downstream builds can provide their own `MTP_TYPE_MAPS` configuration.
 
 ### Registry
 
 ```rust
-use mtp::codec::registry::Registry;
+use mtp::codec::Version;
 
 let registry = host.registry();
-assert!(registry.supports(&Version(2, 0)));
+assert!(registry.supports(&Version(3, 0)));
 
-let negotiated = registry.negotiate(&[Version(1, 0), Version(2, 0)]);
-// -> Some(Version(2, 0)) if both versions are registered
+let negotiated = registry.negotiate(&[Version(2, 0), Version(3, 0)]);
+// -> Some(Version(3, 0)) for this repository's builtin map
 ```
 
 ## Authentication Flow
@@ -105,13 +105,15 @@ After a successful handshake, `MTPConnection` exposes `AuthState::Authenticated`
 
 ## Handling Messages
 
-Use `conn.sender` and `conn.receiver` for bidirectional message exchange:
+Use `conn.sender` and `conn.receive()` for bidirectional message exchange. The
+connection dispatcher owns the underlying receiver, especially when `pipes` is
+enabled:
 
 ```rust
 while let Some(conn) = host.accept().await? {
     tokio::spawn(async move {
         loop {
-            match conn.receiver.receive().await {
+            match conn.receive().await {
                 Ok(msg) => {
                     let response = process_message(&msg, &conn);
                     conn.sender.send(&response).await.ok();
@@ -157,10 +159,9 @@ let get_existing_client = |id: u64, _description: Option<String>| {
 
 ### guest_id_generator
 
-Optional callback that controls how unauthenticated connections receive their client ID.  When `None` (the default), the host generates a random 48-bit ID and checks it against `get_existing_client` to avoid collisions.
+Optional callback that controls how unauthenticated connections receive their client ID. When `None` (the default), the host generates a random full-width `u64` ID and checks it against `get_existing_client` to avoid collisions.
 
-Return `Some(id)` to accept the guest with that ID, or `None` to reject the connection.  The ID must fit in 48 bits (`id <= mtp_codec::MAX_WIRE_ID`);
-values outside that range are rejected automatically and fall back to the built-in generator.
+Return `Some(id)` to accept the guest with that full-width `u64` ID, or `None` to reject the connection.
 
 ```rust
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -213,7 +214,7 @@ let (kem_sk, kem_pk) = HybridKem::generate_keypair();
 let host_keyring = Keyring::new(kem_pk, kem_sk, sig_pq_pk, sig_pq_sk, sig_pk, sig_sk);
 
 // Save to disk
-let bytes = host_keyring.to_bytes();
+let bytes = host_keyring.try_to_bytes()?;
 std::fs::write("host_keys.bin", bytes)?;
 ```
 

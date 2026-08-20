@@ -7,14 +7,13 @@ use mtp_codec::{CommunicationValue, DataType, DataValue};
 
 #[cfg(feature = "crypto")]
 pub(crate) fn random_client_id() -> u64 {
-    rand::random::<u64>() & mtp_codec::MAX_WIRE_ID
+    rand::random::<u64>()
 }
 
 #[cfg(test)]
 pub(crate) fn extract_version(msg: &CommunicationValue) -> Option<Version> {
-    let value = msg.get_data(DataType::Version);
-    match value {
-        DataValue::Str(s) => Version::parse(s.as_str()),
+    match msg.get_data(DataType::Version) {
+        Some(DataValue::Str(s)) => Version::parse(s.as_str()),
         _ => None,
     }
 }

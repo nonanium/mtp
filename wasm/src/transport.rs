@@ -1,12 +1,14 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use futures_util::lock::Mutex as AsyncMutex;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::error::js_error;
-use crate::frame::parse_frame_value;
+use crate::frame::parse_frame_value_with_limits;
+use mtp_codec::{DecodeLimits, EncodeLimits, TypeMap};
 
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 
@@ -126,6 +128,10 @@ pub struct WasmTransport {
     buffer: Rc<RefCell<Vec<u8>>>,
     /// Set to `true` when `open_next_stream` succeeds; cleared after the first frame is parsed.
     new_stream_frame: Rc<Cell<bool>>,
+    /// Serializes stream creation and writes across concurrent callers.
+    send_lock: Rc<AsyncMutex<()>>,
+    type_map: Rc<RefCell<TypeMap>>,
+    decode_limits: Rc<RefCell<DecodeLimits>>,
 }
 
 impl WasmTransport {
@@ -133,6 +139,15 @@ impl WasmTransport {
         url: &str,
         cert_hashes: Option<Vec<String>>,
         max_message_size: u32,
+    ) -> Result<Self, JsValue> {
+        Self::connect_with_limits(url, cert_hashes, max_message_size, None).await
+    }
+
+    pub async fn connect_with_limits(
+        url: &str,
+        cert_hashes: Option<Vec<String>>,
+        max_message_size: u32,
+        configured_limits: Option<DecodeLimits>,
     ) -> Result<Self, JsValue> {
         let ctor = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("WebTransport"))?
             .dyn_into::<js_sys::Function>()
@@ -181,6 +196,10 @@ impl WasmTransport {
         JsFuture::from(ready)
             .await
             .map_err(|e| js_error(format!("WebTransport ready failed: {:?}", e)))?;
+        let transport_limits = DecodeLimits::for_transport_message_size(max_message_size as u64);
+        let decode_limits = configured_limits
+            .map(|limits| restrict_decode_limits(limits, transport_limits))
+            .unwrap_or(transport_limits);
         Ok(Self {
             inner: transport,
             max_message_size,
@@ -188,6 +207,9 @@ impl WasmTransport {
             stream_reader: Rc::new(RefCell::new(None)),
             buffer: Rc::new(RefCell::new(Vec::new())),
             new_stream_frame: Rc::new(Cell::new(false)),
+            send_lock: Rc::new(AsyncMutex::new(())),
+            type_map: Rc::new(RefCell::new(TypeMap::latest())),
+            decode_limits: Rc::new(RefCell::new(decode_limits)),
         })
     }
 
@@ -195,13 +217,39 @@ impl WasmTransport {
         &self.inner
     }
 
+    pub fn set_type_map(&self, type_map: &TypeMap) {
+        *self.type_map.borrow_mut() = type_map.clone();
+    }
+
+    pub fn type_map(&self) -> TypeMap {
+        self.type_map.borrow().clone()
+    }
+
+    pub fn decode_limits(&self) -> DecodeLimits {
+        *self.decode_limits.borrow()
+    }
+
+    /// Encoder policy corresponding to the transport's admitted complete
+    /// frame size. SDK builders use this before constructing a frame so an
+    /// oversized value is rejected before its serialized buffer is created.
+    pub fn encode_limits(&self) -> EncodeLimits {
+        EncodeLimits::for_transport_message_size(self.max_message_size as u64)
+    }
+
     pub async fn send_frame(&self, frame: &[u8]) -> Result<(), JsValue> {
+        let _send_guard = self.send_lock.lock().await;
         if frame.len() as u64 > self.max_message_size as u64
             || frame.len() as u64 >= CLOSE_FRAME_LEN as u64
         {
             return Err(js_error("message too large"));
         }
 
+        // Use one WebTransport uni-stream per MTP frame. Chromium reliably
+        // publishes a browser-created uni-stream to the peer when it is
+        // closed; leaving a shared stream open can leave the server waiting
+        // in accept_uni() until the authentication deadline. The bytes are
+        // already the canonical MTP self-framed value, so no extra stream
+        // length prefix is added here.
         let create_stream = js_sys::Reflect::get(
             &self.inner,
             &JsValue::from_str("createUnidirectionalStream"),
@@ -213,9 +261,7 @@ impl WasmTransport {
             .dyn_into::<js_sys::Promise>()
             .map_err(|_| js_error("createUnidirectionalStream did not return a Promise"))?;
         let stream = JsFuture::from(stream_promise).await?;
-
         let writable_or_stream = resolve_stream_writable(&stream)?;
-
         let writer_val = js_sys::Reflect::get(&writable_or_stream, &JsValue::from_str("getWriter"))
             .map_err(|_| js_error("missing getWriter"))?
             .dyn_into::<js_sys::Function>()
@@ -223,12 +269,7 @@ impl WasmTransport {
             .call0(&writable_or_stream)
             .map_err(|_| js_error("getWriter call failed"))?;
 
-        let len = frame.len() as u32;
-        let mut wire = Vec::with_capacity(4 + frame.len());
-        wire.extend_from_slice(&len.to_be_bytes());
-        wire.extend_from_slice(frame);
-
-        let chunk = js_sys::Uint8Array::from(&wire[..]);
+        let chunk = js_sys::Uint8Array::from(frame);
 
         let write_fn = js_sys::Reflect::get(&writer_val, &JsValue::from_str("write"))
             .map_err(|_| js_error("missing write"))?
@@ -251,11 +292,10 @@ impl WasmTransport {
             .call0(&writer_val)
             .map_err(|e| js_error(format!("close failed: {:?}", e)))?;
         if let Err(e) = JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await {
-            // Write succeeded; STOP_SENDING on close just means peer stopped reading before FIN.
+            // The frame was already written; do not retry it merely because
+            // FIN failed, as that would duplicate the MTP frame.
             log_stream_error_code(&e, "send_frame close");
         }
-
-        // Release the lock so the writer isn't treated as an abort.
         release_writer_lock(&writer_val);
 
         Ok(())
@@ -366,21 +406,21 @@ impl WasmTransport {
         if buf.len() < 4 {
             return Ok(None);
         }
-        let frame_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        if frame_len == CLOSE_FRAME_LEN {
+        let body_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        if body_len == CLOSE_FRAME_LEN {
             return Ok(Some(FrameOutcome::Closed));
         }
+        let frame_len = body_len
+            .checked_add(4)
+            .ok_or_else(|| js_error("invalid frame length"))?;
         if frame_len > max_message_size {
             return Err(js_error("message too large"));
         }
-        let frame_len = frame_len as usize;
-        let Some(frame_end) = 4usize.checked_add(frame_len) else {
-            return Err(js_error("invalid frame length"));
-        };
+        let frame_end = frame_len as usize;
         if frame_end > buf.len() {
             return Ok(None);
         }
-        let frame = buf[4..frame_end].to_vec();
+        let frame = buf[..frame_end].to_vec();
         drop(buf);
         self.buffer.borrow_mut().drain(..frame_end);
         Ok(Some(FrameOutcome::Frame(frame)))
@@ -456,15 +496,18 @@ impl WasmTransport {
     {
         loop {
             match self.next_frame(self.max_message_size).await {
-                Ok(FrameOutcome::Frame(frame)) => match parse_frame_value(&frame) {
-                    Ok(parsed) => {
-                        on_message(parsed);
+                Ok(FrameOutcome::Frame(frame)) => {
+                    let type_map = self.type_map();
+                    match parse_frame_value_with_limits(&frame, &type_map, self.decode_limits()) {
+                        Ok(parsed) => {
+                            on_message(parsed);
+                        }
+                        Err(e) => {
+                            let message = e.as_string().unwrap_or_else(|| format!("{:?}", e));
+                            let _ = on_error.call1(&JsValue::NULL, &JsValue::from_str(&message));
+                        }
                     }
-                    Err(e) => {
-                        let message = e.as_string().unwrap_or_else(|| format!("{:?}", e));
-                        let _ = on_error.call1(&JsValue::NULL, &JsValue::from_str(&message));
-                    }
-                },
+                }
                 Ok(FrameOutcome::Closed) | Ok(FrameOutcome::Ended) => break,
                 Err(e) => {
                     let _ = on_error.call1(&JsValue::NULL, &e);
@@ -487,19 +530,36 @@ impl WasmTransport {
         G: FnMut(crate::pipe::PipeReader),
         H: FnMut(JsValue),
     {
-        let pipe_request_type =
-            mtp_codec::CommunicationType::PipeRequest.try_to_id(&mtp_codec::TypeMap::latest());
-
         loop {
             match self.next_frame(self.max_message_size).await {
                 Ok(FrameOutcome::Frame(frame)) => {
+                    let type_map = self.type_map();
+                    let decode_limits = self.decode_limits();
+                    let pipe_request_type =
+                        mtp_codec::CommunicationType::PipeRequest.try_to_id(&type_map);
+                    let pipe_response_type =
+                        mtp_codec::CommunicationType::PipeResponse.try_to_id(&type_map);
                     let is_first = self.new_stream_frame.get();
+                    let comm =
+                        mtp_codec::CommunicationValue::try_from_bytes_with_type_map_and_limits(
+                            &frame,
+                            &type_map,
+                            decode_limits,
+                        )
+                        .ok();
+
                     if is_first {
                         self.new_stream_frame.set(false);
-                        if let Ok(comm) = mtp_codec::CommunicationValue::from_bytes(&frame)
+                        if let Some(comm) = comm.as_ref()
                             && Some(comm.get_type()) == pipe_request_type
                         {
-                            let pipe_id = comm.get_id();
+                            let Some(pipe_id) = comm.id().filter(|id| *id != 0) else {
+                                on_error(JsValue::from_str(
+                                    "PipeRequest frame must contain a non-zero id",
+                                ));
+                                self.close();
+                                break;
+                            };
                             let description = comm
                                 .get_str(mtp_codec::DataType::Description)
                                 .unwrap_or("")
@@ -523,7 +583,31 @@ impl WasmTransport {
                         }
                     }
 
-                    match parse_frame_value(&frame) {
+                    if let Some(comm) = comm.as_ref()
+                        && Some(comm.get_type()) == pipe_response_type
+                        && !matches!(comm.id(), Some(id) if id != 0)
+                    {
+                        on_error(JsValue::from_str(
+                            "PipeResponse frame must contain a non-zero id",
+                        ));
+                        self.close();
+                        break;
+                    }
+
+                    if let Some(comm) = comm.as_ref()
+                        && !matches!(comm.id(), Some(id) if id != 0)
+                        && comm
+                            .get_type_name()
+                            .is_some_and(|name| name.ends_with("Response"))
+                    {
+                        on_error(JsValue::from_str(
+                            "response frame must contain a non-zero id",
+                        ));
+                        self.close();
+                        break;
+                    }
+
+                    match parse_frame_value_with_limits(&frame, &type_map, decode_limits) {
                         Ok(parsed) => {
                             on_message(parsed);
                         }
@@ -550,6 +634,7 @@ impl WasmTransport {
         pipe_id: u32,
         description: &str,
     ) -> Result<crate::pipe::PipeWriter, JsValue> {
+        let _send_guard = self.send_lock.lock().await;
         let create_stream = js_sys::Reflect::get(
             &self.inner,
             &JsValue::from_str("createUnidirectionalStream"),
@@ -570,22 +655,21 @@ impl WasmTransport {
             .call0(&writable_or_stream)
             .map_err(|_| js_error("getWriter call failed"))?;
 
-        let request = mtp_codec::CommunicationValue::new(mtp_codec::CommunicationType::PipeRequest)
-            .with_id(pipe_id)
-            .add_typed_default(
-                mtp_codec::DataType::Description,
-                mtp_codec::DataValue::Str(description.to_string()),
-            );
+        let type_map = self.type_map();
+        let request = mtp_codec::CommunicationValue::new_with_type_map(
+            mtp_codec::CommunicationType::PipeRequest,
+            &type_map,
+        )
+        .with_id(pipe_id)
+        .add_typed_default(
+            mtp_codec::DataType::Description,
+            mtp_codec::DataValue::Str(description.to_string()),
+        );
         let frame_bytes = request
             .to_bytes()
             .map_err(|e| js_error(format!("encode failed: {}", e)))?;
 
-        let len = frame_bytes.len() as u32;
-        let mut wire = Vec::with_capacity(4 + frame_bytes.len());
-        wire.extend_from_slice(&len.to_be_bytes());
-        wire.extend_from_slice(&frame_bytes);
-
-        let chunk = js_sys::Uint8Array::from(&wire[..]);
+        let chunk = js_sys::Uint8Array::from(&frame_bytes[..]);
         let write_fn = js_sys::Reflect::get(&writer_val, &JsValue::from_str("write"))
             .map_err(|_| js_error("missing write"))?
             .dyn_into::<js_sys::Function>()
@@ -616,5 +700,15 @@ impl WasmTransport {
         {
             let _ = close.call1(&self.inner, &js_sys::Object::new());
         }
+    }
+}
+
+fn restrict_decode_limits(left: DecodeLimits, right: DecodeLimits) -> DecodeLimits {
+    DecodeLimits {
+        max_depth: left.max_depth.min(right.max_depth),
+        max_values: left.max_values.min(right.max_values),
+        max_blob_size: left.max_blob_size.min(right.max_blob_size),
+        max_recipients: left.max_recipients.min(right.max_recipients),
+        max_allocated_bytes: left.max_allocated_bytes.min(right.max_allocated_bytes),
     }
 }

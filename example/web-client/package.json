@@ -1,7 +1,7 @@
 {
   "name": "mtp-web-client",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "packageManager": "pnpm@11.8.0",
   "scripts": {
@@ -13,7 +13,7 @@
     "mtp": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.0",
     "vite": "^8.1.0"
   }
 }

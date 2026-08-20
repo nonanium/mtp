@@ -50,12 +50,14 @@ async fn connected_pair()
 }
 
 fn numbered_message(comm_type: CommunicationType, value: u128, tm: &TypeMap) -> CommunicationValue {
-    CommunicationValue::new(comm_type).add_data(
-        DataType::PqSignature
-            .try_to_id(tm)
-            .expect("test type must be mapped"),
-        DataValue::UnsignedNumber(value),
-    )
+    CommunicationValue::new(comm_type)
+        .add_data(
+            DataType::PqSignature
+                .try_to_id(tm)
+                .expect("test type must be mapped"),
+            DataValue::UnsignedNumber(value),
+        )
+        .expect("numbered message must have a container payload")
 }
 
 fn assert_numbered_message(
@@ -69,8 +71,8 @@ fn assert_numbered_message(
         comm_type.try_to_id(tm).expect("test type must be mapped")
     );
     assert_eq!(
-        message.get_data(DataType::PqSignature).clone(),
-        DataValue::UnsignedNumber(value)
+        message.get_data(DataType::PqSignature),
+        Some(&DataValue::UnsignedNumber(value))
     );
 }
 
@@ -125,14 +127,33 @@ async fn test_send_receive_roundtrip() -> Result<(), Box<dyn std::error::Error>>
     assert_numbered_message(&received, CommunicationType::Ping, 42, &tm);
 
     // Host sends a response
-    let resp = numbered_message(CommunicationType::Pong, 99, &tm);
+    let resp = numbered_message(CommunicationType::BadRequest, 99, &tm);
     host_tx.send(&resp).await?;
 
     // Client receives it
     let client_received = client_rx.receive().await?;
-    assert_numbered_message(&client_received, CommunicationType::Pong, 99, &tm);
+    assert_numbered_message(&client_received, CommunicationType::BadRequest, 99, &tm);
 
     // Close both sides
+    client_tx.close().await;
+    host_tx.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_generic_payload_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    let (_h, client_tx, _client_rx, host_tx, host_rx) = connected_pair().await?;
+    let payload = DataValue::Array(vec![
+        DataValue::Str("generic payload".into()),
+        DataValue::Bytes(vec![1, 2, 3]),
+    ]);
+    let message =
+        CommunicationValue::new(CommunicationType::BadRequest).with_payload(payload.clone());
+
+    client_tx.send(&message).await?;
+    let received = host_rx.receive().await?;
+
+    assert_eq!(received.into_payload(), payload);
     client_tx.close().await;
     host_tx.close().await;
     Ok(())
@@ -158,13 +179,13 @@ async fn test_concurrent_messages() -> Result<(), Box<dyn std::error::Error>> {
 
     // Send 3 responses back
     for i in 0..3u128 {
-        let msg = numbered_message(CommunicationType::Pong, i * 10, &tm);
+        let msg = numbered_message(CommunicationType::BadRequest, i * 10, &tm);
         client_tx.send(&msg).await?;
     }
 
     for i in 0..3u128 {
         let received = host_rx.receive().await?;
-        assert_numbered_message(&received, CommunicationType::Pong, i * 10, &tm);
+        assert_numbered_message(&received, CommunicationType::BadRequest, i * 10, &tm);
     }
 
     client_tx.close().await;
@@ -239,11 +260,11 @@ async fn test_drop_receiver_keeps_sender_alive() -> Result<(), Box<dyn std::erro
 
     let tm = TypeMap::latest();
 
-    let resp = numbered_message(CommunicationType::Pong, 7, &tm);
+    let resp = numbered_message(CommunicationType::BadRequest, 7, &tm);
     host_tx.send(&resp).await?;
 
     let got = client_rx.receive().await?;
-    assert_numbered_message(&got, CommunicationType::Pong, 7, &tm);
+    assert_numbered_message(&got, CommunicationType::BadRequest, 7, &tm);
 
     client_tx.close().await;
     host_tx.close().await;
@@ -263,10 +284,10 @@ async fn test_persistent_stream_reopens_after_local_finish()
 
     client_tx.finish_stream().await?;
 
-    let msg2 = numbered_message(CommunicationType::Pong, 22, &tm);
+    let msg2 = numbered_message(CommunicationType::BadRequest, 22, &tm);
     client_tx.send(&msg2).await?;
     let received2 = host_rx.receive().await?;
-    assert_numbered_message(&received2, CommunicationType::Pong, 22, &tm);
+    assert_numbered_message(&received2, CommunicationType::BadRequest, 22, &tm);
 
     client_tx.close().await;
     host_tx.close().await;
@@ -321,13 +342,17 @@ async fn test_max_frames_per_stream_enforced() -> Result<(), Box<dyn std::error:
     let tm = TypeMap::latest();
     client_tx
         .send(&numbered_message(CommunicationType::Ping, 1, &tm))
-        .await?;
-    let first = host_rx.receive().await?;
+        .await
+        .expect("first frame should be sent");
+    let first = host_rx
+        .receive()
+        .await
+        .expect("first frame should be received");
     assert_numbered_message(&first, CommunicationType::Ping, 1, &tm);
 
-    client_tx
+    let _ = client_tx
         .send(&numbered_message(CommunicationType::Ping, 2, &tm))
-        .await?;
+        .await;
     let second = host_rx.receive().await;
     assert!(second.is_err(), "stream should be closed after frame limit");
 

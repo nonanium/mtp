@@ -38,15 +38,15 @@ pub(crate) fn verify_host_challenge(
     require_pq: bool,
 ) -> Result<(), JsValue> {
     let sig = match challenge.get_data(DataType::Signature) {
-        DataValue::Bytes(b) => b.clone(),
+        Some(DataValue::Bytes(b)) => b.clone(),
         _ => return Err(js_error("missing host challenge signature")),
     };
     let pq_sig = match challenge.get_data(DataType::PqSignature) {
-        DataValue::Bytes(b) => b.clone(),
+        Some(DataValue::Bytes(b)) => b.clone(),
         _ => vec![],
     };
 
-    let host_requires_pq = challenge.get_data(DataType::RequirePq) == &DataValue::BoolTrue;
+    let host_requires_pq = challenge.get_data(DataType::RequirePq) == Some(&DataValue::BoolTrue);
     if host_requires_pq && host_pk.sig_pq_public_key.as_bytes().is_empty() {
         return Err(js_error(
             "host requires post-quantum authentication but its PQ public key is absent",
@@ -77,15 +77,15 @@ pub(crate) fn verify_host_final(
     server_challenge: u128,
     require_pq: bool,
 ) -> Result<(), JsValue> {
-    if *resp.get_data(DataType::ClientNonce) != DataValue::UnsignedNumber(client_nonce) {
+    if resp.get_data(DataType::ClientNonce) != Some(&DataValue::UnsignedNumber(client_nonce)) {
         return Err(js_error("nonce mismatch"));
     }
     let host_sig = match resp.get_data(DataType::Signature) {
-        DataValue::Bytes(b) => b.clone(),
+        Some(DataValue::Bytes(b)) => b.clone(),
         _ => return Err(js_error("missing host signature")),
     };
     let host_pq_sig = match resp.get_data(DataType::PqSignature) {
-        DataValue::Bytes(b) => b.clone(),
+        Some(DataValue::Bytes(b)) => b.clone(),
         _ => vec![],
     };
     if require_pq && host_pq_sig.is_empty() {
@@ -114,6 +114,7 @@ pub(crate) fn signed_challenge_response_bytes(
     keyring: &mtp_crypto::Keyring,
     proof_payload: &[u8],
     client_nonce: u128,
+    type_map: &mtp_codec::TypeMap,
 ) -> Result<Vec<u8>, JsValue> {
     use mtp_crypto::SignatureScheme;
 
@@ -123,12 +124,13 @@ pub(crate) fn signed_challenge_response_bytes(
         .sign(proof_payload)
         .map_err(|e| js_error(format!("signature failed: {}", e)))?;
 
-    let mut proof = CommunicationValue::new(CommunicationType::ChallengeResponse)
-        .add_typed_default(
-            DataType::ClientNonce,
-            DataValue::UnsignedNumber(client_nonce),
-        )
-        .add_typed_default(DataType::Signature, DataValue::Bytes(signature));
+    let mut proof =
+        CommunicationValue::new_with_type_map(CommunicationType::ChallengeResponse, type_map)
+            .add_typed_default(
+                DataType::ClientNonce,
+                DataValue::UnsignedNumber(client_nonce),
+            )
+            .add_typed_default(DataType::Signature, DataValue::Bytes(signature));
 
     if !keyring.sig_pq_secret_key.as_bytes().is_empty() {
         let pq_signer =
