@@ -333,6 +333,18 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                 break 'stream;
                             }
                             Err(_) => {
+                                if frames == 0 {
+                                    tracing::warn!(
+                                        timeout = ?policy.read_timeout,
+                                        "MTP receive stream timed out before its first complete frame"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        frames,
+                                        timeout = ?policy.read_timeout,
+                                        "MTP receive stream idle timeout"
+                                    );
+                                }
                                 break;
                             }
                         }
@@ -376,6 +388,9 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             )
                             .await;
                             if !matches!(&body_read, Ok(Ok(()))) {
+                                if matches!(&body_read, Ok(Err(CommunicationError::StreamClosed))) {
+                                    break 'stream;
+                                }
                                 tracing::warn!(
                                     pipe_chunk_len = chunk_len,
                                     ?body_read,

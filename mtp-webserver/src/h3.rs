@@ -143,6 +143,11 @@ pub(crate) async fn run_driver(
                                     return;
                                 }
                             };
+                            tracing::debug!(
+                                remote = %remote_addr,
+                                session_id = ?session.session_id(),
+                                "accepted WebTransport MTP session"
+                            );
                             tokio::spawn(run_session_requests(
                                 session.clone(),
                                 router.clone(),

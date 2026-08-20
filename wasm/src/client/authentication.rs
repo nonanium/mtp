@@ -8,6 +8,14 @@ use crate::config::ConnectionConfig;
 use crate::error::js_error;
 use crate::transport::WasmTransport;
 
+fn server_rejection_message(outcome: &CommunicationValue) -> Option<&str> {
+    (outcome.get_data(DataType::Connected) == Some(&DataValue::BoolFalse)).then(|| {
+        outcome
+            .get_str(DataType::ErrorMessage)
+            .unwrap_or("host rejected the connection")
+    })
+}
+
 #[wasm_bindgen]
 #[allow(deprecated)]
 impl WasmClient {
@@ -79,6 +87,18 @@ impl WasmClient {
                         .unwrap_or("host does not support this protocol version"),
                 ));
             }
+
+            // Generic host rejections are IdentificationResponse frames with
+            // Connected=false. They intentionally do not carry a negotiated
+            // Version because negotiation never completed. Check this before
+            // reading Version, otherwise a useful server error such as an
+            // authentication timeout is reported as the misleading
+            // "host omitted a valid negotiated protocol version".
+            if let Some(message) = server_rejection_message(&outcome) {
+                self.set_state_if_current(generation, ConnectionState::Disconnected);
+                return Err(js_error(message));
+            }
+
             let negotiated_version = match outcome.get_data(DataType::Version) {
                 Some(DataValue::Str(version)) => mtp_codec::Version::parse(version)
                     .ok_or_else(|| js_error("host omitted a valid negotiated protocol version"))?,
@@ -626,5 +646,26 @@ impl WasmClient {
         }
 
         Ok(server_challenge)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_rejection_message;
+    use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue};
+
+    #[test]
+    fn reports_rejection_reason_without_a_negotiated_version() {
+        let response = CommunicationValue::new(CommunicationType::IdentificationResponse)
+            .add_typed_default(DataType::Connected, DataValue::BoolFalse)
+            .add_typed_default(
+                DataType::ErrorMessage,
+                DataValue::Str("authentication handshake timed out".into()),
+            );
+
+        assert_eq!(
+            server_rejection_message(&response),
+            Some("authentication handshake timed out")
+        );
     }
 }

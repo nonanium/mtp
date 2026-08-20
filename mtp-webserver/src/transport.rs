@@ -32,6 +32,8 @@ pub struct H3TransportSender {
 
 pub struct H3TransportReceiver {
     stream: H3RecvStream,
+    quinn: quinn::Connection,
+    read_exact_calls: u64,
 }
 
 impl H3TransportConnection {
@@ -76,18 +78,42 @@ impl TransportSendStream for H3TransportSender {
 #[async_trait::async_trait]
 impl TransportRecvStream for H3TransportReceiver {
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), CommunicationError> {
+        let first_read = self.read_exact_calls == 0;
+        self.read_exact_calls += 1;
         self.stream
             .read_exact(buf)
             .await
-            .map(|_| ())
+            .map(|_| {
+                if first_read {
+                    tracing::debug!(
+                        remote = %self.quinn.remote_address(),
+                        bytes = buf.len(),
+                        "received first bytes from WebTransport MTP stream"
+                    );
+                }
+            })
             .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                    // Browser control frames are sent on one-frame uni streams.
-                    // Reaching FIN while looking for another frame is normal.
+                if error.kind() == std::io::ErrorKind::UnexpectedEof
+                    || self.quinn.close_reason().is_some()
+                {
+                    /*
+                     * Reaching FIN, or losing the enclosing QUIC connection,
+                     * is a normal stream-closure path. Do not turn it into a
+                     * frame-header failure and close the connection again.
+                     */
                     return CommunicationError::StreamClosed;
                 }
-                error!("[mtp-webserver] receive stream read_exact failed ({} bytes): {error}", buf.len());
-                tracing::warn!(len = buf.len(), %error, "WebTransport receive stream read_exact failed");
+                error!(
+                    "[mtp-webserver] receive stream read_exact failed ({} bytes): {error}",
+                    buf.len()
+                );
+                tracing::warn!(
+                    remote = %self.quinn.remote_address(),
+                    first_read,
+                    len = buf.len(),
+                    %error,
+                    "WebTransport receive stream read_exact failed"
+                );
                 CommunicationError::StreamError
             })
     }
@@ -101,6 +127,9 @@ impl TransportRecvStream for H3TransportReceiver {
                 Ok(Some(buf))
             }
             Err(error) => {
+                if self.quinn.close_reason().is_some() {
+                    return Err(CommunicationError::StreamClosed);
+                }
                 error!(
                     "[mtp-webserver] receive stream read failed (max {} bytes): {error}",
                     max
@@ -167,10 +196,27 @@ impl TransportConnection for H3TransportConnection {
         loop {
             match self.session.accept_uni().await {
                 Ok(Some((id, stream))) if id == self.session.session_id() => {
-                    return Ok(H3TransportReceiver { stream });
+                    let stream_id = h3::quic::RecvStream::recv_id(&stream);
+                    tracing::debug!(
+                        remote = %self.quinn.remote_address(),
+                        session_id = ?self.session.session_id(),
+                        stream_id = ?stream_id,
+                        "accepted WebTransport MTP receive stream"
+                    );
+                    return Ok(H3TransportReceiver {
+                        stream,
+                        quinn: self.quinn.clone(),
+                        read_exact_calls: 0,
+                    });
                 }
-                Ok(Some(_)) => {
+                Ok(Some((stream_session_id, _stream))) => {
                     consecutive_errors = 0;
+                    tracing::debug!(
+                        remote = %self.quinn.remote_address(),
+                        session_id = ?self.session.session_id(),
+                        stream_session_id = ?stream_session_id,
+                        "ignored WebTransport receive stream belonging to another session"
+                    );
                     continue;
                 }
                 Ok(None) => return Err(CommunicationError::StreamClosed),
@@ -306,7 +352,18 @@ async fn accept_web_connection_inner(
                 connection_id,
             },
         )
-        .await?;
+        .await;
+    #[cfg(feature = "crypto")]
+    if let Err(error) = &result {
+        tracing::warn!(
+            remote = %remote_addr,
+            connection_id,
+            %error,
+            "WebTransport MTP handshake failed"
+        );
+    }
+    #[cfg(feature = "crypto")]
+    let result = result?;
     #[cfg(not(feature = "crypto"))]
     let result = engine.accept(&sender, &receiver).await?;
 
