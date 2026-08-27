@@ -10,6 +10,15 @@ import * as bindings from "mtp/raw";
 import { unixTimeMillis, utf8Encode } from "./utils.js";
 import type * as RawBindings from "../raw/index";
 import type { MTPCommunicationType } from "../type-map/index";
+import { MTPProtocol } from "./schema.js";
+import type {
+  MTPMessageType,
+  MTPFrame,
+  MTPNoSchemas,
+  MTPRequestData,
+  MTPResponseFrame,
+  MTPSchemaRegistry,
+} from "./schema.js";
 import type { MTPSessionStorage, MTPSessionState } from "./session";
 import { MTPSessionManager } from "./session.js";
 import {
@@ -249,7 +258,9 @@ export interface MTPPublicKeyBundleKeys {
   sigClPublicKey: Uint8Array;
 }
 
-export interface MTPClientOptions {
+export interface MTPClientOptions<
+  Registry extends MTPSchemaRegistry = MTPNoSchemas,
+> {
   url: string;
   descriptor?: string;
   hostPublicKey?: MTPKeyMaterialInput;
@@ -282,6 +293,12 @@ export interface MTPClientOptions {
   securityProfile?: MTPSecurityProfile;
   /** One receive resource policy shared by frame and protected-value opening. */
   receiveLimits?: MTPReceiveLimits;
+  /** Application request and response schemas, keyed by communication type. */
+  schemas?: Registry;
+  /** Reject `request()` when the correlated response is an `Error*` frame. */
+  throwProtocolErrors?: boolean;
+  /** Receives subscription validation failures. Request failures reject normally. */
+  onValidationError?: (error: import("./schema.js").MTPValidationError) => void;
 }
 
 export interface MTPSecurityProfile {
@@ -562,8 +579,8 @@ export interface MTPAcceptEncryptedPipeOptions {
   signaturePolicy?: MTPSignatureVerificationPolicy;
 }
 
-type NormalizedMTPClientOptions = Omit<
-  MTPClientOptions,
+type NormalizedMTPClientOptions<Registry extends MTPSchemaRegistry> = Omit<
+  MTPClientOptions<Registry>,
   "hostPublicKey" | "receiveLimits"
 > & {
   hostPublicKey?: Uint8Array;
@@ -914,14 +931,34 @@ function validateOptions(options) {
   ) {
     throw new TypeError("requestTimeoutMs must be a positive safe integer");
   }
+  if (options.schemas != null) {
+    if (typeof options.schemas !== "object" || Array.isArray(options.schemas)) {
+      throw new TypeError("schemas must be an object");
+    }
+    for (const [type, pair] of Object.entries(options.schemas)) {
+      if (
+        !pair ||
+        typeof pair !== "object" ||
+        typeof (pair as { request?: { parseAsync?: unknown } }).request
+          ?.parseAsync !== "function" ||
+        typeof (pair as { response?: { parseAsync?: unknown } }).response
+          ?.parseAsync !== "function"
+      ) {
+        throw new TypeError(
+          `schemas.${type} must contain request and response schemas with parseAsync()`,
+        );
+      }
+    }
+  }
 }
 
-export class MTPClient {
+export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   static readonly crypto = crypto;
   static readonly codec = codec;
 
   #credentials: InternalCredentials | null;
-  #options: NormalizedMTPClientOptions;
+  #options: NormalizedMTPClientOptions<Registry>;
+  readonly #protocol: MTPProtocol<Registry> | undefined;
   readonly #protectedReplayGuard = new InMemoryReplayGuard();
   readonly #relayReplayGuard = new InMemoryReplayGuard();
   readonly raw: MTPRaw;
@@ -934,10 +971,17 @@ export class MTPClient {
   readonly encryptedSecretProvider: MTPEncryptedSecretProvider;
 
   private constructor(
-    options: NormalizedMTPClientOptions,
+    options: NormalizedMTPClientOptions<Registry>,
     client: RawBindings.WasmClient,
   ) {
     this.#options = options;
+    this.#protocol = options.schemas
+      ? new MTPProtocol({
+          schemas: options.schemas,
+          throwProtocolErrors: options.throwProtocolErrors,
+          onValidationError: options.onValidationError,
+        })
+      : undefined;
     this.#credentials = deserializeCredentials(options.credentials);
     this.raw = { client, bindings };
     this.encryptedSecretProvider =
@@ -947,7 +991,11 @@ export class MTPClient {
     );
   }
 
-  static async create(options: MTPClientOptions): Promise<MTPClient> {
+  static async create<
+    const Registry extends MTPSchemaRegistry = MTPNoSchemas,
+  >(
+    options: MTPClientOptions<Registry>,
+  ): Promise<MTPClient<Registry>> {
     validateOptions(options);
     await MTPClient.init(options.wasm);
 
@@ -968,7 +1016,7 @@ export class MTPClient {
       securityProfile: resolveSecurityProfile(options),
     };
 
-    let sdk: MTPClient | undefined;
+    let sdk: MTPClient<Registry> | undefined;
     const client = new WasmClient(
       (state) =>
         emit(normalizedOptions.logger, {
@@ -1004,7 +1052,7 @@ export class MTPClient {
       setReceiveLimits.call(rawClient, normalizedOptions.receiveLimits);
     }
 
-    sdk = new MTPClient(normalizedOptions, client);
+    sdk = new MTPClient<Registry>(normalizedOptions, client);
     await sdk.#loadStoredCredentials();
     if (!sdk.#credentials) {
       sdk.#credentials = {
@@ -1238,6 +1286,35 @@ export class MTPClient {
     };
   }
 
+  async #parseRequestData(
+    type: MTPCommunicationType,
+    data: unknown,
+  ): Promise<Record<string, unknown>> {
+    if (!this.#protocol || !this.#protocol.schemas[type]) {
+      return (data ?? {}) as Record<string, unknown>;
+    }
+    const parsed = await this.#protocol.parseRequest(
+      type as MTPMessageType<Registry>,
+      data as never,
+    );
+    return (parsed ?? {}) as Record<string, unknown>;
+  }
+
+  async #parseResponseData(
+    requestedType: MTPCommunicationType,
+    frame: ParsedFrame,
+    phase: "response" | "subscription" = "response",
+  ): Promise<MTPFrame<unknown>> {
+    if (!this.#protocol || !this.#protocol.schemas[requestedType]) {
+      return frame;
+    }
+    return await this.#protocol.parseResponse(
+      requestedType as MTPMessageType<Registry>,
+      frame,
+      phase,
+    );
+  }
+
   #buildFrame(typeOrFrame, data, options) {
     if (typeOrFrame instanceof Uint8Array) {
       if (
@@ -1279,6 +1356,11 @@ export class MTPClient {
   }
 
   async send(message: Uint8Array): Promise<void>;
+  async send<Type extends MTPMessageType<Registry>>(
+    type: Type,
+    data?: MTPRequestData<Registry, Type>,
+    options?: MTPSendOptions,
+  ): Promise<void>;
   async send(
     type: MTPCommunicationType,
     data: Record<string, unknown>,
@@ -1286,10 +1368,14 @@ export class MTPClient {
   ): Promise<void>;
   async send(
     typeOrFrame: Uint8Array | MTPCommunicationType,
-    data?: Record<string, unknown>,
+    data?: unknown,
     options?: MTPSendOptions,
   ): Promise<void> {
-    const message = this.#buildFrame(typeOrFrame, data, options);
+    const parsedData =
+      typeof typeOrFrame === "string"
+        ? await this.#parseRequestData(typeOrFrame, data)
+        : data;
+    const message = this.#buildFrame(typeOrFrame, parsedData, options);
 
     try {
       const frame = this.raw.bindings.parse_frame(message);
@@ -1345,6 +1431,11 @@ export class MTPClient {
     data?: never,
     options?: MTPRequestOptions,
   ): Promise<ParsedFrame>;
+  async request<Type extends MTPMessageType<Registry>>(
+    type: Type,
+    data?: MTPRequestData<Registry, Type>,
+    options?: MTPRequestOptions,
+  ): Promise<MTPResponseFrame<Registry, Type>>;
   async request(
     type: MTPCommunicationType,
     data: Record<string, unknown>,
@@ -1352,15 +1443,19 @@ export class MTPClient {
   ): Promise<ParsedFrame>;
   async request(
     typeOrFrame: Uint8Array | MTPCommunicationType,
-    data?: Record<string, unknown>,
+    data?: unknown,
     options: MTPRequestOptions = {},
-  ): Promise<ParsedFrame> {
+  ): Promise<ParsedFrame | MTPFrame<unknown>> {
     const timeoutMs =
       options.timeoutMs ?? this.#options.requestTimeoutMs ?? 30_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
       throw new TypeError("request timeoutMs must be a positive safe integer");
     }
-    const frame = this.#buildFrame(typeOrFrame, data, options);
+    const parsedData =
+      typeof typeOrFrame === "string"
+        ? await this.#parseRequestData(typeOrFrame, data)
+        : data;
+    const frame = this.#buildFrame(typeOrFrame, parsedData, options);
     try {
       const parsed = this.raw.bindings.parse_frame(frame);
       emit(
@@ -1391,16 +1486,25 @@ export class MTPClient {
     // The WASM client owns request expiry and its late-response tombstones.
     // Keeping a second Promise timer here can reject the SDK call while the
     // protocol request is still allowed to complete successfully.
-    return await this.raw.client.request(
+    const response = await this.raw.client.request(
       frame,
       options.responseType ?? null,
       timeoutMs,
     );
+    return typeof typeOrFrame === "string"
+      ? await this.#parseResponseData(typeOrFrame, response)
+      : response;
   }
 
+  subscribe<Type extends MTPMessageType<Registry>>(
+    type: Type,
+    handler: (
+      message: MTPResponseFrame<Registry, Type>,
+    ) => void | Promise<void>,
+  ): Unsubscribe;
   subscribe(
     type: MTPCommunicationType,
-    handler: (message: ParsedFrame) => void,
+    handler: (message: MTPFrame<unknown>) => void | Promise<void>,
   ): Unsubscribe {
     if (typeof type !== "string" || !type) {
       throw new TypeError("subscription type must be a non-empty string");
@@ -1408,8 +1512,25 @@ export class MTPClient {
     if (typeof handler !== "function") {
       throw new TypeError("subscription handler must be a function");
     }
-    const id = this.raw.client.subscribe(type, handler);
-    return () => this.raw.client.unsubscribe(id);
+    let active = true;
+    const id = this.raw.client.subscribe(type, (message) => {
+      if (!this.#protocol || !this.#protocol.schemas[type]) {
+        void handler(message);
+        return;
+      }
+      void this.#parseResponseData(type, message, "subscription").then(
+        (parsed) => {
+          if (active) void handler(parsed);
+        },
+        (error) => {
+          this.#protocol?.reportValidationError(error);
+        },
+      );
+    });
+    return () => {
+      active = false;
+      this.raw.client.unsubscribe(id);
+    };
   }
 
   #handleFrame(frame) {

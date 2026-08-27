@@ -104,6 +104,9 @@ if (!MTPClient.isSupported()) {
 | `requestTimeoutMs` | 30 seconds | Default `request()` timeout. |
 | `pings` | `false` | Protocol pings, or an object with `intervalMs`. |
 | `logger` | No-op | Receives SDK state and error events. |
+| `schemas` | None | Client-wide request and response schema registry. |
+| `throwProtocolErrors` | `false` | Reject requests whose correlated response is an `Error*` frame. |
+| `onValidationError` | No-op | Receives subscription validation failures. |
 | `sessionStorage` | In-memory | E2EE session state storage. |
 | `encryptedSecretProvider` | In-memory | Independent caller-managed encrypted secret storage. |
 | `defaultSignatureVerificationPolicy` | `"ed25519"` | Receiver policy for protected signatures. |
@@ -469,6 +472,60 @@ const unsubscribe = client.subscribe("SomeType", (message) => {
 });
 
 unsubscribe();
+```
+
+### Zod request and response schemas
+
+Applications can provide their request and response schemas once when creating
+the client. MTP uses `parseAsync`, so synchronous schemas, async refinements,
+defaults, coercions, and transforms all work. MTP has no runtime dependency on
+Zod; the application supplies its preferred Zod version.
+
+```typescript
+import { z } from "zod";
+import { MTPClient, MTPValidationError } from "mtp";
+
+const schemas = {
+  GetUser: {
+    request: z.object({ UserId: z.number().int().positive() }),
+    response: z.object({
+      UserId: z.number().int().positive(),
+      Display: z.string(),
+    }),
+  },
+};
+
+const client = await MTPClient.create({
+  url,
+  schemas,
+  throwProtocolErrors: true,
+  onValidationError(error) {
+    console.error(error.messageType, error.cause);
+  },
+});
+
+const response = await client.request("GetUser", { UserId: 42 });
+console.log(response.data.Display);
+```
+
+Request schemas run before frame encoding and transmission. Their transformed
+output is sent. Response schemas run after request correlation, and their
+transformed output replaces `frame.data`; `frame.raw`, when present, remains the
+original wire frame. Invalid requests and responses reject with
+`MTPValidationError`. Invalid subscription messages do not reach the handler
+and are reported through `onValidationError`.
+
+`throwProtocolErrors: true` converts correlated `Error*` frames into
+`MTPProtocolError`. It defaults to `false` for compatibility.
+
+`MTPProxyConnection` applies the same schema registry to another TypeScript
+request/subscription transport, such as a Tauri command and event proxy:
+
+```typescript
+const connection = new MTPProxyConnection(adapter, {
+  schemas,
+  throwProtocolErrors: true,
+});
 ```
 
 Protocol ping behavior is defined in [Protocol Reference](PROTOCOL-REFERENCE.md#protocol-keepalive). The SDK configuration is:

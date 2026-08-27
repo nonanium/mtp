@@ -5,3 +5,4 @@
  * keeps the package's historical exports stable.
  */
 export * from "./client.js";
+export * from "./schema.js";
