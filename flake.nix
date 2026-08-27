@@ -5,26 +5,30 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-    rust-overlay,
-  }: let
-    systems = [
-      "aarch64-darwin"
-      "aarch64-linux"
-      "x86_64-darwin"
-      "x86_64-linux"
-    ];
-    eachSystem = f:
-      nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate {} (
-        map (system: nixpkgs.lib.mapAttrs (_: value: {${system} = value;}) (f system)) systems
-      );
-  in
+  outputs =
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+    }:
+    let
+      systems = [
+        "aarch64-darwin"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "x86_64-linux"
+      ];
+      eachSystem =
+        f:
+        nixpkgs.lib.foldl' nixpkgs.lib.recursiveUpdate { } (
+          map (system: nixpkgs.lib.mapAttrs (_: value: { ${system} = value; }) (f system)) systems
+        );
+    in
     eachSystem (
-      system: let
-        overlays = [rust-overlay.overlays.default];
-        pkgs = import nixpkgs {inherit system overlays;};
+      system:
+      let
+        overlays = [ rust-overlay.overlays.default ];
+        pkgs = import nixpkgs { inherit system overlays; };
 
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [
@@ -32,12 +36,12 @@
             "clippy"
             "rustfmt"
           ];
-          targets = ["wasm32-unknown-unknown"];
+          targets = [ "wasm32-unknown-unknown" ];
         };
 
         clippyCheck = pkgs.writeShellApplication {
           name = "mtp-clippy";
-          runtimeInputs = [rustToolchain];
+          runtimeInputs = [ rustToolchain ];
           text = ''
             export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example/type-maps.yaml}"
             cargo clippy --workspace --exclude mtp-wasm --all-targets --all-features -- -D warnings -W unreachable-pub
@@ -46,7 +50,7 @@
 
         macheteCheck = pkgs.writeShellApplication {
           name = "mtp-machete";
-          runtimeInputs = [pkgs.cargo-machete];
+          runtimeInputs = [ pkgs.cargo-machete ];
           text = ''
             cargo machete "$@"
           '';
@@ -54,7 +58,15 @@
 
         buildAll = pkgs.writeShellApplication {
           name = "mtp-build-all";
-          runtimeInputs = [rustToolchain pkgs.cargo-deny pkgs.wasm-pack pkgs.pnpm pkgs.coreutils clippyCheck macheteCheck];
+          runtimeInputs = [
+            rustToolchain
+            pkgs.cargo-deny
+            pkgs.wasm-pack
+            pkgs.pnpm
+            pkgs.coreutils
+            clippyCheck
+            macheteCheck
+          ];
           text = ''
             export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/example/type-maps.yaml}"
 
@@ -66,7 +78,6 @@
               cargo check --manifest-path example/Cargo.toml --workspace --all-targets --all-features
             mtp-clippy
             mtp-machete
-            pnpm run dup
             pnpm run build
             RUSTFLAGS="--cfg web_sys_unstable_apis" wasm-pack test --node wasm
             pnpm run test:e2e
@@ -79,13 +90,17 @@
 
         healthCheck = pkgs.writeShellApplication {
           name = "mtp-health";
-          runtimeInputs = [clippyCheck macheteCheck];
+          runtimeInputs = [
+            clippyCheck
+            macheteCheck
+          ];
           text = ''
             mtp-clippy
             mtp-machete
           '';
         };
-      in {
+      in
+      {
         devShells = {
           default = pkgs.mkShell {
             name = "mtp-dev";
