@@ -38,6 +38,7 @@ async fn handle_pipe_loopback(
     conn: &mtp::webserver::WebMTPConnection,
     request: mtp::host::PipeRequest<
         mtp::webserver::WebMtpSender,
+        mtp::webserver::WebMtpReceiver,
         mtp::webserver::H3TransportReceiver,
     >,
 ) -> Result<u64, Box<dyn std::error::Error>> {
