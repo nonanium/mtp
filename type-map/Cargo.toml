@@ -16,3 +16,7 @@ pipes = []
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+
+[package.metadata.cargo-machete]
+# cargo-machete does not inspect build.rs, where both build dependencies are used.
+ignored = ["serde", "serde_yaml"]

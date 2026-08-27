@@ -1305,7 +1305,6 @@ name = "mtp-common"
 version = "0.3.0"
 dependencies = [
  "quinn",
- "rustls",
  "thiserror 2.0.20",
  "wtransport",
 ]

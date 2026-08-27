@@ -113,10 +113,5 @@ tls = ["crypto", "mtp-crypto?/tls"]
 # Requires MTP_INSECURE_TLS=1 at runtime.
 insecure-tls = ["dep:mtp-transport", "mtp-transport?/insecure-tls"]
 
-[dev-dependencies]
-tokio = { version = "1", features = ["full"] }
-rcgen = "0.14"
-rand = "0.10.1"
-
 [package.metadata.cargo-machete]
 ignored = ["mtp-transport"]
