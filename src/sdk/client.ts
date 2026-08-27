@@ -1504,7 +1504,11 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   ): Unsubscribe;
   subscribe(
     type: MTPCommunicationType,
-    handler: (message: MTPFrame<unknown>) => void | Promise<void>,
+    handler: (message: ParsedFrame) => void | Promise<void>,
+  ): Unsubscribe;
+  subscribe(
+    type: MTPCommunicationType,
+    handler: (message: any) => void | Promise<void>,
   ): Unsubscribe {
     if (typeof type !== "string" || !type) {
       throw new TypeError("subscription type must be a non-empty string");
