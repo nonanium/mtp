@@ -27,6 +27,10 @@ pub trait PipeReceiver<P>: Clone + Send + Sync + 'static
 where
     P: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
+    fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError>;
+
+    fn cancel_expected_pipe(&self, pipe_id: u32);
+
     fn receive_pipe_event(
         &self,
     ) -> impl std::future::Future<Output = Result<TransportEvent<P>, CommunicationError>> + Send;
@@ -52,6 +56,14 @@ impl PipeSender for mtp_transport::Sender {
 }
 
 impl PipeReceiver<wtransport::RecvStream> for mtp_transport::Receiver {
+    fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
+        self.expect_pipe(pipe_id)
+    }
+
+    fn cancel_expected_pipe(&self, pipe_id: u32) {
+        self.cancel_expected_pipe(pipe_id);
+    }
+
     async fn receive_pipe_event(
         &self,
     ) -> Result<TransportEvent<wtransport::RecvStream>, CommunicationError> {
@@ -87,6 +99,14 @@ where
     C: mtp_transport::TransportConnection,
     C::RecvStream: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
+    fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
+        self.expect_pipe(pipe_id)
+    }
+
+    fn cancel_expected_pipe(&self, pipe_id: u32) {
+        self.cancel_expected_pipe(pipe_id);
+    }
+
     async fn receive_pipe_event(
         &self,
     ) -> Result<TransportEvent<C::RecvStream>, CommunicationError> {
@@ -152,16 +172,60 @@ where
     }
 }
 
-pub struct PipeRequest<S, P> {
+pub struct PipeRequest<S, R, P> {
     pub(crate) pipe_id: u32,
     pub(crate) description: String,
     pub(crate) sender: S,
+    pub(crate) receiver: R,
     pub(crate) dispatcher: Arc<PipeDispatcher<P>>,
 }
 
-impl<S, P> PipeRequest<S, P>
+struct ExpectedPipeGuard<R, P>
+where
+    R: PipeReceiver<P>,
+    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+{
+    receiver: R,
+    pipe_id: u32,
+    armed: bool,
+    _stream: std::marker::PhantomData<P>,
+}
+
+impl<R, P> ExpectedPipeGuard<R, P>
+where
+    R: PipeReceiver<P>,
+    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+{
+    fn new(receiver: R, pipe_id: u32) -> Self {
+        Self {
+            receiver,
+            pipe_id,
+            armed: true,
+            _stream: std::marker::PhantomData,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<R, P> Drop for ExpectedPipeGuard<R, P>
+where
+    R: PipeReceiver<P>,
+    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+{
+    fn drop(&mut self) {
+        if self.armed {
+            self.receiver.cancel_expected_pipe(self.pipe_id);
+        }
+    }
+}
+
+impl<S, R, P> PipeRequest<S, R, P>
 where
     S: PipeSender,
+    R: PipeReceiver<P>,
     P: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
     pub fn id(&self) -> u32 {
@@ -173,6 +237,10 @@ where
     }
 
     pub async fn accept(self) -> Result<PipeReader<P>, PipeError> {
+        self.receiver
+            .expect_pipe(self.pipe_id)
+            .map_err(PipeError::from)?;
+        let mut expected_pipe = ExpectedPipeGuard::<R, P>::new(self.receiver.clone(), self.pipe_id);
         let (pipe_tx, pipe_rx) = tokio::sync::oneshot::channel();
         self.dispatcher
             .pending_pipes
@@ -196,7 +264,10 @@ where
         }
 
         match tokio::time::timeout(self.dispatcher.policy.read_timeout, pipe_rx).await {
-            Ok(Ok(reader)) => Ok(reader),
+            Ok(Ok(reader)) => {
+                expected_pipe.disarm();
+                Ok(reader)
+            }
             Ok(Err(_)) => {
                 self.dispatcher
                     .pending_pipes
@@ -361,7 +432,7 @@ pub(crate) async fn run_dispatcher<S, R, P>(
     receiver: R,
     sender: S,
     app_tx: mpsc::Sender<Result<CommunicationValue, CommunicationError>>,
-    pipe_req_tx: mpsc::Sender<PipeRequest<S, P>>,
+    pipe_req_tx: mpsc::Sender<PipeRequest<S, R, P>>,
     dispatcher: Arc<PipeDispatcher<P>>,
 ) where
     S: PipeSender,
@@ -388,6 +459,7 @@ pub(crate) async fn run_dispatcher<S, R, P>(
                             .unwrap_or("")
                             .to_owned(),
                         sender: sender.clone(),
+                        receiver: receiver.clone(),
                         dispatcher: dispatcher.clone(),
                     };
                     let _ = pipe_req_tx.send(request).await;
@@ -446,6 +518,7 @@ pub(crate) async fn run_dispatcher<S, R, P>(
                     pipe_id,
                     description: reader.description().to_owned(),
                     sender: sender.clone(),
+                    receiver: receiver.clone(),
                     dispatcher: dispatcher.clone(),
                 };
                 let _ = pipe_req_tx.send(request).await;

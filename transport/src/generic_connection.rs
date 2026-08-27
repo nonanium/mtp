@@ -10,8 +10,12 @@ use crate::{
     framing::{RetryClassifier, write_frame},
 };
 use mtp_codec::{CommunicationValue, DataType, DecodeLimits, TypeMap};
-use mtp_common::CommunicationError;
+use mtp_common::{CommunicationError, FirstFrameDisposition, classify_first_frame};
+#[cfg(feature = "pipes")]
+use std::collections::HashSet;
 use std::sync::Arc;
+#[cfg(feature = "pipes")]
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore, mpsc};
 use tokio::time::{Instant, timeout, timeout_at};
@@ -85,9 +89,10 @@ impl<C: TransportConnection> GenericSender<C> {
                 )
                 .await
                 .map_err(|_| CommunicationError::StreamError)??;
-                timeout(self.policy.write_timeout, stream.finish())
-                    .await
-                    .map_err(|_| CommunicationError::StreamError)?
+                match timeout(self.policy.write_timeout, stream.finish()).await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(_)) | Err(_) => Err(CommunicationError::DeliveryUnknown),
+                }
             }
             crate::SendMode::PersistentStream => {
                 let mut stream = self.persistent.lock().await;
@@ -204,6 +209,8 @@ pub struct GenericReceiver<C: TransportConnection> {
     type_map: Arc<RwLock<TypeMap>>,
     queue_notify: Arc<Notify>,
     decode_rejections: Arc<DecodeRejectionCounters>,
+    #[cfg(feature = "pipes")]
+    expected_pipes: Arc<StdMutex<HashSet<u32>>>,
     _accept_task: Arc<tokio::task::JoinHandle<()>>,
 }
 
@@ -219,6 +226,8 @@ impl<C: TransportConnection> Clone for GenericReceiver<C> {
             type_map: self.type_map.clone(),
             queue_notify: self.queue_notify.clone(),
             decode_rejections: self.decode_rejections.clone(),
+            #[cfg(feature = "pipes")]
+            expected_pipes: self.expected_pipes.clone(),
             _accept_task: self._accept_task.clone(),
         }
     }
@@ -254,6 +263,10 @@ impl<C: TransportConnection> GenericReceiver<C> {
         let task_queue_notify = queue_notify.clone();
         let decode_rejections = Arc::new(DecodeRejectionCounters::default());
         let task_decode_rejections = decode_rejections.clone();
+        #[cfg(feature = "pipes")]
+        let expected_pipes = Arc::new(StdMutex::new(HashSet::new()));
+        #[cfg(feature = "pipes")]
+        let task_expected_pipes = expected_pipes.clone();
         let task_accept_task_tx = tx.clone();
         #[cfg(feature = "pipes")]
         let task_accept_task_pipe_tx = pipe_tx.clone();
@@ -312,6 +325,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
                 let connection = task_connection.clone();
                 let type_map = task_type_map.clone();
                 let decode_rejections = task_decode_rejections.clone();
+                #[cfg(feature = "pipes")]
+                let expected_pipes = task_expected_pipes.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
                     let mut stream = stream;
@@ -443,37 +458,51 @@ impl<C: TransportConnection> GenericReceiver<C> {
 
                         #[cfg(feature = "pipes")]
                         {
-                            if message.is_type(mtp_codec::CommunicationType::PipeRequest)
-                                && frames == 1
-                            {
-                                let Some(pipe_id) = message.id().filter(|id| *id != 0) else {
-                                    let error = CommunicationError::Other(
-                                        "PipeRequest frame must contain a non-zero id".into(),
-                                    );
-                                    let _ = tx.send(Err(error.clone())).await;
-                                    connection.close(
-                                        policy.application_close_code,
-                                        b"pipe request missing id",
-                                    );
-                                    break;
+                            if frames == 1 {
+                                let is_pipe_request =
+                                    message.is_type(mtp_codec::CommunicationType::PipeRequest);
+                                let pipe_id = message.id().filter(|id| *id != 0);
+                                let pipe_is_expected = is_pipe_request
+                                    && pipe_id.is_some_and(|pipe_id| {
+                                        expected_pipes
+                                            .lock()
+                                            .is_ok_and(|mut expected| expected.remove(&pipe_id))
+                                    });
+                                let disposition = match classify_first_frame(
+                                    is_pipe_request,
+                                    message.id(),
+                                    pipe_is_expected,
+                                ) {
+                                    Ok(disposition) => disposition,
+                                    Err(error) => {
+                                        let _ = tx.send(Err(error.clone())).await;
+                                        connection.close(
+                                            policy.application_close_code,
+                                            b"pipe request missing id",
+                                        );
+                                        break;
+                                    }
                                 };
-                                let description = message
-                                    .get_str(mtp_codec::DataType::Description)
-                                    .unwrap_or("")
-                                    .to_string();
 
-                                let pipe_reader = PipeReader {
-                                    stream,
-                                    description,
-                                    pipe_id,
-                                };
+                                if let FirstFrameDisposition::Pipe(pipe_id) = disposition {
+                                    let description = message
+                                        .get_str(mtp_codec::DataType::Description)
+                                        .unwrap_or("")
+                                        .to_string();
 
-                                tracing::debug!(pipe_id, description = %pipe_reader.description, "classified incoming pipe stream");
+                                    let pipe_reader = PipeReader {
+                                        stream,
+                                        description,
+                                        pipe_id,
+                                    };
 
-                                if pipe_tx.send(pipe_reader).await.is_err() {
-                                    break;
+                                    tracing::debug!(pipe_id, description = %pipe_reader.description, "classified incoming pipe stream");
+
+                                    if pipe_tx.send(pipe_reader).await.is_err() {
+                                        break;
+                                    }
+                                    return;
                                 }
-                                return;
                             }
                         }
 
@@ -517,11 +546,32 @@ impl<C: TransportConnection> GenericReceiver<C> {
             type_map,
             queue_notify,
             decode_rejections,
+            #[cfg(feature = "pipes")]
+            expected_pipes,
             _accept_task: Arc::new(accept_task),
         }
     }
     pub async fn respond_to_pings(&self, sender: GenericSender<C>) {
         *self.ping_sender.write().await = Some(sender);
+    }
+
+    #[cfg(feature = "pipes")]
+    pub fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
+        if pipe_id == 0 {
+            return Err(CommunicationError::Other("pipe id must be non-zero".into()));
+        }
+        self.expected_pipes
+            .lock()
+            .map_err(|_| CommunicationError::Other("expected pipe state is unavailable".into()))?
+            .insert(pipe_id);
+        Ok(())
+    }
+
+    #[cfg(feature = "pipes")]
+    pub fn cancel_expected_pipe(&self, pipe_id: u32) {
+        if let Ok(mut expected) = self.expected_pipes.lock() {
+            expected.remove(&pipe_id);
+        }
     }
 
     /// Switch from the handshake frame limit to the application frame limit.

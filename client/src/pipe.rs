@@ -78,7 +78,39 @@ pub struct PipeRequest {
     pub(crate) pipe_id: u32,
     pub(crate) description: String,
     pub(crate) sender: Sender,
+    pub(crate) receiver: Receiver,
     pub(crate) dispatcher: Arc<PipeDispatcher>,
+}
+
+#[cfg(feature = "pipes")]
+struct ExpectedPipeGuard {
+    receiver: Receiver,
+    pipe_id: u32,
+    armed: bool,
+}
+
+#[cfg(feature = "pipes")]
+impl ExpectedPipeGuard {
+    fn new(receiver: Receiver, pipe_id: u32) -> Self {
+        Self {
+            receiver,
+            pipe_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(feature = "pipes")]
+impl Drop for ExpectedPipeGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.receiver.cancel_expected_pipe(self.pipe_id);
+        }
+    }
 }
 
 #[cfg(feature = "pipes")]
@@ -92,6 +124,10 @@ impl PipeRequest {
     }
 
     pub async fn accept(self) -> Result<mtp_transport::PipeReader, PipeError> {
+        self.receiver
+            .expect_pipe(self.pipe_id)
+            .map_err(PipeError::from)?;
+        let mut expected_pipe = ExpectedPipeGuard::new(self.receiver.clone(), self.pipe_id);
         let (pipe_tx, pipe_rx) = tokio::sync::oneshot::channel();
         {
             let mut pending = self.dispatcher.pending_pipes.lock().await;
@@ -115,7 +151,10 @@ impl PipeRequest {
 
         let timeout = self.dispatcher.policy.read_timeout;
         match tokio::time::timeout(timeout, pipe_rx).await {
-            Ok(Ok(reader)) => Ok(reader),
+            Ok(Ok(reader)) => {
+                expected_pipe.disarm();
+                Ok(reader)
+            }
             Ok(Err(_)) => {
                 self.dispatcher
                     .pending_pipes
@@ -413,6 +452,7 @@ pub(crate) async fn run_dispatcher(
                         pipe_id,
                         description,
                         sender: sender.clone(),
+                        receiver: receiver.clone(),
                         dispatcher: dispatcher.clone(),
                     };
                     let _ = pipe_req_tx.send(req).await;

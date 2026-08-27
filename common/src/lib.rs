@@ -164,6 +164,9 @@ pub enum CommunicationError {
     #[error("Stream Error")]
     StreamError,
 
+    #[error("Stream failed after delivery may have started")]
+    DeliveryUnknown,
+
     #[error("Stream Error: {0}")]
     #[cfg(not(target_arch = "wasm32"))]
     StreamWriteError(#[from] wtransport::error::StreamWriteError),
@@ -180,6 +183,38 @@ pub enum CommunicationError {
 
     #[error("Other: {0}")]
     Other(String),
+}
+
+/// How the protocol layer should handle the first frame on a receive stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstFrameDisposition {
+    Message,
+    Pipe(u32),
+}
+
+/// Classify a first frame without tying the decision to a WebTransport backend.
+///
+/// `PipeRequest` is used both as a control message and as the header of the raw
+/// stream opened after that request is accepted. Only the protocol layer knows
+/// which raw stream IDs are currently expected.
+pub fn classify_first_frame(
+    is_pipe_request: bool,
+    pipe_id: Option<u32>,
+    pipe_is_expected: bool,
+) -> Result<FirstFrameDisposition, CommunicationError> {
+    if !is_pipe_request {
+        return Ok(FirstFrameDisposition::Message);
+    }
+
+    let pipe_id = pipe_id.filter(|id| *id != 0).ok_or_else(|| {
+        CommunicationError::Other("PipeRequest frame must contain a non-zero id".into())
+    })?;
+
+    if pipe_is_expected {
+        Ok(FirstFrameDisposition::Pipe(pipe_id))
+    } else {
+        Ok(FirstFrameDisposition::Message)
+    }
 }
 
 // ---- manual PartialEq (quinn / wtransport types don't impl PartialEq) ----
@@ -212,6 +247,7 @@ impl PartialEq for CommunicationError {
             (Self::ReadExactError(_), Self::ReadExactError(_)) => true,
             (Self::StreamClosed, Self::StreamClosed) => true,
             (Self::StreamError, Self::StreamError) => true,
+            (Self::DeliveryUnknown, Self::DeliveryUnknown) => true,
             #[cfg(not(target_arch = "wasm32"))]
             (Self::StreamWriteError(_), Self::StreamWriteError(_)) => true,
             #[cfg(not(target_arch = "wasm32"))]

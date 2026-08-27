@@ -82,6 +82,10 @@ mod tests {
         async fn finish(&mut self) -> Result<(), CommunicationError> {
             Ok(())
         }
+
+        fn reset(&mut self, _code: u32) -> Result<(), CommunicationError> {
+            Ok(())
+        }
     }
 
     #[tokio::test]

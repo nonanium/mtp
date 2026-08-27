@@ -9,6 +9,7 @@ use wasm_bindgen_futures::JsFuture;
 use crate::error::js_error;
 use crate::frame::parse_frame_value_with_limits;
 use mtp_codec::{DecodeLimits, EncodeLimits, TypeMap};
+use mtp_common::{FirstFrameDisposition, classify_first_frame};
 
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 
@@ -25,12 +26,6 @@ pub(crate) fn log_stream_error_code(error: &JsValue, context: &str) {
     let stream_error_code = js_sys::Reflect::get(error, &JsValue::from_str("streamErrorCode"))
         .ok()
         .and_then(|v| v.as_f64());
-    if matches!(stream_error_code, Some(0.0)) {
-        // WebTransport reports peer-driven stream shutdown as code 0 in this
-        // environment. For one-frame handshake streams, that is expected and
-        // should not be surfaced as a warning.
-        return;
-    }
     let message = error
         .as_string()
         .or_else(|| {
@@ -76,6 +71,233 @@ fn resolve_stream_readable(recv_stream: &JsValue) -> Result<JsValue, JsValue> {
     }
 }
 
+#[derive(Clone)]
+struct BrowserConnection {
+    inner: JsValue,
+    incoming_reader: Rc<RefCell<Option<JsValue>>>,
+}
+
+pub(crate) struct BrowserSendStream {
+    writer: JsValue,
+}
+
+pub(crate) struct BrowserRecvStream {
+    reader: JsValue,
+}
+
+impl BrowserConnection {
+    async fn connect(url: &str, cert_hashes: Option<Vec<String>>) -> Result<Self, JsValue> {
+        let constructor =
+            js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("WebTransport"))?
+                .dyn_into::<js_sys::Function>()
+                .map_err(|_| js_error("WebTransport not available"))?;
+        let args = js_sys::Array::new();
+        args.push(&JsValue::from_str(url));
+
+        if let Some(hashes) = cert_hashes {
+            let webtransport_hashes = js_sys::Array::new();
+            for hash in hashes {
+                let (algorithm, value) = hash.split_once(':').unwrap_or(("sha-256", hash.as_str()));
+                if let Ok(value) = hex::decode(value) {
+                    let entry = js_sys::Object::new();
+                    js_sys::Reflect::set(
+                        &entry,
+                        &JsValue::from_str("algorithm"),
+                        &JsValue::from_str(algorithm),
+                    )?;
+                    js_sys::Reflect::set(
+                        &entry,
+                        &JsValue::from_str("value"),
+                        &js_sys::Uint8Array::from(&value[..]),
+                    )?;
+                    webtransport_hashes.push(&entry);
+                }
+            }
+            if webtransport_hashes.length() > 0 {
+                let options = js_sys::Object::new();
+                js_sys::Reflect::set(
+                    &options,
+                    &JsValue::from_str("serverCertificateHashes"),
+                    &webtransport_hashes,
+                )?;
+                args.push(&options);
+            }
+        }
+
+        let inner = js_sys::Reflect::construct(&constructor, &args)?;
+        let ready = js_sys::Reflect::get(&inner, &JsValue::from_str("ready"))?
+            .dyn_into::<js_sys::Promise>()
+            .map_err(|_| js_error("WebTransport.ready is not a Promise"))?;
+        JsFuture::from(ready)
+            .await
+            .map_err(|error| js_error(format!("WebTransport ready failed: {error:?}")))?;
+        Ok(Self {
+            inner,
+            incoming_reader: Rc::new(RefCell::new(None)),
+        })
+    }
+
+    async fn open_uni(&self) -> Result<BrowserSendStream, JsValue> {
+        let create_stream = js_sys::Reflect::get(
+            &self.inner,
+            &JsValue::from_str("createUnidirectionalStream"),
+        )?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| js_error("createUnidirectionalStream not a function"))?;
+        let stream_promise = create_stream
+            .call0(&self.inner)?
+            .dyn_into::<js_sys::Promise>()
+            .map_err(|_| js_error("createUnidirectionalStream did not return a Promise"))?;
+        let stream = JsFuture::from(stream_promise).await?;
+        let writable = resolve_stream_writable(&stream)?;
+        let writer = js_sys::Reflect::get(&writable, &JsValue::from_str("getWriter"))
+            .map_err(|_| js_error("missing getWriter"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("getWriter not a function"))?
+            .call0(&writable)
+            .map_err(|_| js_error("getWriter call failed"))?;
+        Ok(BrowserSendStream { writer })
+    }
+
+    async fn accept_uni(&self) -> Result<Option<BrowserRecvStream>, JsValue> {
+        let streams_reader = if let Some(reader) = self.incoming_reader.borrow().clone() {
+            reader
+        } else {
+            let incoming = js_sys::Reflect::get(
+                &self.inner,
+                &JsValue::from_str("incomingUnidirectionalStreams"),
+            )?;
+            let reader = js_sys::Reflect::get(&incoming, &JsValue::from_str("getReader"))
+                .map_err(|_| js_error("missing getReader"))?
+                .dyn_into::<js_sys::Function>()
+                .map_err(|_| js_error("getReader not a function"))?
+                .call0(&incoming)
+                .map_err(|_| js_error("getReader call failed"))?;
+            *self.incoming_reader.borrow_mut() = Some(reader.clone());
+            reader
+        };
+
+        let read = js_sys::Reflect::get(&streams_reader, &JsValue::from_str("read"))
+            .map_err(|_| js_error("missing read"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("read not a function"))?;
+        let promise = read
+            .call0(&streams_reader)
+            .map_err(|_| js_error("read call failed"))?
+            .unchecked_into::<js_sys::Promise>();
+        let result = JsFuture::from(promise).await.map_err(|error| {
+            log_stream_error_code(&error, "accept_uni");
+            js_error(format!("accept stream failed: {error:?}"))
+        })?;
+        if js_sys::Reflect::get(&result, &JsValue::from_str("done"))
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+
+        let stream = js_sys::Reflect::get(&result, &JsValue::from_str("value"))
+            .map_err(|_| js_error("missing value"))?;
+        let readable = resolve_stream_readable(&stream)?;
+        let reader = js_sys::Reflect::get(&readable, &JsValue::from_str("getReader"))
+            .map_err(|_| js_error("missing stream getReader"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("stream getReader not a function"))?
+            .call0(&readable)
+            .map_err(|_| js_error("stream getReader call failed"))?;
+        Ok(Some(BrowserRecvStream { reader }))
+    }
+
+    fn close(&self) {
+        if let Some(reader) = self.incoming_reader.borrow_mut().take() {
+            release_reader_lock(&reader);
+        }
+        if let Ok(close) = js_sys::Reflect::get(&self.inner, &JsValue::from_str("close"))
+            .and_then(|value| value.dyn_into::<js_sys::Function>())
+        {
+            let _ = close.call1(&self.inner, &js_sys::Object::new());
+        }
+    }
+}
+
+impl BrowserSendStream {
+    pub(crate) async fn write_all(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
+        let write = js_sys::Reflect::get(&self.writer, &JsValue::from_str("write"))
+            .map_err(|_| js_error("missing write"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("write not a function"))?;
+        let promise = write
+            .call1(&self.writer, &js_sys::Uint8Array::from(bytes))
+            .map_err(|error| js_error(format!("write failed: {error:?}")))?
+            .unchecked_into::<js_sys::Promise>();
+        JsFuture::from(promise).await.map(|_| ())
+    }
+
+    pub(crate) async fn finish(&mut self) -> Result<(), JsValue> {
+        let close = js_sys::Reflect::get(&self.writer, &JsValue::from_str("close"))
+            .map_err(|_| js_error("missing close"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("close not a function"))?;
+        let promise = close
+            .call0(&self.writer)
+            .map_err(|error| js_error(format!("close failed: {error:?}")))?
+            .unchecked_into::<js_sys::Promise>();
+        JsFuture::from(promise).await.map(|_| ())
+    }
+
+    pub(crate) fn reset(&mut self, code: u32) -> Result<(), JsValue> {
+        let abort = js_sys::Reflect::get(&self.writer, &JsValue::from_str("abort"))
+            .map_err(|_| js_error("missing abort"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("abort not a function"))?;
+        let _ = abort.call1(&self.writer, &JsValue::from_f64(code as f64))?;
+        Ok(())
+    }
+
+    pub(crate) fn release(&self) {
+        release_writer_lock(&self.writer);
+    }
+}
+
+impl BrowserRecvStream {
+    pub(crate) async fn read_chunk(&mut self) -> Result<Option<Vec<u8>>, JsValue> {
+        let read = js_sys::Reflect::get(&self.reader, &JsValue::from_str("read"))
+            .map_err(|_| js_error("missing read"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("read not a function"))?;
+        let promise = read
+            .call0(&self.reader)
+            .map_err(|_| js_error("read call failed"))?
+            .unchecked_into::<js_sys::Promise>();
+        let result = JsFuture::from(promise).await?;
+        if js_sys::Reflect::get(&result, &JsValue::from_str("done"))
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true)
+        {
+            return Ok(None);
+        }
+        let value = js_sys::Reflect::get(&result, &JsValue::from_str("value"))
+            .map_err(|_| js_error("missing value"))?;
+        Ok(Some(js_sys::Uint8Array::new(&value).to_vec()))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn stop(self, code: u32) -> Result<(), JsValue> {
+        let cancel = js_sys::Reflect::get(&self.reader, &JsValue::from_str("cancel"))
+            .map_err(|_| js_error("missing cancel"))?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| js_error("cancel not a function"))?;
+        let _ = cancel.call1(&self.reader, &JsValue::from_f64(code as f64))?;
+        Ok(())
+    }
+
+    pub(crate) fn release(&self) {
+        release_reader_lock(&self.reader);
+    }
+}
+
 /// Releases a writer's lock so an abandoned writer isn't treated as an abort (which sends STOP_SENDING).
 pub(crate) fn release_writer_lock(writer: &JsValue) {
     if let Ok(release) = js_sys::Reflect::get(writer, &JsValue::from_str("releaseLock"))
@@ -118,12 +340,10 @@ enum FrameOutcome {
  */
 #[derive(Clone)]
 pub struct WasmTransport {
-    inner: JsValue,
+    connection: BrowserConnection,
     max_message_size: u32,
-    /// Reader over `incoming_unidirectional_streams()` (a singleton stream of streams).
-    streams_reader: Rc<RefCell<Option<JsValue>>>,
-    /// Reader over the host's current uni-directional stream, if one is open.
-    stream_reader: Rc<RefCell<Option<JsValue>>>,
+    /// Current incoming unidirectional stream, shared across handshake and receive loops.
+    stream_reader: Rc<RefCell<Option<BrowserRecvStream>>>,
     /// Bytes already read from the current stream but not yet consumed as a frame.
     buffer: Rc<RefCell<Vec<u8>>>,
     /// Set to `true` when `open_next_stream` succeeds; cleared after the first frame is parsed.
@@ -149,61 +369,14 @@ impl WasmTransport {
         max_message_size: u32,
         configured_limits: Option<DecodeLimits>,
     ) -> Result<Self, JsValue> {
-        let ctor = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("WebTransport"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("WebTransport not available"))?;
-        let args = js_sys::Array::new();
-        args.push(&JsValue::from_str(url));
-
-        if let Some(hashes) = cert_hashes {
-            let wt_hashes = js_sys::Array::new();
-            for h in hashes {
-                let (algo, hex_val) = match h.split_once(':') {
-                    Some((algo, hex_val)) => (algo, hex_val),
-                    None => ("sha-256", h.as_str()),
-                };
-
-                if let Ok(bytes) = hex::decode(hex_val) {
-                    let hash = js_sys::Object::new();
-                    js_sys::Reflect::set(
-                        &hash,
-                        &JsValue::from_str("algorithm"),
-                        &JsValue::from_str(algo),
-                    )?;
-                    js_sys::Reflect::set(
-                        &hash,
-                        &JsValue::from_str("value"),
-                        &js_sys::Uint8Array::from(&bytes[..]),
-                    )?;
-                    wt_hashes.push(&hash);
-                }
-            }
-            if wt_hashes.length() > 0 {
-                let opts = js_sys::Object::new();
-                js_sys::Reflect::set(
-                    &opts,
-                    &JsValue::from_str("serverCertificateHashes"),
-                    &wt_hashes,
-                )?;
-                args.push(&opts);
-            }
-        };
-
-        let transport = js_sys::Reflect::construct(&ctor, &args)?;
-        let ready = js_sys::Reflect::get(&transport, &JsValue::from_str("ready"))?
-            .dyn_into::<js_sys::Promise>()
-            .map_err(|_| js_error("WebTransport.ready is not a Promise"))?;
-        JsFuture::from(ready)
-            .await
-            .map_err(|e| js_error(format!("WebTransport ready failed: {:?}", e)))?;
+        let connection = BrowserConnection::connect(url, cert_hashes).await?;
         let transport_limits = DecodeLimits::for_transport_message_size(max_message_size as u64);
         let decode_limits = configured_limits
             .map(|limits| restrict_decode_limits(limits, transport_limits))
             .unwrap_or(transport_limits);
         Ok(Self {
-            inner: transport,
+            connection,
             max_message_size,
-            streams_reader: Rc::new(RefCell::new(None)),
             stream_reader: Rc::new(RefCell::new(None)),
             buffer: Rc::new(RefCell::new(Vec::new())),
             new_stream_frame: Rc::new(Cell::new(false)),
@@ -214,7 +387,7 @@ impl WasmTransport {
     }
 
     pub fn inner(&self) -> &JsValue {
-        &self.inner
+        &self.connection.inner
     }
 
     pub fn set_type_map(&self, type_map: &TypeMap) {
@@ -250,154 +423,55 @@ impl WasmTransport {
         // in accept_uni() until the authentication deadline. The bytes are
         // already the canonical MTP self-framed value, so no extra stream
         // length prefix is added here.
-        let create_stream = js_sys::Reflect::get(
-            &self.inner,
-            &JsValue::from_str("createUnidirectionalStream"),
-        )?
-        .dyn_into::<js_sys::Function>()
-        .map_err(|_| js_error("createUnidirectionalStream not a function"))?;
-        let stream_promise = create_stream
-            .call0(&self.inner)?
-            .dyn_into::<js_sys::Promise>()
-            .map_err(|_| js_error("createUnidirectionalStream did not return a Promise"))?;
-        let stream = JsFuture::from(stream_promise).await?;
-        let writable_or_stream = resolve_stream_writable(&stream)?;
-        let writer_val = js_sys::Reflect::get(&writable_or_stream, &JsValue::from_str("getWriter"))
-            .map_err(|_| js_error("missing getWriter"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("getWriter not a function"))?
-            .call0(&writable_or_stream)
-            .map_err(|_| js_error("getWriter call failed"))?;
-
-        let chunk = js_sys::Uint8Array::from(frame);
-
-        let write_fn = js_sys::Reflect::get(&writer_val, &JsValue::from_str("write"))
-            .map_err(|_| js_error("missing write"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("write not a function"))?;
-        let write_promise = write_fn
-            .call1(&writer_val, &chunk)
-            .map_err(|e| js_error(format!("write failed: {:?}", e)))?;
-        if let Err(e) = JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await {
+        let mut stream = self.connection.open_uni().await?;
+        if let Err(e) = stream.write_all(frame).await {
             log_stream_error_code(&e, "send_frame write");
-            release_writer_lock(&writer_val);
+            stream.release();
             return Err(e);
         }
 
-        let close_fn = js_sys::Reflect::get(&writer_val, &JsValue::from_str("close"))
-            .map_err(|_| js_error("missing close"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("close not a function"))?;
-        let close_promise = close_fn
-            .call0(&writer_val)
-            .map_err(|e| js_error(format!("close failed: {:?}", e)))?;
-        if let Err(e) = JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await {
+        if let Err(e) = stream.finish().await {
             // The frame was already written; do not retry it merely because
             // FIN failed, as that would duplicate the MTP frame.
             log_stream_error_code(&e, "send_frame close");
         }
-        release_writer_lock(&writer_val);
+        stream.release();
 
         Ok(())
-    }
-
-    /// Get (creating once) the reader over `incoming_unidirectional_streams()`.
-    fn ensure_streams_reader(&self) -> Result<JsValue, JsValue> {
-        if let Some(reader) = self.streams_reader.borrow().clone() {
-            return Ok(reader);
-        }
-        let incoming = js_sys::Reflect::get(
-            &self.inner,
-            &JsValue::from_str("incomingUnidirectionalStreams"),
-        )?;
-        let reader = js_sys::Reflect::get(&incoming, &JsValue::from_str("getReader"))
-            .map_err(|_| js_error("missing getReader"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("getReader not a function"))?
-            .call0(&incoming)
-            .map_err(|_| js_error("getReader call failed"))?;
-        *self.streams_reader.borrow_mut() = Some(reader.clone());
-        Ok(reader)
     }
 
     /// Accept the next incoming uni-directional stream and make it current.
     /// Returns `false` if the incoming-streams readable has ended.
     async fn open_next_stream(&self) -> Result<bool, JsValue> {
-        let streams_reader = self.ensure_streams_reader()?;
-
-        let read_fn = js_sys::Reflect::get(&streams_reader, &JsValue::from_str("read"))
-            .map_err(|_| js_error("missing read"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("read not a function"))?;
-        let promise = read_fn
-            .call0(&streams_reader)
-            .map_err(|_| js_error("read call failed"))?
-            .unchecked_into::<js_sys::Promise>();
-        let result = match JsFuture::from(promise).await {
-            Ok(r) => r,
-            Err(e) => {
-                log_stream_error_code(&e, "open_next_stream accept");
-                return Err(js_error(format!("accept stream failed: {:?}", e)));
-            }
+        let Some(stream) = self.connection.accept_uni().await? else {
+            return Ok(false);
         };
 
-        let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if done {
-            return Ok(false);
-        }
-
-        let recv_stream = js_sys::Reflect::get(&result, &JsValue::from_str("value"))
-            .map_err(|_| js_error("missing value"))?;
-        let readable = resolve_stream_readable(&recv_stream)?;
-        let reader = js_sys::Reflect::get(&readable, &JsValue::from_str("getReader"))
-            .map_err(|_| js_error("missing stream getReader"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("stream getReader not a function"))?
-            .call0(&readable)
-            .map_err(|_| js_error("stream getReader call failed"))?;
-
-        *self.stream_reader.borrow_mut() = Some(reader);
+        *self.stream_reader.borrow_mut() = Some(stream);
         self.new_stream_frame.set(true);
         Ok(true)
     }
 
     /// Read one chunk from the current stream. `Ok(None)` means the stream ended.
     async fn read_chunk(&self) -> Result<Option<Vec<u8>>, JsValue> {
-        let reader = match self.stream_reader.borrow().clone() {
-            Some(r) => r,
+        let mut stream = match self.stream_reader.borrow_mut().take() {
+            Some(stream) => stream,
             None => return Ok(None),
         };
-
-        let read_fn = js_sys::Reflect::get(&reader, &JsValue::from_str("read"))
-            .map_err(|_| js_error("missing read"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("read not a function"))?;
-        let promise = read_fn
-            .call0(&reader)
-            .map_err(|_| js_error("read call failed"))?
-            .unchecked_into::<js_sys::Promise>();
-        let result = match JsFuture::from(promise).await {
-            Ok(r) => r,
+        let result = match stream.read_chunk().await {
+            Ok(result) => result,
             Err(e) => {
                 log_stream_error_code(&e, "read_chunk");
+                stream.release();
                 return Err(js_error(format!("read failed: {:?}", e)));
             }
         };
-
-        let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        if done {
-            return Ok(None);
+        if result.is_some() {
+            *self.stream_reader.borrow_mut() = Some(stream);
+        } else {
+            stream.release();
         }
-
-        let value = js_sys::Reflect::get(&result, &JsValue::from_str("value"))
-            .map_err(|_| js_error("missing value"))?;
-        Ok(Some(js_sys::Uint8Array::new(&value).to_vec()))
+        Ok(result)
     }
 
     /// Try to pull one complete frame out of the buffer without reading more.
@@ -459,9 +533,7 @@ impl WasmTransport {
                 }
                 None => {
                     // Stream finished; release the reader's lock to avoid a spurious cancel.
-                    if let Some(reader) = self.stream_reader.borrow_mut().take() {
-                        release_reader_lock(&reader);
-                    }
+                    // `read_chunk` releases the raw stream lock on clean FIN.
                     // A frame is never allowed to span stream boundaries. The
                     // native persistent-stream sender packs frames on one
                     // stream, while the WASM sender uses one stream per frame;
@@ -520,15 +592,17 @@ impl WasmTransport {
     /// Pipe-aware receive loop. Identical to `receive_loop` but detects
     /// `PipeRequest` as the first frame on a new incoming stream and routes
     /// the stream to `on_pipe` instead of `on_message`.
-    pub async fn receive_loop_with_pipes<F, G, H>(
+    pub async fn receive_loop_with_pipes<F, G, H, I>(
         &self,
         mut on_message: F,
         mut on_error: H,
         mut on_pipe: G,
+        mut pipe_is_expected: I,
     ) where
         F: FnMut(JsValue),
         G: FnMut(crate::pipe::PipeReader),
         H: FnMut(JsValue),
+        I: FnMut(u32) -> bool,
     {
         loop {
             match self.next_frame(self.max_message_size).await {
@@ -550,36 +624,44 @@ impl WasmTransport {
 
                     if is_first {
                         self.new_stream_frame.set(false);
-                        if let Some(comm) = comm.as_ref()
-                            && Some(comm.get_type()) == pipe_request_type
-                        {
-                            let Some(pipe_id) = comm.id().filter(|id| *id != 0) else {
-                                on_error(JsValue::from_str(
-                                    "PipeRequest frame must contain a non-zero id",
-                                ));
-                                self.close();
-                                break;
-                            };
-                            let description = comm
-                                .get_str(mtp_codec::DataType::Description)
-                                .unwrap_or("")
-                                .to_string();
+                        if let Some(comm) = comm.as_ref() {
+                            let is_pipe_request = Some(comm.get_type()) == pipe_request_type;
+                            let pipe_id = comm.id().filter(|id| *id != 0);
+                            let is_expected =
+                                is_pipe_request && pipe_id.is_some_and(&mut pipe_is_expected);
+                            let disposition =
+                                match classify_first_frame(is_pipe_request, comm.id(), is_expected)
+                                {
+                                    Ok(disposition) => disposition,
+                                    Err(error) => {
+                                        on_error(JsValue::from_str(&error.to_string()));
+                                        self.close();
+                                        break;
+                                    }
+                                };
 
-                            let pending = {
-                                let mut buf = self.buffer.borrow_mut();
-                                std::mem::take(&mut *buf)
-                            };
+                            if let FirstFrameDisposition::Pipe(pipe_id) = disposition {
+                                let description = comm
+                                    .get_str(mtp_codec::DataType::Description)
+                                    .unwrap_or("")
+                                    .to_string();
 
-                            if let Some(reader) = self.stream_reader.borrow_mut().take() {
-                                let pipe_reader = crate::pipe::PipeReader::new(
-                                    reader,
-                                    pipe_id,
-                                    description,
-                                    pending,
-                                );
-                                on_pipe(pipe_reader);
+                                let pending = {
+                                    let mut buf = self.buffer.borrow_mut();
+                                    std::mem::take(&mut *buf)
+                                };
+
+                                if let Some(reader) = self.stream_reader.borrow_mut().take() {
+                                    let pipe_reader = crate::pipe::PipeReader::new(
+                                        reader,
+                                        pipe_id,
+                                        description,
+                                        pending,
+                                    );
+                                    on_pipe(pipe_reader);
+                                }
+                                continue;
                             }
-                            continue;
                         }
                     }
 
@@ -635,25 +717,7 @@ impl WasmTransport {
         description: &str,
     ) -> Result<crate::pipe::PipeWriter, JsValue> {
         let _send_guard = self.send_lock.lock().await;
-        let create_stream = js_sys::Reflect::get(
-            &self.inner,
-            &JsValue::from_str("createUnidirectionalStream"),
-        )?
-        .dyn_into::<js_sys::Function>()
-        .map_err(|_| js_error("createUnidirectionalStream not a function"))?;
-        let stream_promise = create_stream
-            .call0(&self.inner)?
-            .dyn_into::<js_sys::Promise>()
-            .map_err(|_| js_error("createUnidirectionalStream did not return a Promise"))?;
-        let stream = JsFuture::from(stream_promise).await?;
-
-        let writable_or_stream = resolve_stream_writable(&stream)?;
-        let writer_val = js_sys::Reflect::get(&writable_or_stream, &JsValue::from_str("getWriter"))
-            .map_err(|_| js_error("missing getWriter"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("getWriter not a function"))?
-            .call0(&writable_or_stream)
-            .map_err(|_| js_error("getWriter call failed"))?;
+        let mut stream = self.connection.open_uni().await?;
 
         let type_map = self.type_map();
         let request = mtp_codec::CommunicationValue::new_with_type_map(
@@ -669,37 +733,21 @@ impl WasmTransport {
             .to_bytes()
             .map_err(|e| js_error(format!("encode failed: {}", e)))?;
 
-        let chunk = js_sys::Uint8Array::from(&frame_bytes[..]);
-        let write_fn = js_sys::Reflect::get(&writer_val, &JsValue::from_str("write"))
-            .map_err(|_| js_error("missing write"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("write not a function"))?;
-        let write_promise = write_fn
-            .call1(&writer_val, &chunk)
-            .map_err(|e| js_error(format!("write failed: {:?}", e)))?;
-        if let Err(e) = JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await {
+        if let Err(e) = stream.write_all(&frame_bytes).await {
             log_stream_error_code(&e, "open_pipe write");
-            release_writer_lock(&writer_val);
+            stream.release();
             return Err(e);
         }
 
-        Ok(crate::pipe::PipeWriter::new(writer_val, pipe_id))
+        Ok(crate::pipe::PipeWriter::new(stream, pipe_id))
     }
 
     pub fn close(&self) {
         // Release reader locks before closing so they aren't treated as cancels.
         if let Some(reader) = self.stream_reader.borrow_mut().take() {
-            release_reader_lock(&reader);
+            reader.release();
         }
-        if let Some(reader) = self.streams_reader.borrow_mut().take() {
-            release_reader_lock(&reader);
-        }
-
-        if let Ok(close) = js_sys::Reflect::get(&self.inner, &JsValue::from_str("close"))
-            .and_then(|value| value.dyn_into::<js_sys::Function>())
-        {
-            let _ = close.call1(&self.inner, &js_sys::Object::new());
-        }
+        self.connection.close();
     }
 }
 

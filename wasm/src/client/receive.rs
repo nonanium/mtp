@@ -179,6 +179,7 @@ impl WasmClient {
         let expired_pipe_creations = self.expired_pipe_creations.clone();
         let pending_pipes = self.pending_pipes.clone();
         let loop_pending_pipes = pending_pipes.clone();
+        let expected_pending_pipes = pending_pipes.clone();
         let on_pipe_request = self.on_pipe_request.clone();
         let loop_pipe_creations = pending_pipe_creations.clone();
         let loop_expired_pipe_creations = expired_pipe_creations.clone();
@@ -292,6 +293,12 @@ impl WasmClient {
                         {
                             let _ = entry.sender.send(Ok(pipe_reader));
                         }
+                    },
+                    move |pipe_id| {
+                        expected_pending_pipes
+                            .borrow()
+                            .get(&pipe_id)
+                            .is_some_and(|entry| entry.generation == loop_generation)
                     },
                 )
                 .await;

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use mtp_codec::CommunicationValue;
 use mtp_common::CommunicationError;
 use mtp_transport::{
-    GenericReceiver, GenericSender, Policy, TransportConnection, TransportEvent,
+    GenericReceiver, GenericSender, Policy, SendMode, TransportConnection, TransportEvent,
     TransportRecvStream, TransportSendStream,
 };
 use std::sync::Arc;
@@ -53,6 +53,10 @@ impl TransportSendStream for MockSendStream {
             .await
             .map_err(|_| CommunicationError::StreamError)
     }
+
+    fn reset(&mut self, _code: u32) -> Result<(), CommunicationError> {
+        Ok(())
+    }
 }
 
 struct MockRecvStream {
@@ -88,6 +92,10 @@ impl TransportRecvStream for MockRecvStream {
             }
             Err(_) => Err(CommunicationError::StreamError),
         }
+    }
+
+    fn stop(self, _code: u32) -> Result<(), CommunicationError> {
+        Ok(())
     }
 }
 
@@ -157,6 +165,7 @@ async fn test_open_pipe_and_receive_reader() -> Result<(), Box<dyn std::error::E
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
+    receiver.expect_pipe(42)?;
     let pipe_writer = sender.open_pipe(42, "test-pipe").await?;
 
     let pipe_reader = receiver.receive_pipe().await?;
@@ -174,6 +183,7 @@ async fn test_pipe_raw_data_roundtrip() -> Result<(), Box<dyn std::error::Error>
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
+    receiver.expect_pipe(1)?;
     let mut pipe_writer = sender.open_pipe(1, "data-pipe").await?;
 
     let data = b"hello through the pipe";
@@ -195,6 +205,7 @@ async fn test_pipe_large_payload() -> Result<(), Box<dyn std::error::Error>> {
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
+    receiver.expect_pipe(7)?;
     let mut pipe_writer = sender.open_pipe(7, "big-pipe").await?;
 
     let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 256) as u8).collect();
@@ -223,6 +234,7 @@ async fn test_receive_event_dispatches_pipe() -> Result<(), Box<dyn std::error::
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
+    receiver.expect_pipe(99)?;
     let mut pipe_writer = sender.open_pipe(99, "event-pipe").await?;
 
     match receiver.receive_event().await? {
@@ -261,22 +273,23 @@ async fn test_try_receive_pipe_returns_none_when_empty() -> Result<(), Box<dyn s
 async fn test_regular_messages_still_work_alongside_pipes() -> Result<(), Box<dyn std::error::Error>>
 {
     let (conn_a, conn_b) = mock_connected_pair().await;
-    let policy = Arc::new(Policy::default());
+    let policy = Arc::new(Policy::default().with_send_mode(SendMode::SingleStreamPerMessage));
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
-    let msg = CommunicationValue::new(mtp_codec::CommunicationType::BadRequest);
-    sender.send(&msg).await?;
-
-    let _pipe_writer = sender.open_pipe(1, "mixed-pipe").await?;
+    let request = CommunicationValue::new(mtp_codec::CommunicationType::PipeRequest)
+        .with_id(1)
+        .add_typed_default(
+            mtp_codec::DataType::Description,
+            mtp_codec::DataValue::Str("mixed-pipe".into()),
+        );
+    sender.send(&request).await?;
 
     let received = receiver.receive().await?;
-    assert_eq!(
-        received.get_type(),
-        mtp_codec::CommunicationType::BadRequest
-            .try_to_id(&mtp_codec::TypeMap::latest())
-            .unwrap()
-    );
+    assert!(received.is_type(mtp_codec::CommunicationType::PipeRequest));
+
+    receiver.expect_pipe(1)?;
+    let _pipe_writer = sender.open_pipe(1, "mixed-pipe").await?;
 
     let pipe_reader = receiver.receive_pipe().await?;
     assert_eq!(pipe_reader.pipe_id(), 1);
@@ -291,6 +304,8 @@ async fn test_multiple_pipes() -> Result<(), Box<dyn std::error::Error>> {
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
+    receiver.expect_pipe(10)?;
+    receiver.expect_pipe(20)?;
     let mut pw1 = sender.open_pipe(10, "first").await?;
     let mut pw2 = sender.open_pipe(20, "second").await?;
 

@@ -73,7 +73,7 @@ pub struct MTPConnection<
     #[cfg(feature = "pipes")]
     pub(crate) app_rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
     #[cfg(feature = "pipes")]
-    pub(crate) pipe_req_rx: Mutex<mpsc::Receiver<PipeRequest<S, P>>>,
+    pub(crate) pipe_req_rx: Mutex<mpsc::Receiver<PipeRequest<S, R, P>>>,
     #[cfg(feature = "pipes")]
     pub(crate) pipe_dispatcher: Arc<PipeDispatcher<P>>,
     #[cfg(not(feature = "pipes"))]
@@ -381,7 +381,7 @@ where
         })
     }
 
-    pub async fn receive_pipe(&self) -> Result<PipeRequest<S, P>, CommunicationError> {
+    pub async fn receive_pipe(&self) -> Result<PipeRequest<S, R, P>, CommunicationError> {
         self.pipe_req_rx
             .lock()
             .await

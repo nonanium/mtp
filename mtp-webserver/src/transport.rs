@@ -57,14 +57,14 @@ impl TransportSendStream for H3TransportSender {
         self.stream
             .write_all(buf)
             .await
-            .map_err(|_| CommunicationError::StreamError)?;
+            .map_err(|_| CommunicationError::DeliveryUnknown)?;
         // Control/authentication frames use a persistent stream. h3 keeps
         // those writes buffered until flushed; without this the peer can wait
         // for the challenge while the server waits for its proof.
         self.stream
             .flush()
             .await
-            .map_err(|_| CommunicationError::StreamError)
+            .map_err(|_| CommunicationError::DeliveryUnknown)
     }
 
     async fn finish(&mut self) -> Result<(), CommunicationError> {
@@ -72,6 +72,11 @@ impl TransportSendStream for H3TransportSender {
             .shutdown()
             .await
             .map_err(|_| CommunicationError::StreamError)
+    }
+
+    fn reset(&mut self, code: u32) -> Result<(), CommunicationError> {
+        h3::quic::SendStream::reset(&mut self.stream, code as u64);
+        Ok(())
     }
 }
 
@@ -139,6 +144,11 @@ impl TransportRecvStream for H3TransportReceiver {
                 Err(CommunicationError::StreamError)
             }
         }
+    }
+
+    fn stop(mut self, code: u32) -> Result<(), CommunicationError> {
+        h3::quic::RecvStream::stop_sending(&mut self.stream, code as u64);
+        Ok(())
     }
 }
 

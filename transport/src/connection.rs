@@ -4,6 +4,10 @@ use crate::framing::RetryClassifier;
 use crate::pipe::PipeReader;
 use mtp_codec::{CommunicationValue, DecodeError, DecodeLimits, EncodeLimits, TypeMap};
 use mtp_common::CommunicationError;
+#[cfg(feature = "pipes")]
+use mtp_common::{FirstFrameDisposition, classify_first_frame};
+#[cfg(feature = "pipes")]
+use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -288,15 +292,15 @@ impl Sender {
             Ok(Ok(())) => Ok(()),
             Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
                 warn!("[Sender] write failed: peer sent STOP_SENDING (error code {code})");
-                Err(CommunicationError::StreamClosed)
+                Err(CommunicationError::DeliveryUnknown)
             }
             Ok(Err(other)) => {
                 warn!("[Sender] write failed: {other}");
-                Err(CommunicationError::StreamError)
+                Err(CommunicationError::DeliveryUnknown)
             }
             Err(_) => {
                 warn!("[Sender] write timed out (len={})", bytes.len());
-                Err(CommunicationError::StreamError)
+                Err(CommunicationError::DeliveryUnknown)
             }
         }
     }
@@ -398,15 +402,15 @@ impl Sender {
             Ok(Ok(())) => Ok(()),
             Ok(Err(wtransport::error::StreamWriteError::Stopped(code))) => {
                 warn!("[Sender] finish failed: peer sent STOP_SENDING (error code {code})");
-                Err(CommunicationError::StreamClosed)
+                Err(CommunicationError::DeliveryUnknown)
             }
             Ok(Err(other)) => {
                 warn!("[Sender] finish failed: {other}");
-                Err(CommunicationError::StreamError)
+                Err(CommunicationError::DeliveryUnknown)
             }
             Err(_) => {
                 warn!("[Sender] finish timed out");
-                Err(CommunicationError::StreamError)
+                Err(CommunicationError::DeliveryUnknown)
             }
         }
     }
@@ -745,6 +749,8 @@ struct ReceiverInner {
     max_message_size: Arc<AtomicU64>,
     type_map: Arc<RwLock<TypeMap>>,
     decode_rejections: Arc<DecodeRejectionCounters>,
+    #[cfg(feature = "pipes")]
+    expected_pipes: Arc<std::sync::Mutex<HashSet<u32>>>,
 }
 
 impl Clone for Receiver {
@@ -831,6 +837,10 @@ impl Receiver {
         let accept_type_map = type_map.clone();
         let decode_rejections = Arc::new(DecodeRejectionCounters::default());
         let accept_decode_rejections = decode_rejections.clone();
+        #[cfg(feature = "pipes")]
+        let expected_pipes = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        #[cfg(feature = "pipes")]
+        let accept_expected_pipes = expected_pipes.clone();
         let stream_limit = Arc::new(Semaphore::new(policy.max_concurrent_stream_tasks.max(1)));
         let accept_stream_limit = stream_limit.clone();
         debug!(
@@ -900,6 +910,8 @@ impl Receiver {
                                 let stream_max_message_size = accept_max_message_size.clone();
                                 let stream_type_map = accept_type_map.clone();
                                 let stream_decode_rejections = accept_decode_rejections.clone();
+                                #[cfg(feature = "pipes")]
+                                let stream_expected_pipes = accept_expected_pipes.clone();
 
                                 tokio::spawn(async move {
                                     let _permit = permit;
@@ -935,38 +947,54 @@ impl Receiver {
 
                                                 #[cfg(feature = "pipes")]
                                                 {
-                                                    if msg.is_type(mtp_codec::CommunicationType::PipeRequest)
-                                                        && frame_count == 1
-                                                    {
-                                                        let Some(pipe_id) = msg.id().filter(|id| *id != 0) else {
-                                                            let error = CommunicationError::Other(
-                                                                "PipeRequest frame must contain a non-zero id".into(),
-                                                            );
-                                                            let _ = msg_tx_stream.send(Err(error.clone())).await;
-                                                            stream_handle.close(Some(error));
+                                                    if frame_count == 1 {
+                                                        let is_pipe_request = msg.is_type(
+                                                            mtp_codec::CommunicationType::PipeRequest,
+                                                        );
+                                                        let pipe_id = msg.id().filter(|id| *id != 0);
+                                                        let pipe_is_expected = is_pipe_request && pipe_id.is_some_and(|pipe_id| {
+                                                            stream_expected_pipes
+                                                                .lock()
+                                                                .is_ok_and(|mut expected| expected.remove(&pipe_id))
+                                                        });
+                                                        let disposition = match classify_first_frame(
+                                                            is_pipe_request,
+                                                            msg.id(),
+                                                            pipe_is_expected,
+                                                        ) {
+                                                            Ok(disposition) => disposition,
+                                                            Err(error) => {
+                                                                let _ = msg_tx_stream
+                                                                    .send(Err(error.clone()))
+                                                                    .await;
+                                                                stream_handle.close(Some(error));
+                                                                break;
+                                                            }
+                                                        };
+
+                                                        if let FirstFrameDisposition::Pipe(pipe_id) = disposition {
+                                                            let description = msg
+                                                                .get_str(mtp_codec::DataType::Description)
+                                                                .unwrap_or("")
+                                                                .to_string();
+
+                                                            let pipe_reader = crate::pipe::PipeReader {
+                                                                stream: s,
+                                                                description,
+                                                                pipe_id,
+                                                            };
+
+                                                            if pipe_tx_stream
+                                                                .send(pipe_reader)
+                                                                .await
+                                                                .is_err()
+                                                            {
+                                                                stream_handle.close(Some(
+                                                                    CommunicationError::StreamClosed,
+                                                                ));
+                                                            }
                                                             break;
-                                                        };
-                                                        let description = msg
-                                                            .get_str(mtp_codec::DataType::Description)
-                                                            .unwrap_or("")
-                                                            .to_string();
-
-                                                        let pipe_reader = crate::pipe::PipeReader {
-                                                            stream: s,
-                                                            description,
-                                                            pipe_id,
-                                                        };
-
-                                                        if pipe_tx_stream
-                                                            .send(pipe_reader)
-                                                            .await
-                                                            .is_err()
-                                                        {
-                                                            stream_handle.close(Some(
-                                                                CommunicationError::StreamClosed,
-                                                            ));
                                                         }
-                                                        break;
                                                     }
                                                 }
 
@@ -1111,6 +1139,8 @@ impl Receiver {
                 max_message_size,
                 type_map,
                 decode_rejections,
+                #[cfg(feature = "pipes")]
+                expected_pipes,
             }),
         }
     }
@@ -1125,6 +1155,26 @@ impl Receiver {
     /// Bind subsequently decoded frames to the negotiated protocol version.
     pub async fn set_type_map(&self, type_map: &TypeMap) {
         *self.inner.type_map.write().await = type_map.clone();
+    }
+
+    #[cfg(feature = "pipes")]
+    pub fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
+        if pipe_id == 0 {
+            return Err(CommunicationError::Other("pipe id must be non-zero".into()));
+        }
+        self.inner
+            .expected_pipes
+            .lock()
+            .map_err(|_| CommunicationError::Other("expected pipe state is unavailable".into()))?
+            .insert(pipe_id);
+        Ok(())
+    }
+
+    #[cfg(feature = "pipes")]
+    pub fn cancel_expected_pipe(&self, pipe_id: u32) {
+        if let Ok(mut expected) = self.inner.expected_pipes.lock() {
+            expected.remove(&pipe_id);
+        }
     }
 
     /// Return local counts for frames rejected by the structured decoder.

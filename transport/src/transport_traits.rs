@@ -17,6 +17,7 @@ use mtp_common::CommunicationError;
 pub trait TransportSendStream: tokio::io::AsyncWrite + Send + Sync {
     async fn write_all(&mut self, buf: &[u8]) -> Result<(), CommunicationError>;
     async fn finish(&mut self) -> Result<(), CommunicationError>;
+    fn reset(&mut self, code: u32) -> Result<(), CommunicationError>;
 }
 
 /// A readable unidirectional stream suitable for MTP frames.
@@ -28,6 +29,9 @@ pub trait TransportSendStream: tokio::io::AsyncWrite + Send + Sync {
 pub trait TransportRecvStream: tokio::io::AsyncRead + Send + Sync {
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), CommunicationError>;
     async fn read_chunk(&mut self, max: usize) -> Result<Option<Vec<u8>>, CommunicationError>;
+    fn stop(self, code: u32) -> Result<(), CommunicationError>
+    where
+        Self: Sized;
 }
 
 /// A QUIC/WebTransport connection that provides MTP's unidirectional streams.
@@ -47,7 +51,7 @@ impl TransportSendStream for wtransport::SendStream {
     async fn write_all(&mut self, buf: &[u8]) -> Result<(), CommunicationError> {
         wtransport::SendStream::write_all(self, buf)
             .await
-            .map_err(|_| CommunicationError::StreamError)
+            .map_err(|_| CommunicationError::DeliveryUnknown)
     }
 
     async fn finish(&mut self) -> Result<(), CommunicationError> {
@@ -55,14 +59,23 @@ impl TransportSendStream for wtransport::SendStream {
             .await
             .map_err(|_| CommunicationError::StreamError)
     }
+
+    fn reset(&mut self, code: u32) -> Result<(), CommunicationError> {
+        wtransport::SendStream::reset(self, wtransport::VarInt::from_u32(code))
+            .map_err(|_| CommunicationError::StreamClosed)
+    }
 }
 
 #[async_trait]
 impl TransportRecvStream for wtransport::RecvStream {
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), CommunicationError> {
-        wtransport::RecvStream::read_exact(self, buf)
-            .await
-            .map_err(|_| CommunicationError::StreamError)
+        match wtransport::RecvStream::read_exact(self, buf).await {
+            Ok(()) => Ok(()),
+            Err(wtransport::error::StreamReadExactError::FinishedEarly(0)) => {
+                Err(CommunicationError::StreamClosed)
+            }
+            Err(_) => Err(CommunicationError::StreamError),
+        }
     }
 
     async fn read_chunk(&mut self, max: usize) -> Result<Option<Vec<u8>>, CommunicationError> {
@@ -75,6 +88,11 @@ impl TransportRecvStream for wtransport::RecvStream {
             Ok(None) => Ok(None),
             Err(_) => Err(CommunicationError::StreamError),
         }
+    }
+
+    fn stop(self, code: u32) -> Result<(), CommunicationError> {
+        wtransport::RecvStream::stop(self, wtransport::VarInt::from_u32(code));
+        Ok(())
     }
 }
 

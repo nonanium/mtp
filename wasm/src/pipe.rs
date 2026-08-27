@@ -1,9 +1,6 @@
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
 
-use crate::error::js_error;
-use crate::transport::release_writer_lock;
+use crate::transport::{BrowserRecvStream, BrowserSendStream, log_stream_error_code};
 
 #[wasm_bindgen(typescript_custom_section)]
 const PIPE_TS: &str = r#"
@@ -23,54 +20,41 @@ export interface PipeReader {
 
 #[wasm_bindgen]
 pub struct PipeWriter {
-    writer: JsValue,
+    stream: BrowserSendStream,
     pipe_id: u32,
 }
 
 impl PipeWriter {
-    pub fn new(writer: JsValue, pipe_id: u32) -> Self {
-        Self { writer, pipe_id }
+    pub(crate) fn new(stream: BrowserSendStream, pipe_id: u32) -> Self {
+        Self { stream, pipe_id }
+    }
+}
+
+impl Drop for PipeWriter {
+    fn drop(&mut self) {
+        self.stream.release();
     }
 }
 
 #[wasm_bindgen]
 impl PipeWriter {
     pub async fn write(&mut self, data: &[u8]) -> Result<(), JsValue> {
-        let chunk = js_sys::Uint8Array::from(data);
-        let write_fn = js_sys::Reflect::get(&self.writer, &JsValue::from_str("write"))
-            .map_err(|_| js_error("missing write"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("write not a function"))?;
-        let write_promise = write_fn
-            .call1(&self.writer, &chunk)
-            .map_err(|e| js_error(format!("write failed: {:?}", e)))?;
-        JsFuture::from(write_promise.unchecked_into::<js_sys::Promise>()).await?;
-        Ok(())
+        self.stream.write_all(data).await
     }
 
-    pub async fn close(self) -> Result<(), JsValue> {
-        let close_fn = js_sys::Reflect::get(&self.writer, &JsValue::from_str("close"))
-            .map_err(|_| js_error("missing close"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("close not a function"))?;
-        let close_promise = close_fn
-            .call0(&self.writer)
-            .map_err(|e| js_error(format!("close failed: {:?}", e)))?;
-        if let Err(e) = JsFuture::from(close_promise.unchecked_into::<js_sys::Promise>()).await {
-            crate::transport::log_stream_error_code(&e, "pipe writer close");
+    pub async fn close(mut self) -> Result<(), JsValue> {
+        let result = self.stream.finish().await;
+        if let Err(error) = &result {
+            log_stream_error_code(error, "pipe writer close");
         }
-        release_writer_lock(&self.writer);
-        Ok(())
+        self.stream.release();
+        result
     }
 
     pub fn abort(&mut self) -> Result<(), JsValue> {
-        let abort_fn = js_sys::Reflect::get(&self.writer, &JsValue::from_str("abort"))
-            .map_err(|_| js_error("missing abort"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("abort not a function"))?;
-        let _ = abort_fn.call0(&self.writer);
-        release_writer_lock(&self.writer);
-        Ok(())
+        let result = self.stream.reset(0);
+        self.stream.release();
+        result
     }
 
     pub fn pipe_id(&self) -> u32 {
@@ -80,19 +64,26 @@ impl PipeWriter {
 
 #[wasm_bindgen]
 pub struct PipeReader {
-    reader: JsValue,
+    stream: BrowserRecvStream,
     description: String,
     pipe_id: u32,
     pending: Vec<u8>,
+    finished: bool,
 }
 
 impl PipeReader {
-    pub fn new(reader: JsValue, pipe_id: u32, description: String, pending: Vec<u8>) -> Self {
+    pub(crate) fn new(
+        stream: BrowserRecvStream,
+        pipe_id: u32,
+        description: String,
+        pending: Vec<u8>,
+    ) -> Self {
         Self {
-            reader,
+            stream,
             pipe_id,
             description,
             pending,
+            finished: false,
         }
     }
 }
@@ -105,27 +96,18 @@ impl PipeReader {
             return Ok(js_sys::Uint8Array::from(&data[..]).into());
         }
 
-        let read_fn = js_sys::Reflect::get(&self.reader, &JsValue::from_str("read"))
-            .map_err(|_| js_error("missing read"))?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| js_error("read not a function"))?;
-        let promise = read_fn
-            .call0(&self.reader)
-            .map_err(|_| js_error("read call failed"))?
-            .unchecked_into::<js_sys::Promise>();
-        let result = JsFuture::from(promise).await?;
-
-        let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        if done {
+        if self.finished {
             return Ok(JsValue::NULL);
         }
 
-        let value = js_sys::Reflect::get(&result, &JsValue::from_str("value"))
-            .map_err(|_| js_error("missing value"))?;
-        Ok(js_sys::Uint8Array::new(&value).into())
+        match self.stream.read_chunk().await? {
+            Some(value) => Ok(js_sys::Uint8Array::from(&value[..]).into()),
+            None => {
+                self.stream.release();
+                self.finished = true;
+                Ok(JsValue::NULL)
+            }
+        }
     }
 
     pub fn pipe_id(&self) -> u32 {
@@ -134,5 +116,11 @@ impl PipeReader {
 
     pub fn description(&self) -> String {
         self.description.clone()
+    }
+}
+
+impl Drop for PipeReader {
+    fn drop(&mut self) {
+        self.stream.release();
     }
 }
