@@ -6,3 +6,4 @@ dist/
 *.tgz
 wasm/pkg/
 web_client/
+.direnv
