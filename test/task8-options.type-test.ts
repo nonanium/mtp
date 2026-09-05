@@ -4,6 +4,7 @@ import type {
   MTPOpenRelayMetadataOptions,
   MTPOpenRelayContentOptions,
   MTPClient,
+  MTPRelayTarget,
   MTPSendProtectedOptions,
   MTPSendSealedRelayOptions,
 } from "../src/sdk/index.js";
@@ -31,11 +32,21 @@ const protectedOptions: MTPSendProtectedOptions = {
 
 const relayOptions: MTPSendSealedRelayOptions = {
   finalRecipientId: 2,
-  nextHopId: 3,
+  nextHop: { kind: "iota", id: 3 },
   metadataRecipients: recipients,
   contentRecipients: recipients,
   // @ts-expect-error sealed relay frames never expose an outer sender
   sender: 1,
+};
+
+const relayTarget: MTPRelayTarget = { kind: "user", id: 3 };
+
+const legacyRelayTarget: MTPSendSealedRelayOptions = {
+  finalRecipientId: 2,
+  // @ts-expect-error relay routes require a typed target
+  nextHopId: 3,
+  metadataRecipients: recipients,
+  contentRecipients: recipients,
 };
 
 const metadataValues: MTPDataValueInput[] = [
@@ -61,6 +72,11 @@ const contentReceiveOptions: MTPOpenRelayContentOptions = {
 declare const client: MTPClient;
 void client.sendProtected("ProtectedMessage", "scalar protected content", protectedOptions);
 void client.sendSealedRelay("ProtectedMessage", new Uint8Array([1, 2, 3]), relayOptions);
+void client.requestSealedRelay(
+  "ProtectedMessage",
+  new Uint8Array([1, 2, 3]),
+  relayOptions,
+);
 
 // @ts-expect-error sealed relay subscriptions accept application type names, not numeric IDs
 client.subscribeSealedRelay(32, () => {});
@@ -76,3 +92,5 @@ void metadataValues;
 void relayReceiveOptions;
 void contentReceiveOptions;
 void clientOptions;
+void relayTarget;
+void legacyRelayTarget;

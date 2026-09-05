@@ -129,6 +129,7 @@ export type MTPLogEvent =
       type: string;
       data: unknown;
       direction?: "send" | "recv";
+      relay?: MTPRelayLogDetails;
     }
   | {
       hint: "error";
@@ -137,6 +138,13 @@ export type MTPLogEvent =
       data?: unknown;
       direction?: "send" | "recv";
     };
+
+export interface MTPRelayLogDetails {
+  signerId: bigint;
+  finalRecipientId: bigint;
+  messageId: string;
+  createdAt: bigint;
+}
 
 export type ParsedFrame = RawBindings.ParsedFrame;
 
@@ -396,8 +404,12 @@ export type MTPSignerKeyResolver = (
   signerId: bigint,
 ) => MTPResolvedSignerKeys | Promise<MTPResolvedSignerKeys>;
 
+export type MTPRelayTarget =
+  | { kind: "user"; id: bigint | number | string }
+  | { kind: "iota"; id: bigint | number | string };
+
 export interface MTPRelayPlan {
-  nextHopId: bigint | number | string;
+  nextHop: MTPRelayTarget;
   finalRecipientId: bigint | number | string;
   metadataRecipients: MTPKeyMaterialInput[];
   contentRecipients: MTPKeyMaterialInput[];
@@ -421,6 +433,28 @@ export interface MTPSendSealedRelayOptions extends MTPRelayPlan {
   signatureSuite?: MTPProtectionSignatureSuite;
   /** Semantic protected/relay limits applied before the WASM boundary. */
   limits?: MTPReceiveLimits;
+}
+
+const RELAY_TARGET_ID_MASK = (1n << 48n) - 1n;
+const RELAY_USER_TARGET_KIND = 0x4000_0000_0000_0000n;
+const RELAY_IOTA_TARGET_KIND = 0x8000_0000_0000_0000n;
+
+/*
+ * The route target namespace is part of the relay wire value. Keeping this
+ * conversion in the protocol SDK prevents application callers from encoding
+ * u64 route values with JavaScript number operations.
+ */
+export function encodeMTPRelayTarget(target: MTPRelayTarget): bigint {
+  const id = inputU64(target.id, "nextHop.id");
+  if (id === 0n || id > RELAY_TARGET_ID_MASK) {
+    throw new RangeError("nextHop.id must be a non-zero 48-bit integer");
+  }
+
+  return (
+    (target.kind === "user"
+      ? RELAY_USER_TARGET_KIND
+      : RELAY_IOTA_TARGET_KIND) | id
+  );
 }
 
 export interface MTPRelayVerificationOptions {
@@ -611,6 +645,12 @@ function createMessageId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
     "",
   );
+}
+
+function createRequestId(): number {
+  const value = new Uint32Array(1);
+  globalThis.crypto.getRandomValues(value);
+  return value[0] || 1;
 }
 
 function emit(
@@ -953,6 +993,7 @@ function validateOptions(options) {
 }
 
 export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
+  #nextSealedRelayRequestId = createRequestId();
   static readonly crypto = crypto;
   static readonly codec = codec;
 
@@ -961,6 +1002,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   readonly #protocol: MTPProtocol<Registry> | undefined;
   readonly #protectedReplayGuard = new InMemoryReplayGuard();
   readonly #relayReplayGuard = new InMemoryReplayGuard();
+  #sealedRelayContentSubscriptions = 0;
   readonly raw: MTPRaw;
 
   readonly crypto = MTPClient.crypto;
@@ -1538,6 +1580,12 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   }
 
   #handleFrame(frame) {
+    // Content relay subscriptions log the normalized inner message after
+    // authenticated opening. Avoid logging the encrypted outer frame as an
+    // application message as well while one is active.
+    if (frame.type === "Relay" && this.#sealedRelayContentSubscriptions > 0) {
+      return;
+    }
     if (isErrorType(frame.type)) {
       emit(this.#options.logger, {
         hint: "error",
@@ -2223,6 +2271,63 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     data: MTPDataValueInput,
     options: MTPSendSealedRelayOptions,
   ): Promise<void> {
+    await this.send(this.#buildSealedRelayFrame(type, data, options));
+  }
+
+  /** Send a sealed relay and await the response from its next hop. */
+  async requestSealedRelay(
+    type: MTPCommunicationType,
+    data: MTPDataValueInput,
+    options: MTPSendSealedRelayOptions,
+    requestOptions?: MTPRequestOptions,
+  ): Promise<ParsedFrame> {
+    return this.request(
+      this.#addSealedRelayRequestId(
+        this.#buildSealedRelayFrame(type, data, options),
+      ),
+      undefined,
+      requestOptions,
+    );
+  }
+
+  #addSealedRelayRequestId(frame: Uint8Array): Uint8Array {
+    const parsed = this.raw.bindings.parse_frame(frame);
+    const data = parsed.data as { encoded?: unknown };
+    if (!(data.encoded instanceof Uint8Array)) {
+      throw new Error("sealed relay frame payload is not encrypted");
+    }
+    const bounded = (
+      this.raw.bindings as typeof bindings & {
+        build_frame_with_payload_with_limits?: (
+          type: string,
+          payload: Uint8Array,
+          options: MTPCodecOptions,
+          limits: MTPEncodeLimits,
+        ) => Uint8Array;
+      }
+    ).build_frame_with_payload_with_limits;
+    if (!bounded) {
+      throw new Error("bounded WASM frame encoding is unavailable; rebuild mtp-wasm");
+    }
+    const id = this.#nextSealedRelayRequestId;
+    this.#nextSealedRelayRequestId =
+      id === 0xffff_ffff ? 1 : id + 1;
+    return bounded(
+      "Relay",
+      data.encoded,
+      {
+        id,
+        ...(parsed.receiver == null ? {} : { receiver: parsed.receiver }),
+      },
+      this.#encodeLimits(),
+    );
+  }
+
+  #buildSealedRelayFrame(
+    type: MTPCommunicationType,
+    data: MTPDataValueInput,
+    options: MTPSendSealedRelayOptions,
+  ): Uint8Array {
     const messageType = assertApplicationCommunicationType(type);
     const identity = resolveProtectionIdentity(
       options.identity,
@@ -2232,7 +2337,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       options.finalRecipientId,
       "finalRecipientId",
     );
-    const nextHopId = inputU64(options.nextHopId, "nextHopId");
+    const nextHopId = encodeMTPRelayTarget(options.nextHop);
     const metadataRecipients = normalizeRecipientBundles(
       options.metadataRecipients,
       "metadataRecipients",
@@ -2302,7 +2407,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       contentRecipients,
       builderLimits,
     );
-    await this.send(frame);
+    return frame;
   }
 
   subscribeSealedRelay(
@@ -2374,6 +2479,18 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
           ) {
             return;
           }
+          emit(this.#options.logger, {
+            hint: "info",
+            type: opened.type,
+            data: opened.data,
+            direction: "recv",
+            relay: {
+              signerId: opened.signerId,
+              finalRecipientId: opened.finalRecipientId,
+              messageId: opened.messageId,
+              createdAt: opened.createdAt,
+            },
+          });
           const parsedFrame: ParsedFrame = {
             ...frame,
             type: opened.type,
@@ -2393,7 +2510,14 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       },
     );
 
-    return () => this.raw.client.unsubscribe(sub);
+    this.#sealedRelayContentSubscriptions += 1;
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      this.#sealedRelayContentSubscriptions -= 1;
+      this.raw.client.unsubscribe(sub);
+    };
   }
 
   /**

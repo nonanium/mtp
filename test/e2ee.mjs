@@ -2483,9 +2483,11 @@ await describe("Relay API invariants", async () => {
         [publicBundle(recipientKeyring)],
       ),
     );
+    const logEvents = [];
     const client = await sdk.MTPClient.create({
       url: "https://example.invalid",
       pings: false,
+      logger: (event) => logEvents.push(event),
     });
     const originalSubscribe = client.raw.client.subscribe;
     const originalUnsubscribe = client.raw.client.unsubscribe;
@@ -2528,6 +2530,23 @@ await describe("Relay API invariants", async () => {
       assert.deepEqual(received[0].parsedFrame.data, {
         ExampleType: "subscription",
       });
+      assert.deepEqual(
+        logEvents.filter(({ direction }) => direction === "recv"),
+        [
+          {
+            hint: "info",
+            type: "ProtectedMessage",
+            data: { ExampleType: "subscription" },
+            direction: "recv",
+            relay: {
+              signerId: 11n,
+              finalRecipientId: 42n,
+              messageId: "message-subscription",
+              createdAt: 789n,
+            },
+          },
+        ],
+      );
       await subscribedHandler(frame);
       assert.equal(received.length, 1);
 
