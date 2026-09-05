@@ -943,7 +943,7 @@ await describe("Protected send APIs", async () => {
       { ExampleType: "default-relay" },
       {
         finalRecipientId: 22n,
-        nextHopId: 7n,
+        nextHop: { kind: "iota", id: 7n },
         identity: { signerId: 11n, keyring: signerKeyring },
         metadataRecipients: [recipientPublicKey],
         contentRecipients: [recipientPublicKey],
@@ -1044,7 +1044,7 @@ await describe("Protected send APIs", async () => {
       { ExampleType: "content" },
       {
         finalRecipientId: 42n,
-        nextHopId: 7n,
+        nextHop: { kind: "iota", id: 7n },
         identity: { signerId: 11n, keyring: signerKeyring },
         metadataRecipients: [publicBundle(metadataKeyring)],
         contentRecipients: [publicBundle(contentKeyring)],
@@ -1057,7 +1057,10 @@ await describe("Protected send APIs", async () => {
     const frame = bindings.parse_frame(frames[0]);
     assert.equal(frame.type, "Relay");
     assert.equal(frame.sender, undefined);
-    assert.equal(frame.receiver, 7n);
+    assert.equal(
+      frame.receiver,
+      sdk.encodeMTPRelayTarget({ kind: "iota", id: 7n }),
+    );
 
     const metadataBytes = bindings.decrypt_data_value(
       frame.data.encoded,
@@ -1091,7 +1094,7 @@ await describe("Protected send APIs", async () => {
       () =>
         client.sendSealedRelay("Relay", { ExampleType: "reserved" }, {
           finalRecipientId: 42n,
-          nextHopId: 7n,
+          nextHop: { kind: "iota", id: 7n },
           identity: { signerId: 11n, keyring: signerKeyring },
           metadataRecipients: [publicBundle(metadataKeyring)],
           contentRecipients: [publicBundle(contentKeyring)],
@@ -1118,7 +1121,7 @@ await describe("Protected send APIs", async () => {
     const sendAndOpen = async (data, metadata, includeMetadata) => {
       const options = {
         finalRecipientId: 42n,
-        nextHopId: 42n,
+        nextHop: { kind: "iota", id: 42n },
         identity: { signerId: 11n, keyring: signerKeyring },
         metadataRecipients: [publicBundle(recipientKeyring)],
         contentRecipients: [publicBundle(recipientKeyring)],

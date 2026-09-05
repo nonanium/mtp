@@ -236,7 +236,7 @@ const data = { Content: "hello" };
 
 await client.sendSealedRelay("ProtectedMessage", data, {
   finalRecipientId,
-  nextHopId,
+  nextHop: { kind: "iota", id: nextHopId },
   metadataRecipients: [
     relayPublicKey,
     recipientPublicKey,
