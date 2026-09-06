@@ -29,9 +29,12 @@ export interface VitePlugin {
 const packageRoot = process.env.MTP_PACKAGE_ROOT
   ? path.resolve(process.env.MTP_PACKAGE_ROOT)
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const sourceRoot = await pathExists(path.join(packageRoot, ".rust", "Cargo.toml"))
-  ? path.join(packageRoot, ".rust")
-  : path.resolve(packageRoot, "..");
+const repositoryRoot = path.resolve(packageRoot, "..");
+const sourceRoot = await pathExists(
+  path.join(repositoryRoot, "bindings/wasm/Cargo.toml"),
+)
+  ? repositoryRoot
+  : path.join(packageRoot, ".rust");
 const rawEntryName = "mtp_wasm.js";
 const wasmEntryName = "mtp_wasm_bg.wasm";
 const typeMapEntryName = "mtp_type_map.js";
@@ -249,10 +252,58 @@ export async function writeTypeMapModule(outDir, typeMapsPath) {
   return source;
 }
 
+const wasmWorkspaceMembers = [
+  "bindings/wasm",
+  "codec",
+  "common",
+  "core",
+  "crypto",
+  "type-map",
+];
+const wasmWorkspaceDependencies = new Set([
+  "mtp-codec",
+  "mtp-common",
+  "mtp-core",
+  "mtp-crypto",
+  "mtp-type-map",
+]);
+
+function manifestSection(source: string, name: string) {
+  const header = `[${name}]`;
+  const start = source.indexOf(header);
+  if (start < 0) {
+    throw new Error(`Cargo manifest is missing ${header}`);
+  }
+  const next = source.indexOf("\n[", start + header.length);
+  return source.slice(start, next < 0 ? source.length : next).trim();
+}
+
+export function wasmWorkspaceManifest(source: string) {
+  const workspace = manifestSection(source, "workspace");
+  const resolver = workspace.match(/^resolver\s*=\s*"([^"]+)"/m)?.[1] ?? "3";
+  const workspacePackage = manifestSection(source, "workspace.package");
+  const dependencies = manifestSection(source, "workspace.dependencies")
+    .split("\n")
+    .filter(
+      (line, index) =>
+        index === 0 ||
+        wasmWorkspaceDependencies.has(line.match(/^([^\s=]+)\s*=/)?.[1] ?? ""),
+    )
+    .join("\n");
+  const members = wasmWorkspaceMembers
+    .map((member) => `    ${JSON.stringify(member)},`)
+    .join("\n");
+  const defaultMembers = wasmWorkspaceMembers
+    .filter((member) => member !== "bindings/wasm")
+    .map((member) => `    ${JSON.stringify(member)},`)
+    .join("\n");
+
+  return `[workspace]\nmembers = [\n${members}\n]\ndefault-members = [\n${defaultMembers}\n]\nresolver = "${resolver}"\n\n${workspacePackage}\n\n${dependencies}\n`;
+}
+
 export async function copyWasmBuildInputs(buildRoot) {
   const inputs = [
     "Cargo.lock",
-    "Cargo.toml",
     "bindings/wasm",
     "common",
     "core",
@@ -269,6 +320,12 @@ export async function copyWasmBuildInputs(buildRoot) {
 
     await fs.cp(source, path.join(buildRoot, input), { recursive: true });
   }
+
+  const rootManifest = await fs.readFile(path.join(sourceRoot, "Cargo.toml"), "utf8");
+  await fs.writeFile(
+    path.join(buildRoot, "Cargo.toml"),
+    wasmWorkspaceManifest(rootManifest),
+  );
 }
 
 async function runWasmPack({ outDir, typeMapsPath, release, wasmPackArgs }) {

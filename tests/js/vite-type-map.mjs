@@ -21,6 +21,7 @@ import {
   generateTypeMapModule,
   hashPackageInputs,
   parseTypeMapYaml,
+  wasmWorkspaceManifest,
 } from "../../sdk/dist/vite/index.js";
 
 const run = promisify(execFile);
@@ -101,6 +102,7 @@ try {
     "bindings/wasm/Cargo.toml",
     "bindings/wasm/src/lib.rs",
     "common/Cargo.toml",
+    "core/Cargo.toml",
     "codec/Cargo.toml",
     "crypto/Cargo.toml",
     "type-map/Cargo.toml",
@@ -121,6 +123,24 @@ try {
     await readFile(path.join(temporaryBuildRoot, "type-map/build.rs"), "utf8"),
     /include_str!\("reserved\.json"\)/,
   );
+  const temporaryManifest = await readFile(
+    path.join(temporaryBuildRoot, "Cargo.toml"),
+    "utf8",
+  );
+  assert.equal(
+    temporaryManifest,
+    wasmWorkspaceManifest(
+      await readFile(path.join(repositoryRoot, "Cargo.toml"), "utf8"),
+    ),
+  );
+  assert.match(temporaryManifest, /^\[workspace\]$/m);
+  assert.match(temporaryManifest, /^\[workspace\.package\]$/m);
+  assert.match(temporaryManifest, /^\[workspace\.dependencies\]$/m);
+  assert.doesNotMatch(temporaryManifest, /^\[(package|dependencies|features)\]$/m);
+  assert.doesNotMatch(temporaryManifest, /^\s*"\.",?$/m);
+  await run("cargo", ["metadata", "--format-version", "1", "--no-deps"], {
+    cwd: temporaryBuildRoot,
+  });
 } finally {
   await rm(temporaryBuildRoot, { recursive: true, force: true });
 }
