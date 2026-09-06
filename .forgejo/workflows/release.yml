@@ -70,6 +70,7 @@ jobs:
           TITLE: ${{ steps.version.outputs.title }}
           PRERELEASE: ${{ steps.version.outputs.prerelease }}
           PACKAGE: ${{ steps.version.outputs.package }}
+          PACKAGE_NAME: mtp-${{ steps.version.outputs.version }}.tgz
           DESCRIPTION: ${{ inputs.description }}
         run: |
           set -eu
@@ -101,6 +102,6 @@ jobs:
             RELEASE_ID="$(echo "$RELEASE_JSON" | jq -r .id)"
           fi
 
-          curl -fsS -X POST "$API/repos/$REPO/releases/$RELEASE_ID/assets?name=$PACKAGE" \
+          curl -fsS -X POST "$API/repos/$REPO/releases/$RELEASE_ID/assets?name=$PACKAGE_NAME" \
             -H "Authorization: token $TOKEN" \
             -F "attachment=@$PACKAGE"
