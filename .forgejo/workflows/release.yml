@@ -23,14 +23,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build all
-        run: pnpm build:all
-
-      - name: Pack npm package
-        run: cd sdk && npm pack
+      - name: Verify, build, and pack
+        run: nix run .#build-all
 
       - name: Read release metadata
         id: version
