@@ -191,7 +191,8 @@ console.log(message.type, message.signerId, message.messageId, message.data);
 
 `protectedVersion`, `finalRecipientId`, `signerId`, `messageId`, and `createdAt`
 are taken from the verified protected envelope. `outerSender`, when present,
-must equal the authenticated signer.
+must equal the authenticated signer. `messageId` is an unsigned 128-bit
+`bigint`.
 Protected application data may be any supported MTP `DataValue`, including
 scalar, byte, array, and container values. Direct opening uses a bounded
 process-local duplicate-suppression guard by default. The bounded cache can
@@ -565,6 +566,8 @@ await writer.close();
 ```
 
 `writer.close()` sends a QUIC stream FIN. `writer.abort()` resets the stream abruptly. Each `write` resolves when the chunk has been handed to the transport; it does not wait for the peer to consume it.
+
+Call `handle.cancel()` to withdraw a request before it is accepted and opened. This sends a `PipeAbort` control frame; use `writer.abort()` after a writer exists.
 
 ### Encrypted Pipe Records
 

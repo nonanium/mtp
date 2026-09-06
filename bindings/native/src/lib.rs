@@ -14,6 +14,7 @@ pub use connection::{
     DecodeRejectionClass, DecodeRejectionCounters, DecodeRejectionCounts, Policy, Receiver,
     SendMode, Sender, classify_decode_error,
 };
+pub use mtp_common::{PingId, PipeId, RequestId};
 pub use mtp_core;
 pub use mtp_core::{GenericReceiver, GenericSender};
 

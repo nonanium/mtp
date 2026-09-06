@@ -14,13 +14,14 @@ use mtp_codec::{CommunicationValue, DecodeLimits, EncodeLimits};
 use crate::client_pipe::{self, PendingRequest};
 use crate::error::js_error;
 use crate::transport::WasmTransport;
+use mtp_common::{RequestId, RequestTracker};
 
 mod authentication;
 mod connection;
 mod dispatch;
 mod pipes;
 mod receive;
-use dispatch::{PendingPing, PingTimer, wait_for_timeout};
+use dispatch::{PingTimer, PingTracker, wait_for_timeout};
 
 const DEFAULT_REQUEST_TIMEOUT_MS: u32 = 30_000;
 const MAX_SAFE_JS_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -88,13 +89,12 @@ pub struct WasmClient {
     pub(crate) on_error: js_sys::Function,
     subscriptions: Rc<RefCell<HashMap<u32, (String, js_sys::Function)>>>,
     next_subscription_id: Rc<Cell<u32>>,
-    pending_requests: Rc<RefCell<HashMap<u32, PendingRequest>>>,
-    expired_requests: Rc<RefCell<HashMap<u32, f64>>>,
+    pending_requests: Rc<RefCell<RequestTracker<PendingRequest>>>,
     ping_timer: Rc<RefCell<Option<PingTimer>>>,
-    pending_pings: Rc<RefCell<HashMap<u32, PendingPing>>>,
+    ping_tracker: Rc<RefCell<PingTracker>>,
     ping_ms: Rc<Cell<Option<f64>>>,
     pending_pipe_creations: client_pipe::PendingPipeCreations,
-    expired_pipe_creations: Rc<RefCell<HashMap<u32, f64>>>,
+    expired_pipe_creations: Rc<RefCell<HashMap<mtp_common::PipeId, f64>>>,
     pending_pipes: client_pipe::PendingPipes,
     connection_client_id: Rc<Cell<u64>>,
     on_pipe_request: Rc<RefCell<Option<js_sys::Function>>>,
@@ -132,10 +132,9 @@ impl WasmClient {
             on_error: on_error.unwrap_or_else(noop),
             subscriptions: Rc::new(RefCell::new(HashMap::new())),
             next_subscription_id: Rc::new(Cell::new(1)),
-            pending_requests: Rc::new(RefCell::new(HashMap::new())),
-            expired_requests: Rc::new(RefCell::new(HashMap::new())),
+            pending_requests: Rc::new(RefCell::new(RequestTracker::default())),
             ping_timer: Rc::new(RefCell::new(None)),
-            pending_pings: Rc::new(RefCell::new(HashMap::new())),
+            ping_tracker: Rc::new(RefCell::new(PingTracker::default())),
             ping_ms: Rc::new(Cell::new(None)),
             pending_pipe_creations: Rc::new(RefCell::new(HashMap::new())),
             expired_pipe_creations: Rc::new(RefCell::new(HashMap::new())),
@@ -219,13 +218,12 @@ impl WasmClient {
         .map_err(|e| js_error(format!("parse request: {}", e)))?;
         let request_id = request
             .id()
-            .ok_or_else(|| js_error("request frame must contain an id"))?;
-        if request_id == 0 {
-            return Err(js_error("request frame must have a non-zero id"));
-        }
-        if client_pipe::is_expired_request(&self.expired_requests, request_id) {
+            .and_then(RequestId::new)
+            .ok_or_else(|| js_error("request frame must have a non-zero id"))?;
+        if client_pipe::is_expired_request(&self.pending_requests, request_id) {
             return Err(js_error(format!(
-                "request id {request_id} recently timed out; use a new request id"
+                "request id {} recently timed out; use a new request id",
+                request_id.get()
             )));
         }
 
@@ -233,20 +231,24 @@ impl WasmClient {
         let token = Rc::new(());
         {
             let mut pending = self.pending_requests.borrow_mut();
-            if pending.contains_key(&request_id) {
+            if pending.pending.contains_key(&request_id) {
                 return Err(js_error(format!(
-                    "request id {request_id} is already pending"
+                    "request id {} is already pending",
+                    request_id.get()
                 )));
             }
-            pending.insert(
-                request_id,
-                PendingRequest {
-                    generation,
-                    token: token.clone(),
-                    response_type,
-                    sender,
-                },
-            );
+            pending
+                .insert(
+                    request_id,
+                    PendingRequest {
+                        generation,
+                        token: token.clone(),
+                        response_type,
+                        sender,
+                    },
+                    js_sys::Date::now(),
+                )
+                .map_err(|_| js_error("request id is already pending"))?;
         }
 
         let timeout_ms = timeout_ms.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
@@ -268,15 +270,10 @@ impl WasmClient {
                 result
             },
             result = timeout => {
-                client_pipe::expire_pending_request(
-                    &self.pending_requests,
-                    &self.expired_requests,
-                    request_id,
-                    &token,
-                );
+                client_pipe::expire_pending_request(&self.pending_requests, request_id, &token);
                 result?;
                 Err(js_error(format!(
-                    "request {request_id} timed out after {timeout_ms}ms"
+                    "request {} timed out after {timeout_ms}ms", request_id.get()
                 )))
             },
         }

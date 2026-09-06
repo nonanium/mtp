@@ -1,3 +1,4 @@
+use mtp_common::PipeId;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -63,17 +64,26 @@ impl<S: tokio::io::AsyncWrite + Send + Unpin> AsyncWrite for PipeWriter<S> {
 pub struct PipeReader<R = wtransport::RecvStream> {
     pub(crate) stream: R,
     pub(crate) description: String,
-    pub(crate) pipe_id: u32,
+    pub(crate) pipe_id: PipeId,
 }
 
 impl<R> PipeReader<R> {
     #[doc(hidden)]
-    pub fn from_parts(stream: R, description: String, pipe_id: u32) -> Self {
+    pub fn from_parts_id(stream: R, description: String, pipe_id: PipeId) -> Self {
         Self {
             stream,
             description,
             pipe_id,
         }
+    }
+
+    #[doc(hidden)]
+    #[deprecated(note = "use from_parts_id with PipeId")]
+    pub fn from_parts(stream: R, description: String, pipe_id: u32) -> Self {
+        let Some(pipe_id) = PipeId::new(pipe_id) else {
+            panic!("pipe reader requires a non-zero pipe ID");
+        };
+        Self::from_parts_id(stream, description, pipe_id)
     }
 
     pub fn into_inner(self) -> R {
@@ -84,8 +94,13 @@ impl<R> PipeReader<R> {
         &self.description
     }
 
-    pub fn pipe_id(&self) -> u32 {
+    pub fn pipe_id_value(&self) -> PipeId {
         self.pipe_id
+    }
+
+    #[deprecated(note = "use pipe_id_value")]
+    pub fn pipe_id(&self) -> u32 {
+        self.pipe_id.get()
     }
 }
 

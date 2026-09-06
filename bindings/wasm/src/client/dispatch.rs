@@ -5,17 +5,15 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 use crate::client::ConnectionState;
-use crate::client_pipe::{self, PendingRequest};
+use crate::client_pipe::PendingRequest;
+use mtp_common::{PingId, RequestId, RequestTracker, RouteResult};
 
 pub(super) struct PingTimer {
     pub(super) id: i32,
     pub(super) closure: Closure<dyn FnMut()>,
 }
 
-pub(super) struct PendingPing {
-    pub(super) generation: u32,
-    pub(super) sent_at: f64,
-}
+pub(super) type PingTracker = mtp_common::PingTracker<f64>;
 
 pub(super) fn frame_property(frame: &JsValue, key: &str) -> Option<JsValue> {
     js_sys::Reflect::get(frame, &JsValue::from_str(key))
@@ -41,62 +39,40 @@ pub(super) fn route_incoming_frame(
     generation: u32,
     on_message: &js_sys::Function,
     subscriptions: &Rc<RefCell<HashMap<u32, (String, js_sys::Function)>>>,
-    pending_requests: &Rc<RefCell<HashMap<u32, PendingRequest>>>,
-    expired_requests: &Rc<RefCell<HashMap<u32, f64>>>,
-    pending_pings: &Rc<RefCell<HashMap<u32, PendingPing>>>,
+    pending_requests: &Rc<RefCell<RequestTracker<PendingRequest>>>,
+    ping_tracker: &Rc<RefCell<PingTracker>>,
     ping_ms: &Rc<Cell<Option<f64>>>,
 ) {
     let message_type = frame_type(frame);
 
-    if message_type.as_deref() == Some("Pong")
-        && let Some(ping_id) = frame_id(frame)
-    {
-        let sent_at = pending_pings
-            .borrow()
-            .get(&ping_id)
-            .filter(|ping| ping.generation == generation)
-            .map(|ping| ping.sent_at);
-        if let Some(sent_at) = sent_at {
-            pending_pings.borrow_mut().remove(&ping_id);
+    if message_type.as_deref() == Some("Pong") {
+        if let Some(ping_id) = frame_id(frame).and_then(PingId::new)
+            && let Some(sent_at) = ping_tracker.borrow_mut().received(ping_id)
+        {
             ping_ms.set(Some(js_sys::Date::now() - sent_at));
-            return;
         }
+        return;
     }
 
-    if let Some(request_id) = frame_id(frame) {
-        let pending = {
-            let mut requests = pending_requests.borrow_mut();
-            if requests
-                .get(&request_id)
-                .is_some_and(|request| request.generation == generation)
-            {
-                requests.remove(&request_id)
-            } else {
-                None
-            }
-        };
-        if let Some(pending) = pending {
-            let type_matches = pending
-                .response_type
-                .as_ref()
-                .zip(message_type.as_ref())
-                .map(|(expected, actual)| expected == actual)
-                .unwrap_or(true);
-            if type_matches {
-                let _ = pending.sender.send(Ok(frame.clone()));
-            } else {
-                let actual = message_type.clone().unwrap_or_else(|| "unknown".into());
-                let _ = pending.sender.send(Err(crate::error::js_error(format!(
-                    "unexpected response type: expected {}, got {}",
-                    pending.response_type.unwrap_or_else(|| "unknown".into()),
-                    actual
-                ))));
-            }
+    let route = pending_requests.borrow_mut().route(
+        frame_id(frame).and_then(RequestId::new),
+        frame.clone(),
+        |request| {
+            request.generation == generation
+                && request
+                    .response_type
+                    .as_ref()
+                    .is_none_or(|expected| message_type.as_ref() == Some(expected))
+        },
+        js_sys::Date::now(),
+    );
+    match route {
+        RouteResult::Response { frame, pending } => {
+            let _ = pending.sender.send(Ok(frame));
             return;
         }
-        if client_pipe::consume_expired_request(expired_requests, request_id) {
-            return;
-        }
+        RouteResult::Expired => return,
+        RouteResult::Application(_) => {}
     }
 
     let _ = on_message.call1(&JsValue::NULL, frame);
@@ -128,11 +104,14 @@ pub(super) fn stop_ping_timer(ping_timer: &Rc<RefCell<Option<PingTimer>>>) {
 }
 
 pub(super) fn reject_pending_requests(
-    pending_requests: &Rc<RefCell<HashMap<u32, PendingRequest>>>,
+    pending_requests: &Rc<RefCell<RequestTracker<PendingRequest>>>,
     message: &str,
 ) {
-    let pending = std::mem::take(&mut *pending_requests.borrow_mut());
-    for (_, pending) in pending {
+    let pending = pending_requests
+        .borrow_mut()
+        .take_pending()
+        .collect::<Vec<_>>();
+    for pending in pending {
         let _ = pending.sender.send(Err(crate::error::js_error(message)));
     }
 }
@@ -180,5 +159,122 @@ pub(super) fn set_shared_state(
             .is_err()
     {
         pending_state_callbacks.borrow_mut().pop_back();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use futures_channel::oneshot;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_test::*;
+
+    use super::{PingTracker, route_incoming_frame};
+    use crate::client_pipe::PendingRequest;
+    use mtp_common::{PingId, RequestId, RequestTracker};
+
+    #[test]
+    fn matching_pong_resets_consecutive_misses() {
+        let mut tracker = PingTracker::default();
+        tracker.sent(PingId::new(10).unwrap(), 1.0);
+        assert_eq!(tracker.begin_round(), 1);
+
+        tracker.sent(PingId::new(11).unwrap(), 2.0);
+        assert_eq!(tracker.received(PingId::new(11).unwrap()), Some(2.0));
+
+        tracker.sent(PingId::new(12).unwrap(), 3.0);
+        assert_eq!(tracker.begin_round(), 1);
+    }
+
+    #[test]
+    fn stale_pong_does_not_acknowledge_current_round() {
+        let mut tracker = PingTracker::default();
+        tracker.sent(PingId::new(10).unwrap(), 1.0);
+        assert_eq!(tracker.begin_round(), 1);
+        tracker.sent(PingId::new(11).unwrap(), 2.0);
+
+        assert_eq!(tracker.received(PingId::new(10).unwrap()), None);
+        assert_eq!(tracker.begin_round(), 2);
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn same_id_unexpected_type_is_routed_without_consuming_request() {
+        let callback_count = Rc::new(Cell::new(0));
+        let count = callback_count.clone();
+        let on_message = Closure::wrap(Box::new(move |_frame: JsValue| {
+            count.set(count.get() + 1);
+        }) as Box<dyn FnMut(JsValue)>);
+        let subscriptions = Rc::new(RefCell::new(HashMap::new()));
+        let pending_requests = Rc::new(RefCell::new(RequestTracker::default()));
+        let ping_tracker = Rc::new(RefCell::new(PingTracker::default()));
+        let ping_ms = Rc::new(Cell::new(None));
+        let request_id = RequestId::new(42).unwrap();
+        let (sender, receiver) = oneshot::channel();
+        assert!(
+            pending_requests
+                .borrow_mut()
+                .insert(
+                    request_id,
+                    PendingRequest {
+                        generation: 1,
+                        token: Rc::new(()),
+                        response_type: Some("ExpectedResponse".into()),
+                        sender,
+                    },
+                    0.0,
+                )
+                .is_ok()
+        );
+
+        let wrong = js_sys::Object::new();
+        js_sys::Reflect::set(&wrong, &JsValue::from_str("id"), &JsValue::from_f64(42.0)).unwrap();
+        js_sys::Reflect::set(
+            &wrong,
+            &JsValue::from_str("type"),
+            &JsValue::from_str("Notification"),
+        )
+        .unwrap();
+        route_incoming_frame(
+            wrong.as_ref(),
+            1,
+            on_message.as_ref().unchecked_ref(),
+            &subscriptions,
+            &pending_requests,
+            &ping_tracker,
+            &ping_ms,
+        );
+        assert_eq!(callback_count.get(), 1);
+        assert!(pending_requests.borrow().pending.contains_key(&request_id));
+
+        let matching = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &matching,
+            &JsValue::from_str("id"),
+            &JsValue::from_f64(42.0),
+        )
+        .unwrap();
+        js_sys::Reflect::set(
+            &matching,
+            &JsValue::from_str("type"),
+            &JsValue::from_str("ExpectedResponse"),
+        )
+        .unwrap();
+        route_incoming_frame(
+            matching.as_ref(),
+            1,
+            on_message.as_ref().unchecked_ref(),
+            &subscriptions,
+            &pending_requests,
+            &ping_tracker,
+            &ping_ms,
+        );
+        assert!(!pending_requests.borrow().pending.contains_key(&request_id));
+        let delivered: JsValue = receiver.await.unwrap().unwrap();
+        assert_eq!(delivered, JsValue::from(matching));
+        assert_eq!(callback_count.get(), 1);
     }
 }

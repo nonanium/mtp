@@ -153,7 +153,10 @@ where
         let (pipe_req_tx, pipe_req_rx) = mpsc::channel(receiver_queue_capacity);
         let dispatcher = Arc::new(PipeDispatcher {
             pending_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
-            expired_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
+            expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
+                policy.pipe_tombstone_ttl.as_secs_f64() * 1000.0,
+                policy.pipe_tombstone_capacity,
+            )),
             pending_pipes: Mutex::new(std::collections::HashMap::new()),
             policy,
             type_map: codec.type_map().clone(),
@@ -208,7 +211,10 @@ where
         let (pipe_req_tx, pipe_req_rx) = mpsc::channel(receiver_queue_capacity);
         let dispatcher = Arc::new(PipeDispatcher {
             pending_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
-            expired_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
+            expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
+                policy.pipe_tombstone_ttl.as_secs_f64() * 1000.0,
+                policy.pipe_tombstone_capacity,
+            )),
             pending_pipes: Mutex::new(std::collections::HashMap::new()),
             policy,
             type_map: codec.type_map().clone(),
@@ -337,9 +343,8 @@ where
                 .lock()
                 .map_err(|_| mtp_common::PipeError::ConnectionClosed)?;
             let pipe_id = loop {
-                let candidate = rand::random::<u32>();
-                if candidate != 0
-                    && !pending.contains_key(&candidate)
+                let candidate = mtp_common::PipeId::random();
+                if !pending.contains_key(&candidate)
                     && !is_expired_creation(&self.pipe_dispatcher, candidate)
                 {
                     break candidate;
@@ -364,7 +369,7 @@ where
             CommunicationType::PipeRequest,
             self.codec.type_map(),
         )
-        .with_id(pipe_id)
+        .with_id(pipe_id.get())
         .add_typed_default(DataType::Description, DataValue::Str(description.into()));
         if let Err(error) = self.sender.send_pipe_message(&request).await {
             return Err(mtp_common::PipeError::from(error));

@@ -268,6 +268,7 @@ impl CommunicationValue {
         let mut response = Self::new_with_type_map(comm_type, &type_map);
         response.sender = self.receiver;
         response.receiver = self.sender;
+        response.id = self.id;
         response
     }
 

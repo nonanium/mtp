@@ -103,7 +103,7 @@ transcript into the record context.
 
 ## Accepting or Rejecting a Pipe
 
-The receiving side reads pipe requests through `receive_pipe`, the host dispatcher, or the browser pipe callback. It calls `accept` to obtain a reader or `deny` to reject the request. A rejected request completes the creator's handle with `Rejected` and no raw byte stream becomes available.
+The receiving side reads pipe requests through `receive_pipe`, the host dispatcher, or the browser pipe callback. It calls `accept` to obtain a reader or `deny` to reject the request. A rejected request completes the creator's handle with `None`/`null` and no raw byte stream becomes available. The creator may call `cancel` before opening the byte stream; this sends a `PipeAbort` control frame so the peer stops waiting for the stream.
 
 With native pipes enabled, do not read the underlying `receiver` directly.
 Normal messages and pipe requests share the transport and must pass through the connection facade so a dispatcher does not deliver one event to the wrong consumer.
@@ -117,13 +117,14 @@ resets the stream and the reader receives an error instead of a clean EOF.
 Dropping the connection closes all active pipes. Raw pipe FIN is not an
 authenticated application completion signal.
 
-The accepting side closes its reader by consuming it or dropping it. A reader does not send an application-level acknowledgement for EOF. If the application needs completion metadata, send an ordinary MTP message before finishing the pipe.
+The accepting side closes its reader by consuming it or dropping it. A reader does not send an application-level acknowledgement for EOF. If the application needs completion metadata, send an ordinary MTP message before finishing the pipe. `PipeAbort` applies only before the stream is opened; aborting an open stream uses its transport reset.
 
 ## Pipe Errors
 
 | Error | Meaning |
 | --- | --- |
 | `Rejected` | The peer denied the request. |
+| `Cancelled` | The peer withdrew the request before opening its stream. |
 | `HandshakeTimeout` | The peer did not complete the pipe handshake in time. |
 | `StreamClosed` | The pipe stream ended unexpectedly. |
 | `IoError` | The underlying byte stream returned an I/O error. |

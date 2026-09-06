@@ -7,17 +7,23 @@ use crate::client_pipe;
 use crate::error::js_error;
 use crate::pipe::PipeReader;
 use crate::transport::WasmTransport;
+use mtp_common::{PingId, PipeId};
 
 use super::MAX_SAFE_JS_INTEGER;
 use super::dispatch::{
-    PendingPing, PingTimer, frame_id, frame_property, frame_type, reject_pending_requests,
-    route_incoming_frame, set_shared_state, stop_ping_timer,
+    PingTimer, frame_id, frame_property, frame_type, reject_pending_requests, route_incoming_frame,
+    set_shared_state, stop_ping_timer,
 };
+
+const DEFAULT_MAX_MISSED_PINGS: usize = 3;
 
 #[wasm_bindgen]
 impl WasmClient {
     pub fn start_protocol_pings(&self, interval_ms: u32, client_id: u64) -> Result<(), JsValue> {
         self.stop_protocol_pings();
+        if interval_ms == 0 {
+            return Ok(());
+        }
         if self.state.get() != ConnectionState::Connected {
             return Err(js_error("not connected"));
         }
@@ -26,27 +32,28 @@ impl WasmClient {
         };
         let generation = self.connection_generation.get();
         let current_generation = self.connection_generation.clone();
-        let interval_ms = i32::try_from(interval_ms.max(1_000))
-            .map_err(|_| js_error("ping interval is too large"))?;
+        let interval_ms =
+            i32::try_from(interval_ms).map_err(|_| js_error("ping interval is too large"))?;
         let on_error = self.on_error.clone();
-        let pending_pings = self.pending_pings.clone();
+        let ping_tracker = self.ping_tracker.clone();
         let closure = Closure::wrap(Box::new(move || {
             if current_generation.get() != generation {
                 return;
             }
             let transport = transport.clone();
             let on_error = on_error.clone();
-            let pending_pings = pending_pings.clone();
+            let ping_tracker = ping_tracker.clone();
             let current_generation = current_generation.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 if current_generation.get() != generation {
                     return;
                 }
                 let sent_at = js_sys::Date::now();
-                pending_pings.borrow_mut().retain(|_, pending| {
-                    pending.generation == generation
-                        && sent_at - pending.sent_at < interval_ms as f64 * 3.0
-                });
+                let missed_pings = ping_tracker.borrow_mut().begin_round();
+                if missed_pings >= DEFAULT_MAX_MISSED_PINGS {
+                    transport.close();
+                    return;
+                }
                 let timestamp = if sent_at.is_finite()
                     && sent_at >= 0.0
                     && sent_at <= MAX_SAFE_JS_INTEGER
@@ -61,16 +68,13 @@ impl WasmClient {
                 let frame =
                     CommunicationValue::new_with_type_map(CommunicationType::Ping, &type_map)
                         .add_typed_default(
-                            DataType::Description,
-                            DataValue::Str("protocol ping".into()),
-                        )
-                        .add_typed_default(
                             DataType::Timestamp,
                             DataValue::UnsignedNumber(timestamp as u128),
                         )
                         .with_sender(client_id);
                 let Some(ping_id) = frame.id() else {
                     let _ = on_error.call1(&JsValue::NULL, &js_error("ping frame has no id"));
+                    transport.close();
                     return;
                 };
                 let frame = frame
@@ -81,26 +85,22 @@ impl WasmClient {
                         if current_generation.get() != generation {
                             return;
                         }
-                        pending_pings.borrow_mut().insert(
-                            ping_id,
-                            PendingPing {
-                                generation,
-                                sent_at,
-                            },
-                        );
+                        let Some(ping_id) = PingId::new(ping_id) else {
+                            let _ =
+                                on_error.call1(&JsValue::NULL, &js_error("ping frame has zero id"));
+                            transport.close();
+                            return;
+                        };
+                        ping_tracker.borrow_mut().sent(ping_id, sent_at);
                         if let Err(error) = transport.send_frame(&frame).await {
-                            if pending_pings
-                                .borrow()
-                                .get(&ping_id)
-                                .is_some_and(|ping| ping.generation == generation)
-                            {
-                                pending_pings.borrow_mut().remove(&ping_id);
-                            }
+                            ping_tracker.borrow_mut().clear();
                             let _ = on_error.call1(&JsValue::NULL, &error);
+                            transport.close();
                         }
                     }
                     Err(error) => {
                         let _ = on_error.call1(&JsValue::NULL, &error);
+                        transport.close();
                     }
                 }
             });
@@ -129,7 +129,7 @@ impl WasmClient {
 
     #[wasm_bindgen]
     pub fn stop_protocol_pings(&self) {
-        self.pending_pings.borrow_mut().clear();
+        self.ping_tracker.borrow_mut().clear();
         self.ping_ms.set(None);
         let Some(timer) = self.ping_timer.borrow_mut().take() else {
             return;
@@ -165,20 +165,20 @@ impl WasmClient {
         let state_callback = self.state_callback.as_ref().clone();
         let on_msg = self.on_message.clone();
         let on_err = self.on_error.clone();
+        let frame_on_err = on_err.clone();
         let subscriptions = self.subscriptions.clone();
         let pending_requests = self.pending_requests.clone();
         let loop_pending_requests = pending_requests.clone();
-        let expired_requests = self.expired_requests.clone();
-        let loop_expired_requests = expired_requests.clone();
         let ping_timer = self.ping_timer.clone();
-        let pending_pings = self.pending_pings.clone();
-        let loop_pending_pings = pending_pings.clone();
+        let ping_tracker = self.ping_tracker.clone();
+        let loop_ping_tracker = ping_tracker.clone();
         let ping_ms = self.ping_ms.clone();
         let loop_ping_ms = ping_ms.clone();
         let pending_pipe_creations = self.pending_pipe_creations.clone();
         let expired_pipe_creations = self.expired_pipe_creations.clone();
         let pending_pipes = self.pending_pipes.clone();
         let loop_pending_pipes = pending_pipes.clone();
+        let abort_pending_pipes = pending_pipes.clone();
         let expected_pending_pipes = pending_pipes.clone();
         let on_pipe_request = self.on_pipe_request.clone();
         let loop_pipe_creations = pending_pipe_creations.clone();
@@ -197,7 +197,7 @@ impl WasmClient {
                         let message_type = frame_type(&frame);
                         if let Some(ref msg_type) = message_type {
                             if msg_type == "PipeRequest" {
-                                let Some(pipe_id) = frame_id(&frame).filter(|id| *id != 0) else {
+                                let Some(pipe_id) = frame_id(&frame).and_then(PipeId::new) else {
                                     return;
                                 };
                                 let description = frame_property(&frame, "data")
@@ -217,7 +217,7 @@ impl WasmClient {
                                     let _ = js_sys::Reflect::set(
                                         &obj,
                                         &"pipeId".into(),
-                                        &JsValue::from_f64(pipe_id as f64),
+                                        &JsValue::from_f64(pipe_id.get() as f64),
                                     );
                                     let _ = js_sys::Reflect::set(
                                         &obj,
@@ -230,11 +230,11 @@ impl WasmClient {
                             }
 
                             if msg_type == "PipeResponse" {
-                                let Some(pipe_id) = frame_id(&frame).filter(|id| *id != 0) else {
+                                let Some(pipe_id) = frame_id(&frame).and_then(PipeId::new) else {
                                     return;
                                 };
-                                let accepted = frame_property(&frame, "data")
-                                    .and_then(|data| {
+                                let Some(accepted) =
+                                    frame_property(&frame, "data").and_then(|data| {
                                         let acc = js_sys::Reflect::get(
                                             &data,
                                             &JsValue::from_str("Accepted"),
@@ -242,7 +242,15 @@ impl WasmClient {
                                         .ok()?;
                                         acc.as_bool()
                                     })
-                                    .unwrap_or(false);
+                                else {
+                                    let _ = frame_on_err.call1(
+                                        &JsValue::NULL,
+                                        &js_error(
+                                            "PipeResponse must contain a boolean Accepted field",
+                                        ),
+                                    );
+                                    return;
+                                };
 
                                 let pending = {
                                     let mut pending = loop_pipe_creations.borrow_mut();
@@ -265,6 +273,40 @@ impl WasmClient {
                                 }
                                 return;
                             }
+
+                            if msg_type == "PipeAbort" {
+                                let Some(pipe_id) = frame_id(&frame).and_then(PipeId::new) else {
+                                    let _ = frame_on_err.call1(
+                                        &JsValue::NULL,
+                                        &js_error("PipeAbort must contain a non-zero id"),
+                                    );
+                                    return;
+                                };
+                                let pending = {
+                                    let mut pending = loop_pipe_creations.borrow_mut();
+                                    if pending
+                                        .get(&pipe_id)
+                                        .is_some_and(|entry| entry.generation == loop_generation)
+                                    {
+                                        pending.remove(&pipe_id)
+                                    } else {
+                                        None
+                                    }
+                                };
+                                if let Some(entry) = pending {
+                                    let _ = entry
+                                        .sender
+                                        .send(Err(js_error("pipe request was cancelled")));
+                                }
+                                if let Some(entry) =
+                                    abort_pending_pipes.borrow_mut().remove(&pipe_id)
+                                {
+                                    let _ = entry
+                                        .sender
+                                        .send(Err(js_error("pipe request was cancelled")));
+                                }
+                                return;
+                            }
                         }
 
                         route_incoming_frame(
@@ -273,8 +315,7 @@ impl WasmClient {
                             &on_msg,
                             &subscriptions,
                             &loop_pending_requests,
-                            &loop_expired_requests,
-                            &loop_pending_pings,
+                            &loop_ping_tracker,
                             &loop_ping_ms,
                         );
                     },
@@ -284,7 +325,9 @@ impl WasmClient {
                         }
                     },
                     move |pipe_reader: PipeReader| {
-                        let pipe_id = pipe_reader.pipe_id();
+                        let Some(pipe_id) = PipeId::new(pipe_reader.pipe_id()) else {
+                            return;
+                        };
                         let mut pending = loop_pending_pipes.borrow_mut();
                         if pending
                             .get(&pipe_id)
@@ -295,6 +338,9 @@ impl WasmClient {
                         }
                     },
                     move |pipe_id| {
+                        let Some(pipe_id) = PipeId::new(pipe_id) else {
+                            return false;
+                        };
                         expected_pending_pipes
                             .borrow()
                             .get(&pipe_id)
@@ -315,10 +361,10 @@ impl WasmClient {
                 ConnectionState::Disconnected,
             );
             stop_ping_timer(&ping_timer);
-            pending_pings.borrow_mut().clear();
+            ping_tracker.borrow_mut().clear();
             ping_ms.set(None);
             reject_pending_requests(&pending_requests, "disconnected");
-            expired_requests.borrow_mut().clear();
+            pending_requests.borrow_mut().clear_expired();
             client_pipe::reject_pending_pipe_creations(&pending_pipe_creations, "disconnected");
             expired_pipe_creations.borrow_mut().clear();
             client_pipe::reject_pending_pipes(&pending_pipes, "disconnected");
@@ -330,6 +376,6 @@ impl WasmClient {
 
     pub(super) fn reject_pending_requests(&self, message: &str) {
         reject_pending_requests(&self.pending_requests, message);
-        self.expired_requests.borrow_mut().clear();
+        self.pending_requests.borrow_mut().clear_expired();
     }
 }

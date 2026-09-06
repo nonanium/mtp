@@ -6,7 +6,7 @@ pub mod ping;
 pub mod pipe;
 
 #[cfg(feature = "pipes")]
-pub use mtp_common::PipeError;
+pub use mtp_common::{PingId, PipeError, PipeId, RequestId};
 #[cfg(feature = "pipes")]
 pub use mtp_native::PipeWriter;
 
@@ -547,6 +547,7 @@ impl MTPClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::time::Duration;
 
     #[test]
@@ -594,19 +595,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatcher_routes_only_matching_request_id() {
-        use std::collections::HashMap;
         use std::sync::Arc;
         use tokio::sync::Mutex;
 
         let dispatcher = pipe::PipeDispatcher {
-            pending_requests: Mutex::new(HashMap::new()),
-            expired_requests: Mutex::new(HashMap::new()),
+            pending_requests: Mutex::new(mtp_common::RequestTracker::default()),
             #[cfg(feature = "pipes")]
             type_map: mtp_codec::TypeMap::latest(),
             #[cfg(feature = "pipes")]
             pending_creations: std::sync::Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]
-            expired_creations: std::sync::Mutex::new(HashMap::new()),
+            expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
+                Policy::default().pipe_tombstone_ttl.as_secs_f64() * 1000.0,
+                Policy::default().pipe_tombstone_capacity,
+            )),
             #[cfg(feature = "pipes")]
             pending_pipes: Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]
@@ -614,12 +616,14 @@ mod tests {
         };
         let (app_tx, mut app_rx) = tokio::sync::mpsc::channel(2);
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        dispatcher.pending_requests.lock().await.insert(
-            7,
+        let _ = dispatcher.pending_requests.lock().await.insert(
+            mtp_common::RequestId::new(7).unwrap(),
             pipe::PendingRequest {
                 token: Arc::new(()),
+                expected_type: None,
                 sender: response_tx,
             },
+            0.0,
         );
 
         let unrelated = CommunicationValue::new(mtp_codec::CommunicationType::Ping).with_id(8);
@@ -634,19 +638,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_expired_request_response_is_consumed() {
-        use std::collections::HashMap;
         use std::sync::Arc;
         use tokio::sync::Mutex;
 
         let dispatcher = pipe::PipeDispatcher {
-            pending_requests: Mutex::new(HashMap::new()),
-            expired_requests: Mutex::new(HashMap::new()),
+            pending_requests: Mutex::new(mtp_common::RequestTracker::default()),
             #[cfg(feature = "pipes")]
             type_map: mtp_codec::TypeMap::latest(),
             #[cfg(feature = "pipes")]
             pending_creations: std::sync::Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]
-            expired_creations: std::sync::Mutex::new(HashMap::new()),
+            expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
+                Policy::default().pipe_tombstone_ttl.as_secs_f64() * 1000.0,
+                Policy::default().pipe_tombstone_capacity,
+            )),
             #[cfg(feature = "pipes")]
             pending_pipes: Mutex::new(HashMap::new()),
             #[cfg(feature = "pipes")]
@@ -654,19 +659,81 @@ mod tests {
         };
         let token = Arc::new(());
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        dispatcher.pending_requests.lock().await.insert(
-            9,
+        let _ = dispatcher.pending_requests.lock().await.insert(
+            mtp_common::RequestId::new(9).unwrap(),
             pipe::PendingRequest {
                 token: token.clone(),
+                expected_type: None,
                 sender: response_tx,
             },
+            0.0,
         );
-        pipe::expire_pending_request(&dispatcher, 9, &token).await;
+        pipe::expire_pending_request(&dispatcher, mtp_common::RequestId::new(9).unwrap(), &token)
+            .await;
 
         let (app_tx, mut app_rx) = tokio::sync::mpsc::channel(1);
         let response = CommunicationValue::new(mtp_codec::CommunicationType::Pong).with_id(9);
         assert!(pipe::route_message(response, &app_tx, &dispatcher).await);
         assert!(response_rx.await.is_err());
+        assert!(app_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_dispatcher_routes_same_id_with_unexpected_type() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let type_map = mtp_codec::TypeMap::latest();
+        let expected_type = mtp_codec::CommunicationType::Pong
+            .try_to_id(&type_map)
+            .expect("Pong must be mapped");
+        let dispatcher = pipe::PipeDispatcher {
+            pending_requests: Mutex::new(mtp_common::RequestTracker::default()),
+            #[cfg(feature = "pipes")]
+            type_map: type_map.clone(),
+            #[cfg(feature = "pipes")]
+            pending_creations: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(feature = "pipes")]
+            expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
+                Policy::default().pipe_tombstone_ttl.as_secs_f64() * 1000.0,
+                Policy::default().pipe_tombstone_capacity,
+            )),
+            #[cfg(feature = "pipes")]
+            pending_pipes: Mutex::new(HashMap::new()),
+            #[cfg(feature = "pipes")]
+            policy: Arc::new(Policy::default()),
+        };
+        let (app_tx, mut app_rx) = tokio::sync::mpsc::channel(2);
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let request_id = mtp_common::RequestId::new(42).unwrap();
+        let _ = dispatcher.pending_requests.lock().await.insert(
+            request_id,
+            pipe::PendingRequest {
+                token: Arc::new(()),
+                expected_type: Some(expected_type),
+                sender: response_tx,
+            },
+            0.0,
+        );
+
+        let unrelated = CommunicationValue::new(mtp_codec::CommunicationType::Ping).with_id(42);
+        assert!(pipe::route_message(unrelated, &app_tx, &dispatcher).await);
+        assert_eq!(app_rx.recv().await.unwrap().unwrap().id(), Some(42));
+        assert!(
+            dispatcher
+                .pending_requests
+                .lock()
+                .await
+                .pending
+                .contains_key(&request_id)
+        );
+
+        let response = CommunicationValue::new(mtp_codec::CommunicationType::Pong).with_id(42);
+        assert!(pipe::route_message(response, &app_tx, &dispatcher).await);
+        assert_eq!(
+            response_rx.await.unwrap().unwrap().get_type(),
+            expected_type
+        );
         assert!(app_rx.try_recv().is_err());
     }
 

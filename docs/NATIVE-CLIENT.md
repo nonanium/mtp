@@ -232,7 +232,9 @@ Requests are routed by id through the connection's receive dispatcher. Frames wi
 
 Two send modes (configured via `mtp::client::Policy`):
 - `PersistentStream` (default): reuses one QUIC unidirectional stream
-- `SingleStreamPerMessage`: opens a new stream per message
+- `SingleStreamPerMessage`: opens a new stream per message. Parallel sends are
+  enabled by default; messages sent concurrently may be received out of order.
+  Call `Policy::with_parallel_multi_stream_sends(false)` to serialize them.
 
 ### Receive
 

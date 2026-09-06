@@ -8,12 +8,13 @@
 
 #![cfg(feature = "crypto")]
 
+use mtp_common::MessageId;
 use mtp_crypto::{Keyring, PublicKeyBundle, SignatureScheme};
 use mtp_type_map::{CommunicationType, DataType, DataTypeId, TypeMap};
 
 use crate::{
     CommunicationValue, DataValue, DecodeLimits, EncodeLimits, MtpProtectionPurpose,
-    ProtectedLimits, ProtectionError, ProtectionPolicy, ReplayError, ReplayGuard,
+    ProtectedLimits, ProtectionError, ProtectionPolicy, ReplayError, ReplayGuard, rand_u32,
 };
 
 /// The relay metadata schema emitted by [`SealedRelayBuilder`].
@@ -58,7 +59,7 @@ pub struct VerifiedRelayMetadata {
     relay_version: u64,
     signer_id: u64,
     final_recipient_id: u64,
-    message_id: String,
+    message_id: MessageId,
     created_at: u64,
     metadata: Option<DataValue>,
     encrypted_content: DataValue,
@@ -101,8 +102,8 @@ impl VerifiedRelayMetadata {
         self.encode_limits
     }
 
-    pub fn message_id(&self) -> &str {
-        &self.message_id
+    pub fn message_id(&self) -> MessageId {
+        self.message_id
     }
 
     /// Return the authenticated creation time as Unix epoch milliseconds.
@@ -133,7 +134,7 @@ impl VerifiedRelayMetadata {
 pub struct VerifiedRelayContent {
     pub signer_id: u64,
     pub final_recipient_id: u64,
-    pub message_type: String,
+    pub message_type: CommunicationType,
     pub content: DataValue,
 }
 
@@ -178,12 +179,12 @@ impl RelayOpenOptions {
 /// recipients so a metadata-only relay participant can open metadata without
 /// receiving content keys.
 pub struct SealedRelayBuilder<'a> {
-    message_type: String,
+    message_type: CommunicationType,
     content: DataValue,
     signer_id: u64,
     final_recipient_id: u64,
     next_hop_id: u64,
-    message_id: Option<String>,
+    message_id: Option<MessageId>,
     created_at: Option<u64>,
     metadata: Option<DataValue>,
     signer: &'a dyn SignatureScheme,
@@ -196,7 +197,7 @@ pub struct SealedRelayBuilder<'a> {
 
 impl<'a> SealedRelayBuilder<'a> {
     pub fn new(
-        message_type: impl Into<String>,
+        message_type: CommunicationType,
         content: DataValue,
         signer_id: u64,
         final_recipient_id: u64,
@@ -204,7 +205,7 @@ impl<'a> SealedRelayBuilder<'a> {
         signer: &'a dyn SignatureScheme,
     ) -> Self {
         Self {
-            message_type: message_type.into(),
+            message_type,
             content,
             signer_id,
             final_recipient_id,
@@ -221,7 +222,7 @@ impl<'a> SealedRelayBuilder<'a> {
         }
     }
 
-    pub fn message_id(mut self, value: impl Into<String>) -> Self {
+    pub fn message_id(mut self, value: impl Into<MessageId>) -> Self {
         self.message_id = Some(value.into());
         self
     }
@@ -272,14 +273,6 @@ impl<'a> SealedRelayBuilder<'a> {
         let created_at = self.created_at.ok_or(RelayError::InvalidLayout(
             "relay builder requires a creation timestamp",
         ))?;
-        if self.message_type.is_empty() || message_id.is_empty() {
-            return Err(RelayError::InvalidLayout(
-                "relay builder identifiers must be non-empty",
-            ));
-        }
-        if message_id.len() > self.limits.max_message_id_bytes {
-            return Err(RelayError::ResourceLimit("message ID"));
-        }
         if self.metadata_recipients.is_empty() || self.content_recipients.is_empty() {
             return Err(RelayError::InvalidLayout(
                 "relay builder requires metadata and content recipients",
@@ -290,7 +283,7 @@ impl<'a> SealedRelayBuilder<'a> {
         }
 
         let type_map = self.type_map.unwrap_or_else(TypeMap::latest);
-        validate_application_message_type(&self.message_type, &type_map)?;
+        validate_application_message_type(self.message_type, &type_map)?;
         let message_type_id = relay_field(DataType::MessageType, &type_map)?;
         let content_id = relay_field(DataType::Content, &type_map)?;
         let message_id_id = relay_field(DataType::MessageId, &type_map)?;
@@ -300,7 +293,10 @@ impl<'a> SealedRelayBuilder<'a> {
         let relay_version_id = relay_field(DataType::RelayVersion, &type_map)?;
 
         let content = DataValue::Container(vec![
-            (message_type_id, DataValue::Str(self.message_type)),
+            (
+                message_type_id,
+                DataValue::Str(self.message_type.name().to_owned()),
+            ),
             (content_id, self.content),
         ]);
         let signed_content = content.sign_with_limits(
@@ -319,7 +315,7 @@ impl<'a> SealedRelayBuilder<'a> {
                 relay_version_id,
                 DataValue::UnsignedNumber(CURRENT_RELAY_VERSION as u128),
             ),
-            (message_id_id, DataValue::Str(message_id)),
+            (message_id_id, DataValue::UnsignedNumber(message_id.get())),
             (
                 final_recipient_id,
                 DataValue::UnsignedNumber(self.final_recipient_id as u128),
@@ -363,19 +359,18 @@ fn relay_field(
 }
 
 fn validate_application_message_type(
-    message_type: &str,
+    message_type: CommunicationType,
     type_map: &TypeMap,
 ) -> Result<(), RelayError> {
-    let communication_type = CommunicationType::from_name(message_type)
-        .ok_or(RelayError::InvalidLayout("relay message type is unknown"))?;
-    let communication_id =
-        communication_type
-            .try_to_id(type_map)
-            .ok_or(RelayError::InvalidLayout(
-                "relay message type is unavailable",
-            ))?;
+    let communication_id = message_type
+        .try_to_id(type_map)
+        .ok_or(RelayError::InvalidLayout(
+            "relay message type is unavailable",
+        ))?;
     if communication_id.is_reserved() {
-        return Err(RelayError::ReservedApplicationType(message_type.to_owned()));
+        return Err(RelayError::ReservedApplicationType(
+            message_type.name().to_owned(),
+        ));
     }
     Ok(())
 }
@@ -425,16 +420,16 @@ fn string_field(
         ))
 }
 
-fn string_field_ref<'a>(
-    entries: &'a [(DataTypeId, DataValue)],
+fn message_id_field(
+    entries: &[(DataTypeId, DataValue)],
     data_type: DataType,
     type_map: &TypeMap,
-) -> Result<&'a str, RelayError> {
+) -> Result<MessageId, RelayError> {
     field(entries, data_type, type_map)?
-        .as_str()
-        .filter(|value| !value.is_empty())
+        .as_unsigned_number()
+        .map(MessageId::new)
         .ok_or(RelayError::InvalidLayout(
-            "relay field is not a non-empty string",
+            "relay message ID is not unsigned",
         ))
 }
 
@@ -462,7 +457,7 @@ fn unsigned_field(
 #[derive(Debug)]
 struct RelayMetadataV1 {
     final_recipient_id: u64,
-    message_id: String,
+    message_id: MessageId,
     created_at: u64,
     metadata: Option<DataValue>,
     encrypted_content: DataValue,
@@ -500,17 +495,14 @@ fn parse_relay_v1(
     if encrypted_content.as_encrypted().is_none() {
         return Err(RelayError::InvalidLayout("content is not encrypted"));
     }
-    let message_id = string_field_ref(entries, DataType::MessageId, type_map)?;
-    if message_id.len() > limits.max_message_id_bytes {
-        return Err(RelayError::ResourceLimit("message ID"));
-    }
+    let message_id = message_id_field(entries, DataType::MessageId, type_map)?;
     let metadata = optional_metadata_field(entries, type_map)?;
     if let Some(metadata) = metadata {
         validate_metadata_size(metadata, limits)?;
     }
     Ok(RelayMetadataV1 {
         final_recipient_id,
-        message_id: message_id.to_owned(),
+        message_id,
         created_at,
         metadata: metadata.cloned(),
         encrypted_content,
@@ -762,9 +754,6 @@ where
         1 => parse_relay_v1(metadata, &type_map, &options.protected_limits)?,
         other => return Err(RelayError::UnsupportedRelayVersion(other)),
     };
-    if parsed.message_id.len() > options.protected_limits.max_message_id_bytes {
-        return Err(RelayError::ResourceLimit("message ID"));
-    }
     let result = VerifiedRelayMetadata {
         relay_version,
         signer_id: signed.signer_id,
@@ -781,7 +770,7 @@ where
         _verified: VerifiedMarker,
     };
     if let Some(guard) = replay_guard.as_mut()
-        && !guard.accept(result.signer_id, &result.message_id, result.created_at)?
+        && !guard.accept(result.signer_id, result.message_id, result.created_at)?
     {
         return Err(RelayError::Replay);
     }
@@ -957,8 +946,10 @@ pub fn open_relay_content_with_limits_without_replay(
         .value
         .container_entries()
         .ok_or(RelayError::InvalidLayout("content is not a container"))?;
-    let message_type = string_field(content, DataType::MessageType, type_map)?;
-    validate_application_message_type(&message_type, type_map)?;
+    let message_type =
+        CommunicationType::from_name(&string_field(content, DataType::MessageType, type_map)?)
+            .ok_or(RelayError::InvalidLayout("relay message type is unknown"))?;
+    validate_application_message_type(message_type, type_map)?;
     Ok(VerifiedRelayContent {
         signer_id: signed.signer_id,
         final_recipient_id: metadata.final_recipient_id,
@@ -969,7 +960,6 @@ pub fn open_relay_content_with_limits_without_replay(
 
 fn restrict_protected_limits(left: ProtectedLimits, right: ProtectedLimits) -> ProtectedLimits {
     ProtectedLimits {
-        max_message_id_bytes: left.max_message_id_bytes.min(right.max_message_id_bytes),
         max_metadata_encoded_bytes: left
             .max_metadata_encoded_bytes
             .min(right.max_metadata_encoded_bytes),
@@ -990,7 +980,10 @@ pub fn forward_relay_frame(
     next_hop_receiver_id: u64,
 ) -> Result<CommunicationValue, RelayError> {
     validate_relay_frame(frame)?;
-    Ok(frame.clone().with_receiver(next_hop_receiver_id))
+    Ok(frame
+        .clone()
+        .with_id(rand_u32())
+        .with_receiver(next_hop_receiver_id))
 }
 
 #[cfg(test)]
@@ -1121,7 +1114,7 @@ mod tests {
             fields.extend([
                 (
                     relay_field(DataType::MessageId, &type_map).expect("MessageId mapping"),
-                    DataValue::Str("version-test".into()),
+                    DataValue::UnsignedNumber(1),
                 ),
                 (
                     relay_field(DataType::FinalRecipientId, &type_map)
@@ -1217,14 +1210,14 @@ mod tests {
         let signer = ed_signer(&sender);
         let created_at = 1_720_000_000_123;
         let frame = SealedRelayBuilder::new(
-            "ProtectedMessage",
+            CommunicationType::ProtectedMessage,
             DataValue::Str("timestamp content".into()),
             11,
             42,
             42,
             &signer,
         )
-        .message_id("relay-created-at-millis")
+        .message_id(1u128)
         .created_at(created_at)
         .metadata_recipients(vec![recipient.public_key_bundle()])
         .content_recipients(vec![recipient.public_key_bundle()])
@@ -1270,14 +1263,14 @@ mod tests {
             (DataTypeId(33), DataValue::UnsignedNumber(7)),
         ]);
         let frame = SealedRelayBuilder::new(
-            "ProtectedMessage",
+            CommunicationType::ProtectedMessage,
             DataValue::Str("hello".into()),
             7,
             42,
             9,
             &signer,
         )
-        .message_id("message-1")
+        .message_id(1u128)
         .created_at(123)
         .metadata(application_metadata.clone())
         .metadata_recipients(vec![
@@ -1308,25 +1301,9 @@ mod tests {
         assert_eq!(metadata.signer_id(), 7);
         assert_eq!(metadata.relay_version(), CURRENT_RELAY_VERSION);
         assert_eq!(metadata.final_recipient_id(), 42);
-        assert_eq!(metadata.message_id(), "message-1");
+        assert_eq!(metadata.message_id(), MessageId::new(1));
         assert_eq!(metadata.created_at(), 123);
         assert_eq!(metadata.metadata(), Some(&application_metadata));
-
-        let mut limited_options = RelayOpenOptions::new(policy);
-        limited_options.protected_limits.max_message_id_bytes = 1;
-        let mut limited_guard = InMemoryReplayGuard::default();
-        assert!(matches!(
-            open_relay_metadata_with_limits_checked(
-                &frame,
-                &[&metadata_recipient],
-                None,
-                |signer_id| (signer_id == 7).then(|| vec![sender.public_key_bundle()]),
-                limited_options,
-                &mut limited_guard,
-            ),
-            Err(RelayError::ResourceLimit("message ID"))
-        ));
-        assert_eq!(limited_guard.len(), 0);
 
         // A final recipient may be included in the metadata recipient set and
         // therefore open both authenticated layers directly.
@@ -1407,7 +1384,7 @@ mod tests {
         .expect("content");
         assert_eq!(content.signer_id, 7);
         assert_eq!(content.final_recipient_id, 42);
-        assert_eq!(content.message_type, "ProtectedMessage");
+        assert_eq!(content.message_type, CommunicationType::ProtectedMessage);
         assert_eq!(content.content, DataValue::Str("hello".into()));
         assert!(matches!(
             open_relay_content_with_limits_without_replay(
@@ -1446,15 +1423,21 @@ mod tests {
         ];
 
         for (index, value) in values.into_iter().enumerate() {
-            let frame =
-                SealedRelayBuilder::new("ProtectedMessage", DataValue::Null, 7, 42, 9, &signer)
-                    .message_id(format!("metadata-{index}"))
-                    .created_at(123)
-                    .metadata(value.clone())
-                    .metadata_recipients(vec![recipient.public_key_bundle()])
-                    .content_recipients(vec![recipient.public_key_bundle()])
-                    .build()
-                    .expect("relay frame");
+            let frame = SealedRelayBuilder::new(
+                CommunicationType::ProtectedMessage,
+                DataValue::Null,
+                7,
+                42,
+                9,
+                &signer,
+            )
+            .message_id(index as u128)
+            .created_at(123)
+            .metadata(value.clone())
+            .metadata_recipients(vec![recipient.public_key_bundle()])
+            .content_recipients(vec![recipient.public_key_bundle()])
+            .build()
+            .expect("relay frame");
             let opened = open_relay_metadata(
                 &frame,
                 &recipient,
@@ -1466,14 +1449,20 @@ mod tests {
             assert_eq!(opened.metadata(), Some(&value));
         }
 
-        let absent =
-            SealedRelayBuilder::new("ProtectedMessage", DataValue::Null, 7, 42, 9, &signer)
-                .message_id("metadata-absent")
-                .created_at(123)
-                .metadata_recipients(vec![recipient.public_key_bundle()])
-                .content_recipients(vec![recipient.public_key_bundle()])
-                .build()
-                .expect("relay frame");
+        let absent = SealedRelayBuilder::new(
+            CommunicationType::ProtectedMessage,
+            DataValue::Null,
+            7,
+            42,
+            9,
+            &signer,
+        )
+        .message_id(100u128)
+        .created_at(123)
+        .metadata_recipients(vec![recipient.public_key_bundle()])
+        .content_recipients(vec![recipient.public_key_bundle()])
+        .build()
+        .expect("relay frame");
         let opened = open_relay_metadata(
             &absent,
             &recipient,
@@ -1491,14 +1480,14 @@ mod tests {
         let recipient = Keyring::generate();
         let signer = ed_signer(&sender);
         let frame = SealedRelayBuilder::new(
-            "ProtectedMessage",
+            CommunicationType::ProtectedMessage,
             DataValue::Str("hello".into()),
             7,
             42,
             9,
             &signer,
         )
-        .message_id("boundary-message")
+        .message_id(101u128)
         .created_at(123)
         .metadata_recipients(vec![recipient.public_key_bundle()])
         .content_recipients(vec![recipient.public_key_bundle()])
@@ -1536,7 +1525,7 @@ mod tests {
 
         assert_eq!(content.signer_id, 7);
         assert_eq!(content.final_recipient_id, 42);
-        assert_eq!(content.message_type, "ProtectedMessage");
+        assert_eq!(content.message_type, CommunicationType::ProtectedMessage);
         assert_eq!(content.content, DataValue::Str("hello".into()));
     }
 
@@ -1548,14 +1537,14 @@ mod tests {
         let previous_content_recipient = Keyring::generate();
         let signer = ed_signer(&sender);
         let frame = SealedRelayBuilder::new(
-            "ProtectedMessage",
+            CommunicationType::ProtectedMessage,
             DataValue::Str("opened with a previous recipient key".into()),
             7,
             42,
             9,
             &signer,
         )
-        .message_id("recipient-rotation-1")
+        .message_id(102u128)
         .created_at(123)
         .metadata_recipients(vec![metadata_recipient.public_key_bundle()])
         .content_recipients(vec![previous_content_recipient.public_key_bundle()])
@@ -1584,7 +1573,7 @@ mod tests {
 
         assert_eq!(content.signer_id, 7);
         assert_eq!(content.final_recipient_id, 42);
-        assert_eq!(content.message_type, "ProtectedMessage");
+        assert_eq!(content.message_type, CommunicationType::ProtectedMessage);
         assert_eq!(
             content.content,
             DataValue::Str("opened with a previous recipient key".into())
@@ -1596,13 +1585,20 @@ mod tests {
         let sender = Keyring::generate();
         let recipient = Keyring::generate();
         let signer = ed_signer(&sender);
-        let frame = SealedRelayBuilder::new("ProtectedMessage", DataValue::Null, 7, 42, 9, &signer)
-            .message_id("message-2")
-            .created_at(123)
-            .metadata_recipients(vec![recipient.public_key_bundle()])
-            .content_recipients(vec![recipient.public_key_bundle()])
-            .build()
-            .expect("relay frame");
+        let frame = SealedRelayBuilder::new(
+            CommunicationType::ProtectedMessage,
+            DataValue::Null,
+            7,
+            42,
+            9,
+            &signer,
+        )
+        .message_id(2u128)
+        .created_at(123)
+        .metadata_recipients(vec![recipient.public_key_bundle()])
+        .content_recipients(vec![recipient.public_key_bundle()])
+        .build()
+        .expect("relay frame");
 
         let result = open_relay_metadata(
             &frame,
@@ -1624,13 +1620,20 @@ mod tests {
         let sender = Keyring::generate();
         let recipient = Keyring::generate();
         let signer = ed_signer(&sender);
-        let frame = SealedRelayBuilder::new("ProtectedMessage", DataValue::Null, 7, 42, 9, &signer)
-            .message_id("message-3")
-            .created_at(123)
-            .metadata_recipients(vec![recipient.public_key_bundle()])
-            .content_recipients(vec![recipient.public_key_bundle()])
-            .build()
-            .expect("relay frame");
+        let frame = SealedRelayBuilder::new(
+            CommunicationType::ProtectedMessage,
+            DataValue::Null,
+            7,
+            42,
+            9,
+            &signer,
+        )
+        .message_id(3u128)
+        .created_at(123)
+        .metadata_recipients(vec![recipient.public_key_bundle()])
+        .content_recipients(vec![recipient.public_key_bundle()])
+        .build()
+        .expect("relay frame");
         let forwarded = forward_relay_frame(&frame, 10).expect("forward");
         assert_eq!(frame.payload(), forwarded.payload());
         assert_eq!(
@@ -1653,14 +1656,14 @@ mod tests {
         let old_signer_public = old_signer_keyring.public_key_bundle();
         let current_signer_public = current_signer_keyring.public_key_bundle();
         let frame = SealedRelayBuilder::new(
-            "ProtectedMessage",
+            CommunicationType::ProtectedMessage,
             DataValue::Str("signed with the previous key".into()),
             77,
             42,
             9,
             &old_signer,
         )
-        .message_id("rotation-1")
+        .message_id(4u128)
         .created_at(456)
         .metadata(DataValue::Str("rotation metadata".into()))
         .metadata_recipients(vec![recipient.public_key_bundle()])
@@ -1690,7 +1693,7 @@ mod tests {
             content_open_options(&metadata, policy),
         )
         .expect("content signed by a previous key should verify");
-        assert_eq!(content.message_type, "ProtectedMessage");
+        assert_eq!(content.message_type, CommunicationType::ProtectedMessage);
         assert_eq!(
             content.content,
             DataValue::Str("signed with the previous key".into())
@@ -1703,14 +1706,21 @@ mod tests {
         let recipient = Keyring::generate();
         let signer = ed_signer(&sender);
         let type_map = TypeMap::latest();
-        let frame = SealedRelayBuilder::new("ProtectedMessage", DataValue::Null, 7, 42, 9, &signer)
-            .message_id("message-4")
-            .created_at(123)
-            .metadata_recipients(vec![recipient.public_key_bundle()])
-            .content_recipients(vec![recipient.public_key_bundle()])
-            .type_map(&type_map)
-            .build()
-            .expect("relay frame");
+        let frame = SealedRelayBuilder::new(
+            CommunicationType::ProtectedMessage,
+            DataValue::Null,
+            7,
+            42,
+            9,
+            &signer,
+        )
+        .message_id(5u128)
+        .created_at(123)
+        .metadata_recipients(vec![recipient.public_key_bundle()])
+        .content_recipients(vec![recipient.public_key_bundle()])
+        .type_map(&type_map)
+        .build()
+        .expect("relay frame");
 
         assert_eq!(frame.type_map(), Some(&type_map));
     }
@@ -1720,12 +1730,13 @@ mod tests {
         let sender = Keyring::generate();
         let recipient = Keyring::generate();
         let signer = ed_signer(&sender);
-        let result = SealedRelayBuilder::new("Ping", DataValue::Null, 7, 42, 9, &signer)
-            .message_id("reserved-message")
-            .created_at(123)
-            .metadata_recipients(vec![recipient.public_key_bundle()])
-            .content_recipients(vec![recipient.public_key_bundle()])
-            .build();
+        let result =
+            SealedRelayBuilder::new(CommunicationType::Ping, DataValue::Null, 7, 42, 9, &signer)
+                .message_id(6u128)
+                .created_at(123)
+                .metadata_recipients(vec![recipient.public_key_bundle()])
+                .content_recipients(vec![recipient.public_key_bundle()])
+                .build();
 
         assert!(matches!(
             result,

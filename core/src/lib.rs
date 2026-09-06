@@ -1,5 +1,7 @@
 //! Platform-independent transport policy and protocol decisions.
 
+pub use mtp_common::{PingId, PipeId, RequestId};
+
 mod adapter;
 mod connection;
 mod framing;

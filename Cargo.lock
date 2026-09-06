@@ -1379,6 +1379,7 @@ dependencies = [
 name = "mtp-common"
 version = "0.3.0"
 dependencies = [
+ "rand",
  "thiserror 2.0.20",
 ]
 

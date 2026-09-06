@@ -58,6 +58,10 @@ fn communication_error_public_behavior() {
 fn pipe_error_public_behavior() {
     assert_eq!(PipeError::Rejected.to_string(), "pipe request was rejected");
     assert_eq!(
+        PipeError::Cancelled.to_string(),
+        "pipe request was cancelled"
+    );
+    assert_eq!(
         PipeError::HandshakeTimeout.to_string(),
         "pipe handshake timed out"
     );

@@ -80,10 +80,10 @@ fn process_direct_protected(
         accepted_messages,
     )
     .map_err(|e| format!("direct protected message could not be authenticated: {e}"))?;
-    let signer_id = opened.signer_id;
-    let message_id = opened.message_id;
+    let signer_id = opened.signer_id();
+    let message_id = opened.message_id();
     let value = opened
-        .content
+        .content()
         .as_container()
         .ok_or("direct protected application value is not a container")?;
 

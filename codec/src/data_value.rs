@@ -749,6 +749,14 @@ impl DataValue {
     }
 
     #[cfg(feature = "crypto")]
+    pub fn as_signed_mut(&mut self) -> Option<&mut SignedValue> {
+        match self {
+            Self::Signed(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "crypto")]
     pub fn sign(
         self,
         signer_id: u64,

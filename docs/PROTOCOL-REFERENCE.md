@@ -66,11 +66,10 @@ explicit `*_without_replay` APIs. Native in-memory guards are bounded and
 configurable; durable guards must perform an atomic insert-if-absent on
 `(signer ID, MessageId)`.
 
-Protected identifiers have semantic limits separate from the generic codec
-blob limit. The default maximum `MessageId` is 256 UTF-8 bytes and relay
-metadata is limited to 1 MiB of encoded metadata. Deployments can provide
-stricter limits through the receive policy. Limits are checked after
-authentication and before retained values enter replay or application state.
+`MessageId` is an authenticated unsigned 128-bit number. Relay metadata is
+limited to 1 MiB of encoded metadata; deployments can provide stricter limits
+through the receive policy. Limits are checked after authentication and before
+retained values enter replay or application state.
 
 Transport-derived resource policies use a conservative decoder allocation
 factor of `4 * max_message_size`, in addition to the frame-size output limit.

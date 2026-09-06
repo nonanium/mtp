@@ -2,6 +2,8 @@
 //!
 //! Native and H3 adapters instantiate this engine with their stream types.
 
+#[cfg(feature = "pipes")]
+use crate::PipeId;
 use crate::RuntimePolicy;
 use crate::{
     Policy, TransportConnection, TransportRecvStream, TransportSendStream, classify_decode_error,
@@ -72,7 +74,7 @@ pub struct GenericSender<C: TransportConnection> {
     connection: C,
     policy: Arc<RuntimePolicy>,
     persistent: Arc<Mutex<Option<C::SendStream>>>,
-    send_lock: Arc<Mutex<()>>,
+    send_lock: Arc<RwLock<()>>,
     type_map: Arc<RwLock<TypeMap>>,
 }
 
@@ -95,7 +97,7 @@ impl<C: TransportConnection> GenericSender<C> {
             connection,
             policy,
             persistent: Arc::new(Mutex::new(None)),
-            send_lock: Arc::new(Mutex::new(())),
+            send_lock: Arc::new(RwLock::new(())),
             type_map: Arc::new(RwLock::new(TypeMap::latest())),
         }
     }
@@ -112,7 +114,21 @@ impl<C: TransportConnection> GenericSender<C> {
     }
 
     pub async fn send(&self, value: &CommunicationValue) -> Result<(), CommunicationError> {
-        let _lock = self.send_lock.lock().await;
+        if self.parallel_multi_stream_sends_enabled() {
+            let _lock = self.send_lock.read().await;
+            self.send_locked(value).await
+        } else {
+            let _lock = self.send_lock.write().await;
+            self.send_locked(value).await
+        }
+    }
+
+    fn parallel_multi_stream_sends_enabled(&self) -> bool {
+        self.policy.send_mode == crate::SendMode::SingleStreamPerMessage
+            && self.policy.parallel_multi_stream_sends
+    }
+
+    async fn send_locked(&self, value: &CommunicationValue) -> Result<(), CommunicationError> {
         if self.connection.close_reason().is_some() {
             return Err(CommunicationError::StreamClosed);
         }
@@ -181,12 +197,26 @@ impl<C: TransportConnection> GenericSender<C> {
     }
 
     #[cfg(feature = "pipes")]
-    pub async fn open_pipe(
+    pub async fn open_pipe_id(
         &self,
-        pipe_id: u32,
+        pipe_id: PipeId,
         description: &str,
     ) -> Result<PipeWriter<C::SendStream>, CommunicationError> {
-        let _send_lock = self.send_lock.lock().await;
+        if self.parallel_multi_stream_sends_enabled() {
+            let _send_lock = self.send_lock.read().await;
+            self.open_pipe_id_locked(pipe_id, description).await
+        } else {
+            let _send_lock = self.send_lock.write().await;
+            self.open_pipe_id_locked(pipe_id, description).await
+        }
+    }
+
+    #[cfg(feature = "pipes")]
+    async fn open_pipe_id_locked(
+        &self,
+        pipe_id: PipeId,
+        description: &str,
+    ) -> Result<PipeWriter<C::SendStream>, CommunicationError> {
         if self.connection.close_reason().is_some() {
             return Err(CommunicationError::StreamClosed);
         }
@@ -198,7 +228,7 @@ impl<C: TransportConnection> GenericSender<C> {
             mtp_codec::CommunicationType::PipeRequest,
             &type_map,
         )
-        .with_id(pipe_id)
+        .with_id(pipe_id.get())
         .add_typed_default(
             mtp_codec::DataType::Description,
             mtp_codec::DataValue::Str(description.to_string()),
@@ -214,6 +244,18 @@ impl<C: TransportConnection> GenericSender<C> {
         Ok(PipeWriter { stream })
     }
 
+    #[cfg(feature = "pipes")]
+    #[deprecated(note = "use open_pipe_id with PipeId")]
+    pub async fn open_pipe(
+        &self,
+        pipe_id: u32,
+        description: &str,
+    ) -> Result<PipeWriter<C::SendStream>, CommunicationError> {
+        let pipe_id = PipeId::try_from(pipe_id)
+            .map_err(|_| CommunicationError::Other("pipe id must be non-zero".into()))?;
+        self.open_pipe_id(pipe_id, description).await
+    }
+
     pub fn close(&self) {
         self.connection
             .close(self.policy.application_close_code, b"mtp-close");
@@ -224,7 +266,7 @@ impl<C: TransportConnection> GenericSender<C> {
     /// This is used by hosts that put the opening/authentication exchange on
     /// a persistent stream and then transition to application streams.
     pub async fn finish_stream(&self) -> Result<(), CommunicationError> {
-        let _lock = self.send_lock.lock().await;
+        let _lock = self.send_lock.write().await;
         let mut stream = self.persistent.lock().await;
         let Some(mut stream) = stream.take() else {
             return Ok(());
@@ -255,7 +297,7 @@ pub struct GenericReceiver<C: TransportConnection> {
     queue_notify: Arc<Notify>,
     decode_rejections: Arc<DecodeRejectionCounters>,
     #[cfg(feature = "pipes")]
-    expected_pipes: Arc<StdMutex<HashSet<u32>>>,
+    expected_pipes: Arc<StdMutex<HashSet<PipeId>>>,
     _accept_task: Arc<tokio::task::JoinHandle<()>>,
 }
 
@@ -506,7 +548,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             if frames == 1 {
                                 let is_pipe_request =
                                     message.is_type(mtp_codec::CommunicationType::PipeRequest);
-                                let pipe_id = message.id().filter(|id| *id != 0);
+                                let pipe_id = message.id().and_then(PipeId::new);
                                 let pipe_is_expected = is_pipe_request
                                     && pipe_id.is_some_and(|pipe_id| {
                                         expected_pipes
@@ -515,7 +557,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                     });
                                 let disposition = match classify_first_frame(
                                     is_pipe_request,
-                                    message.id(),
+                                    pipe_id.map(PipeId::get),
                                     pipe_is_expected,
                                 ) {
                                     Ok(disposition) => disposition,
@@ -530,6 +572,9 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                 };
 
                                 if let FirstFrameDisposition::Pipe(pipe_id) = disposition {
+                                    let Some(pipe_id) = PipeId::new(pipe_id) else {
+                                        unreachable!("classified pipe frames have a non-zero ID");
+                                    };
                                     let description = message
                                         .get_str(mtp_codec::DataType::Description)
                                         .unwrap_or("")
@@ -541,7 +586,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                         pipe_id,
                                     };
 
-                                    tracing::debug!(pipe_id, description = %pipe_reader.description, "classified incoming pipe stream");
+                                    tracing::debug!(?pipe_id, description = %pipe_reader.description, "classified incoming pipe stream");
 
                                     if pipe_tx.send(pipe_reader).await.is_err() {
                                         break;
@@ -601,10 +646,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
     }
 
     #[cfg(feature = "pipes")]
-    pub fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
-        if pipe_id == 0 {
-            return Err(CommunicationError::Other("pipe id must be non-zero".into()));
-        }
+    pub fn expect_pipe_id(&self, pipe_id: PipeId) -> Result<(), CommunicationError> {
         self.expected_pipes
             .lock()
             .map_err(|_| CommunicationError::Other("expected pipe state is unavailable".into()))?
@@ -613,9 +655,25 @@ impl<C: TransportConnection> GenericReceiver<C> {
     }
 
     #[cfg(feature = "pipes")]
-    pub fn cancel_expected_pipe(&self, pipe_id: u32) {
+    #[deprecated(note = "use expect_pipe_id with PipeId")]
+    pub fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
+        let pipe_id = PipeId::try_from(pipe_id)
+            .map_err(|_| CommunicationError::Other("pipe id must be non-zero".into()))?;
+        self.expect_pipe_id(pipe_id)
+    }
+
+    #[cfg(feature = "pipes")]
+    pub fn cancel_expected_pipe_id(&self, pipe_id: PipeId) {
         if let Ok(mut expected) = self.expected_pipes.lock() {
             expected.remove(&pipe_id);
+        }
+    }
+
+    #[cfg(feature = "pipes")]
+    #[deprecated(note = "use cancel_expected_pipe_id with PipeId")]
+    pub fn cancel_expected_pipe(&self, pipe_id: u32) {
+        if let Some(pipe_id) = PipeId::new(pipe_id) {
+            self.cancel_expected_pipe_id(pipe_id);
         }
     }
 

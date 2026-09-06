@@ -7,7 +7,7 @@ import {
   keyring_generate,
 } from "mtp/raw";
 import * as bindings from "mtp/raw";
-import { unixTimeMillis, utf8Encode } from "./utils.js";
+import { unixTimeMillis } from "./utils.js";
 import type * as RawBindings from "../raw/index";
 import type { MTPCommunicationType } from "../type-map/index";
 import { MTPProtocol } from "./schema.js";
@@ -142,7 +142,7 @@ export type MTPLogEvent =
 export interface MTPRelayLogDetails {
   signerId: bigint;
   finalRecipientId: bigint;
-  messageId: string;
+  messageId: bigint;
   createdAt: bigint;
 }
 
@@ -337,7 +337,6 @@ export interface MTPReceiveLimits {
   maxAllocatedBytes?: number;
   /** Maximum reconstructed signed-value encoding size. */
   maxOutputSize?: number;
-  maxMessageIdBytes?: number;
   maxMetadataEncodedBytes?: number;
   maxSignerKeyHistory?: number;
   maxDecryptionKeyHistory?: number;
@@ -511,7 +510,7 @@ export interface MTPVerifiedProtectedMessage<T = MTPDataValue> {
   finalRecipientId: bigint;
 
   /** Authenticated application message identifier. */
-  messageId: string;
+  messageId: bigint;
 
   /** Authenticated Unix epoch timestamp in milliseconds. */
   createdAt: bigint;
@@ -541,7 +540,7 @@ export interface MTPReplayGuard {
    */
   accept(
     signerId: bigint,
-    messageId: string,
+    messageId: bigint,
     createdAt: bigint,
   ): boolean | Promise<boolean>;
 }
@@ -559,7 +558,7 @@ export interface MTPVerifiedRelayContent {
   data: MTPDataValue;
   signerId: bigint;
   finalRecipientId: bigint;
-  messageId: string;
+  messageId: bigint;
   /** Unix epoch milliseconds from the authenticated relay metadata. */
   createdAt: bigint;
   metadata?: MTPDataValue;
@@ -592,6 +591,7 @@ export interface MTPOutgoingPipeHandle {
   readonly pipeId: number;
   readonly description: string;
   wait(): Promise<MTPPipeWriter | null>;
+  cancel(): Promise<void>;
 }
 
 export interface MTPCreateEncryptedPipeOptions {
@@ -639,12 +639,12 @@ const DEFAULT_MAX_RECIPIENTS = 64;
 /** Must match codec::DEFAULT_TRANSPORT_ALLOCATION_FACTOR. */
 export const DEFAULT_TRANSPORT_ALLOCATION_FACTOR = 4;
 
-function createMessageId(): string {
+function createMessageId(): bigint {
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
+  let value = 0n;
+  for (const byte of bytes) value = (value << 8n) | BigInt(byte);
+  return value;
 }
 
 function createRequestId(): number {
@@ -755,7 +755,6 @@ const RECEIVE_LIMIT_KEYS = [
   "maxRecipients",
   "maxAllocatedBytes",
   "maxOutputSize",
-  "maxMessageIdBytes",
   "maxMetadataEncodedBytes",
   "maxSignerKeyHistory",
   "maxDecryptionKeyHistory",
@@ -2208,13 +2207,6 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     );
     const encodeLimits = this.#encodeLimits();
     const protectedLimits = normalizeReceiveLimits(options.limits, "options.limits");
-    const messageIdBytes = utf8Encode(messageId).length;
-    if (
-      protectedLimits?.maxMessageIdBytes != null &&
-      messageIdBytes > protectedLimits.maxMessageIdBytes
-    ) {
-      throw new RangeError("protected message ID exceeds maxMessageIdBytes");
-    }
     const encodedContent = encodeMTPDataValue(data, encodeLimits);
     const builderLimits = { ...encodeLimits, ...protectedLimits };
     let frame: Uint8Array;
@@ -2226,7 +2218,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
             encodedContent: Uint8Array,
             signerId: bigint,
             finalRecipientId: bigint,
-            messageId: string,
+            messageId: bigint,
             createdAt: bigint,
             signaturePurpose: number,
             encryptionPurpose: number,
@@ -2376,7 +2368,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
           signerId: bigint,
           finalRecipientId: bigint,
           nextHopId: bigint,
-          messageId: string,
+          messageId: bigint,
           createdAt: bigint,
           encodedMetadata: Uint8Array | undefined,
           keyring: Uint8Array,
@@ -2624,6 +2616,15 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
           direction: "send",
         });
         return result as unknown as MTPPipeWriter;
+      },
+      async cancel(): Promise<void> {
+        await handle.cancel();
+        emit(sdk.#options.logger, {
+          hint: "info",
+          type: "PipeCancelled",
+          data: { pipeId: handle.pipeId },
+          direction: "send",
+        });
       },
     };
   }

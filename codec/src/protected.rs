@@ -6,6 +6,7 @@
 
 #![cfg(feature = "crypto")]
 
+use mtp_common::MessageId;
 use mtp_crypto::{Keyring, PublicKeyBundle, SignatureScheme};
 use mtp_type_map::{CommunicationType, DataType, DataTypeId, TypeMap};
 use std::collections::{HashSet, VecDeque};
@@ -23,7 +24,6 @@ pub const CURRENT_PROTECTED_VERSION: u64 = 1;
 /// opened. These are intentionally separate from generic transport blobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProtectedLimits {
-    pub max_message_id_bytes: usize,
     pub max_metadata_encoded_bytes: usize,
     pub max_signer_key_history: usize,
     pub max_decryption_key_history: usize,
@@ -32,7 +32,6 @@ pub struct ProtectedLimits {
 impl Default for ProtectedLimits {
     fn default() -> Self {
         Self {
-            max_message_id_bytes: 256,
             max_metadata_encoded_bytes: 1024 * 1024,
             max_signer_key_history: 8,
             max_decryption_key_history: 8,
@@ -91,7 +90,7 @@ pub trait ReplayGuard {
     fn accept(
         &mut self,
         signer_id: u64,
-        message_id: &str,
+        message_id: MessageId,
         created_at: u64,
     ) -> Result<bool, ReplayError>;
 }
@@ -106,8 +105,8 @@ pub enum ReplayError {
 /// consumers should implement [`ReplayGuard`] over persistent storage.
 #[derive(Debug)]
 pub struct InMemoryReplayGuard {
-    accepted: HashSet<(u64, String)>,
-    order: VecDeque<(u64, String)>,
+    accepted: HashSet<(u64, MessageId)>,
+    order: VecDeque<(u64, MessageId)>,
     capacity: usize,
 }
 
@@ -143,17 +142,17 @@ impl ReplayGuard for InMemoryReplayGuard {
     fn accept(
         &mut self,
         signer_id: u64,
-        message_id: &str,
+        message_id: MessageId,
         _created_at: u64,
     ) -> Result<bool, ReplayError> {
-        let key = (signer_id, message_id.to_owned());
+        let key = (signer_id, message_id);
         if self.accepted.contains(&key) {
             return Ok(false);
         }
         if self.capacity == 0 {
             return Ok(false);
         }
-        self.accepted.insert(key.clone());
+        self.accepted.insert(key);
         self.order.push_back(key);
         while self.accepted.len() > self.capacity {
             if let Some(oldest) = self.order.pop_front() {
@@ -167,11 +166,11 @@ impl ReplayGuard for InMemoryReplayGuard {
 /// A direct protected-message builder shared by native applications and
 /// language bindings.
 pub struct ProtectedMessageBuilder<'a> {
-    message_type: String,
+    message_type: CommunicationType,
     content: DataValue,
     signer_id: u64,
     final_recipient_id: u64,
-    message_id: Option<String>,
+    message_id: Option<MessageId>,
     created_at: Option<u64>,
     signer: &'a dyn SignatureScheme,
     recipients: Vec<PublicKeyBundle>,
@@ -186,7 +185,7 @@ pub struct ProtectedMessageBuilder<'a> {
 
 impl<'a> ProtectedMessageBuilder<'a> {
     pub fn new(
-        message_type: impl Into<String>,
+        message_type: CommunicationType,
         content: DataValue,
         signer_id: u64,
         final_recipient_id: u64,
@@ -195,7 +194,7 @@ impl<'a> ProtectedMessageBuilder<'a> {
         encryption_purpose: ProtectionPurpose,
     ) -> Self {
         Self {
-            message_type: message_type.into(),
+            message_type,
             content,
             signer_id,
             final_recipient_id,
@@ -213,7 +212,7 @@ impl<'a> ProtectedMessageBuilder<'a> {
         }
     }
 
-    pub fn message_id(mut self, value: impl Into<String>) -> Self {
+    pub fn message_id(mut self, value: impl Into<MessageId>) -> Self {
         self.message_id = Some(value.into());
         self
     }
@@ -267,14 +266,6 @@ impl<'a> ProtectedMessageBuilder<'a> {
         let created_at = self.created_at.ok_or(ProtectedError::InvalidLayout(
             "protected builder requires a creation timestamp",
         ))?;
-        if self.message_type.is_empty() || message_id.is_empty() {
-            return Err(ProtectedError::InvalidLayout(
-                "protected identifiers must be non-empty",
-            ));
-        }
-        if message_id.len() > self.limits.max_message_id_bytes {
-            return Err(ProtectedError::ResourceLimit("message ID"));
-        }
         if self.recipients.is_empty() {
             return Err(ProtectedError::InvalidLayout(
                 "protected builder requires at least one recipient",
@@ -282,7 +273,7 @@ impl<'a> ProtectedMessageBuilder<'a> {
         }
 
         let type_map = self.type_map.unwrap_or_else(TypeMap::latest);
-        let application_type = validate_application_message_type(&self.message_type, &type_map)?;
+        let application_type = validate_application_message_type(self.message_type, &type_map)?;
         let protected_version_id = protected_field_id(DataType::ProtectedVersion, &type_map)?;
         let message_type_id = protected_field_id(DataType::MessageType, &type_map)?;
         let final_recipient_id = protected_field_id(DataType::FinalRecipientId, &type_map)?;
@@ -295,12 +286,15 @@ impl<'a> ProtectedMessageBuilder<'a> {
                 protected_version_id,
                 DataValue::UnsignedNumber(CURRENT_PROTECTED_VERSION as u128),
             ),
-            (message_type_id, DataValue::Str(self.message_type)),
+            (
+                message_type_id,
+                DataValue::Str(self.message_type.name().to_owned()),
+            ),
             (
                 final_recipient_id,
                 DataValue::UnsignedNumber(self.final_recipient_id as u128),
             ),
-            (message_id_id, DataValue::Str(message_id)),
+            (message_id_id, DataValue::UnsignedNumber(message_id.get())),
             (created_at_id, DataValue::UnsignedNumber(created_at as u128)),
             (content_id, self.content),
         ]);
@@ -333,14 +327,71 @@ impl<'a> ProtectedMessageBuilder<'a> {
 /// have been authenticated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedProtectedMessage {
-    pub protected_version: u64,
-    pub signer_id: u64,
-    pub final_recipient_id: u64,
-    pub message_id: String,
-    pub created_at: u64,
-    pub message_type: String,
-    pub content: DataValue,
-    pub matched_signer_key_index: usize,
+    protected_version: u64,
+    signer_id: u64,
+    final_recipient_id: u64,
+    message_id: MessageId,
+    created_at: u64,
+    message_type: CommunicationType,
+    content: DataValue,
+    matched_signer_key_index: usize,
+}
+
+impl VerifiedProtectedMessage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        protected_version: u64,
+        signer_id: u64,
+        final_recipient_id: u64,
+        message_id: MessageId,
+        created_at: u64,
+        message_type: CommunicationType,
+        content: DataValue,
+        matched_signer_key_index: usize,
+    ) -> Self {
+        Self {
+            protected_version,
+            signer_id,
+            final_recipient_id,
+            message_id,
+            created_at,
+            message_type,
+            content,
+            matched_signer_key_index,
+        }
+    }
+
+    pub fn protected_version(&self) -> u64 {
+        self.protected_version
+    }
+
+    pub fn signer_id(&self) -> u64 {
+        self.signer_id
+    }
+
+    pub fn final_recipient_id(&self) -> u64 {
+        self.final_recipient_id
+    }
+
+    pub fn message_id(&self) -> MessageId {
+        self.message_id
+    }
+
+    pub fn created_at(&self) -> u64 {
+        self.created_at
+    }
+
+    pub fn message_type(&self) -> CommunicationType {
+        self.message_type
+    }
+
+    pub fn content(&self) -> &DataValue {
+        &self.content
+    }
+
+    pub fn matched_signer_key_index(&self) -> usize {
+        self.matched_signer_key_index
+    }
 }
 
 /// Options that control verification of a direct protected message.
@@ -387,7 +438,6 @@ impl ProtectedOpenOptions {
                 max_output_size: 16 * 1024 * 1024,
             },
             protected_limits: ProtectedLimits {
-                max_message_id_bytes: 256,
                 max_metadata_encoded_bytes: 1024 * 1024,
                 max_signer_key_history: 8,
                 max_decryption_key_history: 8,
@@ -423,24 +473,21 @@ fn protected_field_id(
 }
 
 fn validate_application_message_type(
-    message_type: &str,
+    message_type: CommunicationType,
     type_map: &TypeMap,
 ) -> Result<CommunicationType, ProtectedError> {
-    let communication_type = CommunicationType::from_name(message_type).ok_or(
-        ProtectedError::InvalidLayout("protected message type is unknown"),
-    )?;
     let communication_id =
-        communication_type
+        message_type
             .try_to_id(type_map)
             .ok_or(ProtectedError::InvalidLayout(
                 "protected message type is unavailable",
             ))?;
     if communication_id.is_reserved() {
         return Err(ProtectedError::ReservedApplicationType(
-            message_type.to_owned(),
+            message_type.name().to_owned(),
         ));
     }
-    Ok(communication_type)
+    Ok(message_type)
 }
 
 fn validate_protected_frame(frame: &CommunicationValue) -> Result<TypeMap, ProtectedError> {
@@ -477,6 +524,22 @@ fn field<'a>(
         ))
 }
 
+fn take_field(
+    entries: &mut Vec<(DataTypeId, DataValue)>,
+    data_type: DataType,
+    type_map: &TypeMap,
+) -> Result<DataValue, ProtectedError> {
+    let field_id = protected_field_id(data_type, type_map)?;
+    let index =
+        entries
+            .iter()
+            .position(|(id, _)| *id == field_id)
+            .ok_or(ProtectedError::InvalidLayout(
+                "required protected field is missing",
+            ))?;
+    Ok(entries.remove(index).1)
+}
+
 fn unsigned_field(
     entries: &[(DataTypeId, DataValue)],
     data_type: DataType,
@@ -502,16 +565,27 @@ fn string_field(
         ))
 }
 
-fn string_field_ref<'a>(
-    entries: &'a [(DataTypeId, DataValue)],
+fn communication_type_field(
+    entries: &[(DataTypeId, DataValue)],
     data_type: DataType,
     type_map: &TypeMap,
-) -> Result<&'a str, ProtectedError> {
+) -> Result<CommunicationType, ProtectedError> {
+    let value = string_field(entries, data_type, type_map)?;
+    CommunicationType::from_name(&value).ok_or(ProtectedError::InvalidLayout(
+        "protected message type is unknown",
+    ))
+}
+
+fn message_id_field(
+    entries: &[(DataTypeId, DataValue)],
+    data_type: DataType,
+    type_map: &TypeMap,
+) -> Result<MessageId, ProtectedError> {
     field(entries, data_type, type_map)?
-        .as_str()
-        .filter(|value| !value.is_empty())
+        .as_unsigned_number()
+        .map(MessageId::new)
         .ok_or(ProtectedError::InvalidLayout(
-            "protected field is not a non-empty string",
+            "protected message ID is not unsigned",
         ))
 }
 
@@ -624,30 +698,34 @@ where
 {
     validate_protected_frame(frame)?;
     let type_map = frame.type_map().cloned().unwrap_or_else(TypeMap::latest);
-    let decrypted = decrypt_protected_payload(
+    let mut decrypted = decrypt_protected_payload(
         frame,
         keyrings,
         options.encryption_purpose,
         options.decode_limits,
         options.protected_limits.max_decryption_key_history,
     )?;
-    let signed = decrypted
+    let signer_id = decrypted
         .as_signed()
         .ok_or(ProtectedError::PayloadNotSigned)?;
+    let signer_id = signer_id.signer_id;
     if let Some(expected_signer_id) = expected_signer_id
-        && signed.signer_id != expected_signer_id
+        && signer_id != expected_signer_id
     {
         return Err(ProtectionError::SignerIdMismatch {
             expected: expected_signer_id,
-            actual: signed.signer_id,
+            actual: signer_id,
         }
         .into());
     }
-    let signer_keys = resolve_signer_keys(signed.signer_id)
-        .ok_or(ProtectionError::SignerKeyNotFound(signed.signer_id))?;
+    let signer_keys =
+        resolve_signer_keys(signer_id).ok_or(ProtectionError::SignerKeyNotFound(signer_id))?;
     if signer_keys.len() > options.protected_limits.max_signer_key_history {
         return Err(ProtectedError::ResourceLimit("signer key history"));
     }
+    let signed = decrypted
+        .as_signed_mut()
+        .ok_or(ProtectedError::PayloadNotSigned)?;
     open_decrypted_protected(frame, type_map, signed, &signer_keys, options, replay_guard)
 }
 
@@ -701,23 +779,27 @@ fn open_protected_with_keys_impl(
     replay_guard: Option<&mut dyn ReplayGuard>,
 ) -> Result<VerifiedProtectedMessage, ProtectedError> {
     let type_map = validate_protected_frame(frame)?;
-    let decrypted = decrypt_protected_payload(
+    let mut decrypted = decrypt_protected_payload(
         frame,
         keyrings,
         options.encryption_purpose,
         options.decode_limits,
         options.protected_limits.max_decryption_key_history,
     )?;
-    let signed = decrypted
+    let signer_id = decrypted
         .as_signed()
         .ok_or(ProtectedError::PayloadNotSigned)?;
-    if signed.signer_id != expected_signer_id {
+    let signer_id = signer_id.signer_id;
+    if signer_id != expected_signer_id {
         return Err(ProtectionError::SignerIdMismatch {
             expected: expected_signer_id,
-            actual: signed.signer_id,
+            actual: signer_id,
         }
         .into());
     }
+    let signed = decrypted
+        .as_signed_mut()
+        .ok_or(ProtectedError::PayloadNotSigned)?;
     open_decrypted_protected(
         frame,
         type_map,
@@ -801,7 +883,7 @@ pub fn open_protected_without_replay(
 fn open_decrypted_protected(
     frame: &CommunicationValue,
     type_map: TypeMap,
-    signed: &crate::SignedValue,
+    signed: &mut crate::SignedValue,
     signer_public_keys: &[PublicKeyBundle],
     options: ProtectedOpenOptions,
     mut replay_guard: Option<&mut dyn ReplayGuard>,
@@ -833,14 +915,14 @@ fn open_decrypted_protected(
     inspection borrowed so opening a large envelope does not clone it. */
     let envelope = signed
         .value
-        .container_entries()
+        .container_entries_mut()
         .ok_or(ProtectedError::MissingEnvelope)?;
     let version = protected_version(envelope, &type_map)?;
     if version != CURRENT_PROTECTED_VERSION {
         return Err(ProtectedError::UnsupportedProtectedVersion(version));
     }
-    let message_type = string_field(envelope, DataType::MessageType, &type_map)?;
-    let application_type = validate_application_message_type(&message_type, &type_map)?;
+    let message_type = communication_type_field(envelope, DataType::MessageType, &type_map)?;
+    let application_type = validate_application_message_type(message_type, &type_map)?;
     if frame.get_comm_type_enum() != Some(application_type) {
         return Err(ProtectedError::MessageTypeMismatch);
     }
@@ -853,17 +935,13 @@ fn open_decrypted_protected(
     if final_recipient_id != receiver_id {
         return Err(ProtectedError::FinalRecipientMismatch);
     }
-    let message_id = string_field_ref(envelope, DataType::MessageId, &type_map)?;
-    if message_id.len() > options.protected_limits.max_message_id_bytes {
-        return Err(ProtectedError::ResourceLimit("message ID"));
-    }
-    let message_id = message_id.to_owned();
+    let message_id = message_id_field(envelope, DataType::MessageId, &type_map)?;
     let created_at = u64::try_from(unsigned_field(envelope, DataType::CreatedAt, &type_map)?)
         .map_err(|_| ProtectedError::InvalidLayout("created-at value is out of range"))?;
-    let content = field(envelope, DataType::Content, &type_map)?.clone();
+    let content = take_field(envelope, DataType::Content, &type_map)?;
 
     if let Some(guard) = replay_guard.as_mut()
-        && !guard.accept(signed.signer_id, &message_id, created_at)?
+        && !guard.accept(signed.signer_id, message_id, created_at)?
     {
         return Err(ProtectedError::Replay);
     }
@@ -874,7 +952,7 @@ fn open_decrypted_protected(
         final_recipient_id,
         message_id,
         created_at,
-        message_type,
+        message_type: application_type,
         content,
         matched_signer_key_index,
     })
@@ -996,7 +1074,7 @@ mod tests {
         fn accept(
             &mut self,
             _signer_id: u64,
-            _message_id: &str,
+            _message_id: MessageId,
             created_at: u64,
         ) -> Result<bool, ReplayError> {
             self.calls += 1;
@@ -1013,31 +1091,39 @@ mod tests {
     #[test]
     fn in_memory_replay_guard_is_bounded_and_deduplicates() {
         let mut guard = InMemoryReplayGuard::with_capacity(2);
-        assert!(guard.accept(7, "first", 1).expect("first replay decision"));
         assert!(
             guard
-                .accept(7, "second", 2)
+                .accept(7, MessageId::new(1), 1)
+                .expect("first replay decision")
+        );
+        assert!(
+            guard
+                .accept(7, MessageId::new(2), 2)
                 .expect("second replay decision")
         );
         assert!(
             !guard
-                .accept(7, "first", 3)
+                .accept(7, MessageId::new(1), 3)
                 .expect("duplicate replay decision")
         );
         assert_eq!(guard.len(), 2);
 
-        assert!(guard.accept(7, "third", 4).expect("third replay decision"));
+        assert!(
+            guard
+                .accept(7, MessageId::new(3), 4)
+                .expect("third replay decision")
+        );
         assert_eq!(guard.len(), 2);
         assert!(
             guard
-                .accept(7, "first", 5)
+                .accept(7, MessageId::new(1), 5)
                 .expect("evicted replay decision")
         );
 
         let mut disabled = InMemoryReplayGuard::with_capacity(0);
         assert!(
             !disabled
-                .accept(7, "disabled", 1)
+                .accept(7, MessageId::new(1), 1)
                 .expect("disabled replay decision")
         );
     }
@@ -1053,7 +1139,7 @@ mod tests {
         version: Option<u128>,
         message_type: &str,
         final_recipient_id: u64,
-        message_id: &str,
+        message_id: u128,
         created_at: u64,
         content: DataValue,
     ) -> DataValue {
@@ -1075,7 +1161,7 @@ mod tests {
             ),
             (
                 protected_field(DataType::MessageId, type_map),
-                DataValue::Str(message_id.into()),
+                DataValue::UnsignedNumber(message_id),
             ),
             (
                 protected_field(DataType::CreatedAt, type_map),
@@ -1121,7 +1207,7 @@ mod tests {
         content: DataValue,
     ) -> CommunicationValue {
         ProtectedMessageBuilder::new(
-            "ProtectedMessage",
+            CommunicationType::ProtectedMessage,
             content,
             7,
             42,
@@ -1129,7 +1215,7 @@ mod tests {
             SIGNATURE_PURPOSE,
             ENCRYPTION_PURPOSE,
         )
-        .message_id("protected-test")
+        .message_id(1u128)
         .created_at(1_700_000_000_000)
         .recipients(vec![recipient_keyring.public_key_bundle()])
         .build()
@@ -1150,7 +1236,7 @@ mod tests {
         let recipient = Keyring::generate();
         let signer = Ed25519Signer::new(&sender.sig_cl_secret_key).expect("Ed25519 signer");
         let frame = ProtectedMessageBuilder::new(
-            "ProtectedMessage",
+            CommunicationType::ProtectedMessage,
             DataValue::Str("hello".into()),
             7,
             42,
@@ -1158,7 +1244,7 @@ mod tests {
             SIGNATURE_PURPOSE,
             ENCRYPTION_PURPOSE,
         )
-        .message_id("protected-test")
+        .message_id(1u128)
         .created_at(1_700_000_000_000)
         .recipients(vec![recipient.public_key_bundle()])
         .type_map(&type_map)
@@ -1175,8 +1261,8 @@ mod tests {
             Some(&mut guard),
         )
         .expect("protected message should open");
-        assert_eq!(opened.message_type, "ProtectedMessage");
-        assert_eq!(opened.message_id, "protected-test");
+        assert_eq!(opened.message_type, CommunicationType::ProtectedMessage);
+        assert_eq!(opened.message_id(), MessageId::new(1));
         assert_eq!(guard.created_at, Some(1_700_000_000_000));
         assert_eq!(guard.calls, 1);
         assert_eq!(opened.content, DataValue::Str("hello".into()));
@@ -1194,12 +1280,30 @@ mod tests {
     }
 
     #[test]
-    fn oversized_message_id_is_rejected_before_replay_guard() {
+    fn string_message_id_is_rejected_before_replay_guard() {
         let sender = Keyring::generate();
         let recipient = Keyring::generate();
-        let frame = valid_frame(&sender, &recipient, DataValue::Str("hello".into()));
-        let mut options = open_options(Some(42));
-        options.protected_limits.max_message_id_bytes = 3;
+        let options = open_options(Some(42));
+        let type_map = TypeMap::latest();
+        let mut envelope = envelope(
+            &type_map,
+            Some(CURRENT_PROTECTED_VERSION as u128),
+            "ProtectedMessage",
+            42,
+            1,
+            123,
+            DataValue::Str("hello".into()),
+        );
+        let DataValue::Container(fields) = &mut envelope else {
+            unreachable!("test envelope is a container");
+        };
+        let message_id_id = protected_field(DataType::MessageId, &type_map);
+        fields
+            .iter_mut()
+            .find(|(id, _)| *id == message_id_id)
+            .expect("message ID field")
+            .1 = DataValue::Str("old-string-id".into());
+        let frame = encrypted_frame(envelope, &sender, 7, &recipient, Some(42), None);
         let mut guard = RecordingReplayGuard::default();
 
         assert!(matches!(
@@ -1211,7 +1315,9 @@ mod tests {
                 options,
                 &mut guard,
             ),
-            Err(ProtectedError::ResourceLimit("message ID"))
+            Err(ProtectedError::InvalidLayout(
+                "protected message ID is not unsigned"
+            ))
         ));
         assert_eq!(guard.calls, 0);
     }
@@ -1222,7 +1328,7 @@ mod tests {
         let recipient = Keyring::generate();
         let signer = Ed25519Signer::new(&sender.sig_cl_secret_key).expect("Ed25519 signer");
         let frame = ProtectedMessageBuilder::new(
-            "ProtectedMessage",
+            CommunicationType::ProtectedMessage,
             DataValue::Str("hello".into()),
             7,
             42,
@@ -1230,7 +1336,7 @@ mod tests {
             SIGNATURE_PURPOSE,
             ENCRYPTION_PURPOSE,
         )
-        .message_id("outer-fields")
+        .message_id(2u128)
         .created_at(123)
         .frame_id(99)
         .expose_sender(true)
@@ -1263,7 +1369,7 @@ mod tests {
                 None,
                 "ProtectedMessage",
                 42,
-                "missing-version",
+                10,
                 123,
                 DataValue::Str("hello".into()),
             ),
@@ -1291,7 +1397,7 @@ mod tests {
                 Some((CURRENT_PROTECTED_VERSION + 1) as u128),
                 "ProtectedMessage",
                 42,
-                "unsupported-version",
+                11,
                 123,
                 DataValue::Str("hello".into()),
             ),
@@ -1321,7 +1427,7 @@ mod tests {
         let signer = Ed25519Signer::new(&sender.sig_cl_secret_key).expect("Ed25519 signer");
         assert!(matches!(
             ProtectedMessageBuilder::new(
-                "Ping",
+                CommunicationType::Ping,
                 DataValue::Null,
                 7,
                 42,
@@ -1329,7 +1435,7 @@ mod tests {
                 SIGNATURE_PURPOSE,
                 ENCRYPTION_PURPOSE,
             )
-            .message_id("reserved")
+            .message_id(3u128)
             .created_at(123)
             .recipients(vec![recipient.public_key_bundle()])
             .build(),
@@ -1382,7 +1488,7 @@ mod tests {
                 Some(CURRENT_PROTECTED_VERSION as u128),
                 "ProtectedMessage",
                 43,
-                "signed-recipient-mismatch",
+                12,
                 123,
                 DataValue::Str("hello".into()),
             ),
@@ -1423,7 +1529,7 @@ mod tests {
         let recipient = Keyring::generate();
         let signer = Ed25519Signer::new(&sender.sig_cl_secret_key).expect("Ed25519 signer");
         let frame = ProtectedMessageBuilder::new(
-            "ProtectedMessage",
+            CommunicationType::ProtectedMessage,
             DataValue::Str("hello".into()),
             7,
             42,
@@ -1431,7 +1537,7 @@ mod tests {
             SIGNATURE_PURPOSE,
             ENCRYPTION_PURPOSE,
         )
-        .message_id("sender-check")
+        .message_id(4u128)
         .created_at(123)
         .expose_sender(true)
         .recipients(vec![recipient.public_key_bundle()])
@@ -1477,7 +1583,7 @@ mod tests {
             Some(CURRENT_PROTECTED_VERSION as u128),
             "ProtectedMessage",
             42,
-            "payload-shape",
+            13,
             123,
             DataValue::Str("hello".into()),
         );
@@ -1549,7 +1655,7 @@ mod tests {
         let old_recipient = Keyring::generate();
         let signer = Ed25519Signer::new(&old_sender.sig_cl_secret_key).expect("Ed25519 signer");
         let frame = ProtectedMessageBuilder::new(
-            "ProtectedMessage",
+            CommunicationType::ProtectedMessage,
             DataValue::Str("rotated".into()),
             7,
             42,
@@ -1557,7 +1663,7 @@ mod tests {
             SIGNATURE_PURPOSE,
             ENCRYPTION_PURPOSE,
         )
-        .message_id("history")
+        .message_id(5u128)
         .created_at(123)
         .recipients(vec![old_recipient.public_key_bundle()])
         .build()

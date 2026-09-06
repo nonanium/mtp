@@ -2,14 +2,15 @@
 
 use async_trait::async_trait;
 use mtp_codec::CommunicationValue;
-use mtp_common::CommunicationError;
+use mtp_common::{CommunicationError, PipeId};
 use mtp_core::{
     GenericReceiver, GenericSender, Policy, SendMode, TransportConnection, TransportEvent,
     TransportRecvStream, TransportSendStream,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, duplex};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 
 struct MockSendStream {
     inner: DuplexStream,
@@ -103,6 +104,8 @@ impl TransportRecvStream for MockRecvStream {
 struct MockTransportConnection {
     pair_tx: mpsc::Sender<DuplexStream>,
     pair_rx: Arc<Mutex<mpsc::Receiver<DuplexStream>>>,
+    open_gate: Option<Arc<(Notify, Notify)>>,
+    block_next_open: Arc<AtomicBool>,
 }
 
 impl MockTransportConnection {
@@ -113,10 +116,14 @@ impl MockTransportConnection {
             Self {
                 pair_tx: tx_a,
                 pair_rx: Arc::new(Mutex::new(rx_b)),
+                open_gate: None,
+                block_next_open: Arc::new(AtomicBool::new(false)),
             },
             Self {
                 pair_tx: tx_b,
                 pair_rx: Arc::new(Mutex::new(rx_a)),
+                open_gate: None,
+                block_next_open: Arc::new(AtomicBool::new(false)),
             },
         )
     }
@@ -128,6 +135,12 @@ impl TransportConnection for MockTransportConnection {
     type RecvStream = MockRecvStream;
 
     async fn open_uni(&self) -> Result<Self::SendStream, CommunicationError> {
+        if self.block_next_open.swap(false, Ordering::AcqRel)
+            && let Some(gate) = &self.open_gate
+        {
+            gate.0.notify_one();
+            gate.1.notified().await;
+        }
         let (local, remote) = duplex(65536);
         self.pair_tx
             .send(remote)
@@ -165,11 +178,13 @@ async fn test_open_pipe_and_receive_reader() -> Result<(), Box<dyn std::error::E
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
-    receiver.expect_pipe(42)?;
-    let pipe_writer = sender.open_pipe(42, "test-pipe").await?;
+    receiver.expect_pipe_id(PipeId::new(42).unwrap())?;
+    let pipe_writer = sender
+        .open_pipe_id(PipeId::new(42).unwrap(), "test-pipe")
+        .await?;
 
     let pipe_reader = receiver.receive_pipe().await?;
-    assert_eq!(pipe_reader.pipe_id(), 42);
+    assert_eq!(pipe_reader.pipe_id_value(), PipeId::new(42).unwrap());
     assert_eq!(pipe_reader.description(), "test-pipe");
 
     drop(pipe_writer);
@@ -183,8 +198,10 @@ async fn test_pipe_raw_data_roundtrip() -> Result<(), Box<dyn std::error::Error>
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
-    receiver.expect_pipe(1)?;
-    let mut pipe_writer = sender.open_pipe(1, "data-pipe").await?;
+    receiver.expect_pipe_id(PipeId::new(1).unwrap())?;
+    let mut pipe_writer = sender
+        .open_pipe_id(PipeId::new(1).unwrap(), "data-pipe")
+        .await?;
 
     let data = b"hello through the pipe";
     AsyncWriteExt::write_all(&mut pipe_writer, data).await?;
@@ -205,8 +222,10 @@ async fn test_pipe_large_payload() -> Result<(), Box<dyn std::error::Error>> {
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
-    receiver.expect_pipe(7)?;
-    let mut pipe_writer = sender.open_pipe(7, "big-pipe").await?;
+    receiver.expect_pipe_id(PipeId::new(7).unwrap())?;
+    let mut pipe_writer = sender
+        .open_pipe_id(PipeId::new(7).unwrap(), "big-pipe")
+        .await?;
 
     let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 256) as u8).collect();
     let data_clone = data.clone();
@@ -234,12 +253,14 @@ async fn test_receive_event_dispatches_pipe() -> Result<(), Box<dyn std::error::
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
-    receiver.expect_pipe(99)?;
-    let mut pipe_writer = sender.open_pipe(99, "event-pipe").await?;
+    receiver.expect_pipe_id(PipeId::new(99).unwrap())?;
+    let mut pipe_writer = sender
+        .open_pipe_id(PipeId::new(99).unwrap(), "event-pipe")
+        .await?;
 
     match receiver.receive_event().await? {
         TransportEvent::Pipe(mut reader) => {
-            assert_eq!(reader.pipe_id(), 99);
+            assert_eq!(reader.pipe_id_value(), PipeId::new(99).unwrap());
             assert_eq!(reader.description(), "event-pipe");
 
             let data = b"event dispatch test";
@@ -288,11 +309,13 @@ async fn test_regular_messages_still_work_alongside_pipes() -> Result<(), Box<dy
     let received = receiver.receive().await?;
     assert!(received.is_type(mtp_codec::CommunicationType::PipeRequest));
 
-    receiver.expect_pipe(1)?;
-    let _pipe_writer = sender.open_pipe(1, "mixed-pipe").await?;
+    receiver.expect_pipe_id(PipeId::new(1).unwrap())?;
+    let _pipe_writer = sender
+        .open_pipe_id(PipeId::new(1).unwrap(), "mixed-pipe")
+        .await?;
 
     let pipe_reader = receiver.receive_pipe().await?;
-    assert_eq!(pipe_reader.pipe_id(), 1);
+    assert_eq!(pipe_reader.pipe_id_value(), PipeId::new(1).unwrap());
 
     Ok(())
 }
@@ -304,15 +327,19 @@ async fn test_multiple_pipes() -> Result<(), Box<dyn std::error::Error>> {
     let sender = GenericSender::new(conn_a, policy.clone());
     let receiver = GenericReceiver::new(conn_b, policy);
 
-    receiver.expect_pipe(10)?;
-    receiver.expect_pipe(20)?;
-    let mut pw1 = sender.open_pipe(10, "first").await?;
-    let mut pw2 = sender.open_pipe(20, "second").await?;
+    receiver.expect_pipe_id(PipeId::new(10).unwrap())?;
+    receiver.expect_pipe_id(PipeId::new(20).unwrap())?;
+    let mut pw1 = sender
+        .open_pipe_id(PipeId::new(10).unwrap(), "first")
+        .await?;
+    let mut pw2 = sender
+        .open_pipe_id(PipeId::new(20).unwrap(), "second")
+        .await?;
 
     let r1 = receiver.receive_pipe().await?;
-    assert_eq!(r1.pipe_id(), 10);
+    assert_eq!(r1.pipe_id_value(), PipeId::new(10).unwrap());
     let r2 = receiver.receive_pipe().await?;
-    assert_eq!(r2.pipe_id(), 20);
+    assert_eq!(r2.pipe_id_value(), PipeId::new(20).unwrap());
 
     let data1 = b"pipe-one-data";
     AsyncWriteExt::write_all(&mut pw1, data1).await?;
@@ -331,6 +358,47 @@ async fn test_multiple_pipes() -> Result<(), Box<dyn std::error::Error>> {
     let mut reader2 = r2;
     AsyncReadExt::read_exact(&mut reader2, &mut buf2).await?;
     assert_eq!(&buf2, data2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn opening_pipe_does_not_block_parallel_single_stream_send()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (mut conn_a, conn_b) = mock_connected_pair().await;
+    let gate = Arc::new((Notify::new(), Notify::new()));
+    conn_a.open_gate = Some(gate.clone());
+    conn_a.block_next_open.store(true, Ordering::Release);
+
+    let policy = Arc::new(
+        Policy::default()
+            .with_send_mode(SendMode::SingleStreamPerMessage)
+            .with_parallel_multi_stream_sends(true),
+    );
+    let sender = GenericSender::new(conn_a, policy.clone());
+    let receiver = GenericReceiver::new(conn_b, policy);
+    receiver.expect_pipe_id(PipeId::new(123).unwrap())?;
+
+    let pipe_sender = sender.clone();
+    let pipe_task = tokio::spawn(async move {
+        pipe_sender
+            .open_pipe_id(PipeId::new(123).unwrap(), "parallel-pipe")
+            .await
+    });
+    gate.0.notified().await;
+
+    let message = CommunicationValue::new(mtp_codec::CommunicationType::Ping);
+    tokio::time::timeout(std::time::Duration::from_millis(100), sender.send(&message)).await??;
+    gate.1.notify_one();
+    assert!(
+        receiver
+            .receive()
+            .await?
+            .is_type(mtp_codec::CommunicationType::Ping)
+    );
+    let _pipe_writer = pipe_task.await??;
+    let pipe_reader = receiver.receive_pipe().await?;
+    assert_eq!(pipe_reader.pipe_id_value(), PipeId::new(123).unwrap());
 
     Ok(())
 }

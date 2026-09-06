@@ -25,7 +25,7 @@ export class InMemoryReplayGuard implements MTPReplayGuard {
   #accepted = new Set<string>();
   readonly #capacity = 10_000;
 
-  accept(signerId: bigint, messageId: string, _createdAt: bigint): boolean {
+  accept(signerId: bigint, messageId: bigint, _createdAt: bigint): boolean {
     const key = `${signerId}:${messageId}`;
     if (this.#accepted.has(key)) return false;
     this.#accepted.add(key);
@@ -39,9 +39,9 @@ export class InMemoryReplayGuard implements MTPReplayGuard {
 
 export class MTPReplayError extends Error {
   readonly signerId: bigint;
-  readonly messageId: string;
+  readonly messageId: bigint;
 
-  constructor(signerId: bigint, messageId: string) {
+  constructor(signerId: bigint, messageId: bigint) {
     super(`message ${messageId} from signer ${signerId} was already accepted`);
     this.name = "MTPReplayError";
     this.signerId = signerId;

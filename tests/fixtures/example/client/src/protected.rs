@@ -73,10 +73,10 @@ pub async fn send_direct_protected(
 ) -> Result<Duration, Box<dyn std::error::Error>> {
     let signer = Ed25519Signer::new(&signer_keyring.sig_cl_secret_key)?;
     let created_at = unix_time_millis()?;
-    let message_id = format!("example-direct-{created_at}-{}", rand::random::<u32>());
+    let message_id = rand::random::<u128>();
     let content = application_value("direct protected delivery", 40)?;
     let frame = ProtectedMessageBuilder::new(
-        "ProtectedMessage",
+        CommunicationType::ProtectedMessage,
         content,
         signer_id,
         DIRECT_DESTINATION_ID,
@@ -122,9 +122,9 @@ pub async fn send_sealed_relay(
     let final_recipient_public_key = final_recipient_keyring.public_key_bundle();
     let signer = Ed25519Signer::new(&signer_keyring.sig_cl_secret_key)?;
     let created_at = unix_time_millis()?;
-    let message_id = format!("example-relay-{created_at}-{}", rand::random::<u32>());
+    let message_id = rand::random::<u128>();
     let frame = SealedRelayBuilder::new(
-        "ProtectedMessage",
+        CommunicationType::ProtectedMessage,
         application_value("sealed relay delivery", 41)?,
         signer_id,
         FINAL_RECIPIENT_ID,
@@ -173,7 +173,7 @@ pub async fn send_sealed_relay(
         Some(FINAL_RECIPIENT_ID),
         RelayOpenOptions::new(RELAY_SIGNATURE_POLICY),
     )?;
-    if content.message_type != "ProtectedMessage" {
+    if content.message_type != CommunicationType::ProtectedMessage {
         return Err(format!("unexpected relay message type: {}", content.message_type).into());
     }
     let expected_metadata = relay_metadata()?;

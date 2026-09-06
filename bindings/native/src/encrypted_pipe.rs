@@ -10,6 +10,7 @@ use mtp_codec::{
     DataValue, DecodeLimits, MtpProtectionPurpose, ProtectionError, ProtectionPolicy,
     ProtectionPurpose,
 };
+use mtp_common::PipeId;
 use mtp_crypto::{
     AeadDecrypt, AeadEncrypt, DualSigner, Ed25519Signer, KemPublicKey, Keyring, PublicKeyBundle,
     SignatureScheme, XChaCha20Poly1305,
@@ -124,7 +125,7 @@ impl PipeProtectionContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PipeSessionParameters {
     session_id: Vec<u8>,
-    pipe_id: u32,
+    pipe_id: PipeId,
     sender_id: u64,
     recipient_id: u64,
     purpose: u8,
@@ -132,19 +133,14 @@ pub struct PipeSessionParameters {
 }
 
 impl PipeSessionParameters {
-    pub fn new(
+    pub fn new_id(
         session_id: impl AsRef<[u8]>,
-        pipe_id: u32,
+        pipe_id: PipeId,
         sender_id: u64,
         recipient_id: u64,
         purpose: u8,
         direction: u8,
     ) -> Result<Self, PipeSessionError> {
-        if pipe_id == 0 {
-            return Err(PipeSessionError::InvalidParameters(
-                "pipe id must be non-zero",
-            ));
-        }
         let session_id = session_id.as_ref().to_vec();
         PipeProtectionContext::new(&session_id, purpose, direction)
             .map_err(|_| PipeSessionError::InvalidParameters("invalid session id"))?;
@@ -158,12 +154,38 @@ impl PipeSessionParameters {
         })
     }
 
+    #[deprecated(note = "use new_id with PipeId")]
+    pub fn new(
+        session_id: impl AsRef<[u8]>,
+        pipe_id: u32,
+        sender_id: u64,
+        recipient_id: u64,
+        purpose: u8,
+        direction: u8,
+    ) -> Result<Self, PipeSessionError> {
+        let pipe_id = PipeId::try_from(pipe_id)
+            .map_err(|_| PipeSessionError::InvalidParameters("pipe id must be non-zero"))?;
+        Self::new_id(
+            session_id,
+            pipe_id,
+            sender_id,
+            recipient_id,
+            purpose,
+            direction,
+        )
+    }
+
     pub fn session_id(&self) -> &[u8] {
         &self.session_id
     }
 
-    pub fn pipe_id(&self) -> u32 {
+    pub fn pipe_id_value(&self) -> PipeId {
         self.pipe_id
+    }
+
+    #[deprecated(note = "use pipe_id_value")]
+    pub fn pipe_id(&self) -> u32 {
+        self.pipe_id.get()
     }
 
     pub fn sender_id(&self) -> u64 {
@@ -190,7 +212,7 @@ impl PipeSessionParameters {
         let mut transcript = Vec::with_capacity(64 + self.session_id.len());
         transcript.extend_from_slice(PIPE_TRANSCRIPT_DOMAIN);
         append_transcript_field(&mut transcript, &self.session_id);
-        transcript.extend_from_slice(&self.pipe_id.to_be_bytes());
+        transcript.extend_from_slice(&self.pipe_id.get().to_be_bytes());
         transcript.extend_from_slice(&self.sender_id.to_be_bytes());
         transcript.extend_from_slice(&self.recipient_id.to_be_bytes());
         transcript.push(self.purpose);
@@ -285,7 +307,7 @@ fn session_offer_value(params: &PipeSessionParameters, key: [u8; 32]) -> DataVal
     DataValue::Array(vec![
         DataValue::Str(PIPE_SESSION_OFFER_DOMAIN.to_owned()),
         DataValue::Bytes(params.session_id.clone()),
-        DataValue::UnsignedNumber(params.pipe_id as u128),
+        DataValue::UnsignedNumber(params.pipe_id.get() as u128),
         DataValue::UnsignedNumber(params.sender_id as u128),
         DataValue::UnsignedNumber(params.recipient_id as u128),
         DataValue::UnsignedNumber(params.purpose as u128),
@@ -297,7 +319,7 @@ fn session_offer_value(params: &PipeSessionParameters, key: [u8; 32]) -> DataVal
 fn fs_common_fields(params: &PipeSessionParameters) -> Vec<DataValue> {
     vec![
         DataValue::Bytes(params.session_id.clone()),
-        DataValue::UnsignedNumber(params.pipe_id as u128),
+        DataValue::UnsignedNumber(params.pipe_id.get() as u128),
         DataValue::UnsignedNumber(params.sender_id as u128),
         DataValue::UnsignedNumber(params.recipient_id as u128),
         DataValue::UnsignedNumber(params.purpose as u128),
@@ -345,7 +367,7 @@ fn validate_fs_common(
     if fields.len() != expected_len
         || fields.first().and_then(DataValue::as_str) != Some(expected_domain)
         || offer_field(fields, 1)?.as_bytes_slice() != Some(expected.session_id())
-        || u32::try_from(unsigned_field(fields, 2)?).ok() != Some(expected.pipe_id)
+        || u32::try_from(unsigned_field(fields, 2)?).ok() != Some(expected.pipe_id.get())
         || u64::try_from(unsigned_field(fields, 3)?).ok() != Some(expected.sender_id)
         || u64::try_from(unsigned_field(fields, 4)?).ok() != Some(expected.recipient_id)
         || u8::try_from(unsigned_field(fields, 5)?).ok() != Some(expected.purpose)
@@ -577,7 +599,7 @@ fn validate_session_offer_with_keys(
     if fields.len() != 8
         || offer_field(fields, 0)?.as_str() != Some(PIPE_SESSION_OFFER_DOMAIN)
         || offer_field(fields, 1)?.as_bytes_slice() != Some(expected.session_id())
-        || u32::try_from(unsigned_field(fields, 2)?).ok() != Some(expected.pipe_id)
+        || u32::try_from(unsigned_field(fields, 2)?).ok() != Some(expected.pipe_id.get())
         || u64::try_from(unsigned_field(fields, 3)?).ok() != Some(expected.sender_id)
         || u64::try_from(unsigned_field(fields, 4)?).ok() != Some(expected.recipient_id)
         || u8::try_from(unsigned_field(fields, 5)?).ok() != Some(expected.purpose)
@@ -1370,8 +1392,15 @@ mod tests {
         let recipient = Keyring::generate();
         let sender_public = sender.public_key_bundle();
         let recipient_public = recipient.public_key_bundle();
-        let params = PipeSessionParameters::new(b"session/client/peer/pipe-7", 7, 41, 99, 0x40, 0)
-            .expect("parameters");
+        let params = PipeSessionParameters::new_id(
+            b"session/client/peer/pipe-7",
+            PipeId::new(7).unwrap(),
+            41,
+            99,
+            0x40,
+            0,
+        )
+        .expect("parameters");
         let writer_params = params.clone();
         let (left, right) = duplex(128 * 1024);
         let writer_task = tokio::spawn(async move {
@@ -1404,8 +1433,15 @@ mod tests {
         let recipient_public = recipient.public_key_bundle();
         let historical_public = historical_sender.public_key_bundle();
         let current_public = current_sender.public_key_bundle();
-        let params = PipeSessionParameters::new(b"historical-session", 8, 41, 99, 0x40, 0)
-            .expect("parameters");
+        let params = PipeSessionParameters::new_id(
+            b"historical-session",
+            PipeId::new(8).unwrap(),
+            41,
+            99,
+            0x40,
+            0,
+        )
+        .expect("parameters");
         let writer_params = params.clone();
         let (left, right) = duplex(128 * 1024);
         let writer_task = tokio::spawn(async move {
@@ -1435,8 +1471,15 @@ mod tests {
         let historical_public = historical_sender.public_key_bundle();
         let current_public = current_sender.public_key_bundle();
         let recipient_public = recipient.public_key_bundle();
-        let params = PipeSessionParameters::new(b"forward-secure-session", 17, 41, 99, 0x40, 0)
-            .expect("parameters");
+        let params = PipeSessionParameters::new_id(
+            b"forward-secure-session",
+            PipeId::new(17).unwrap(),
+            41,
+            99,
+            0x40,
+            0,
+        )
+        .expect("parameters");
         let responder_params = params.clone();
         let (left, right) = duplex(256 * 1024);
         let responder = tokio::spawn(async move {
@@ -1477,8 +1520,15 @@ mod tests {
         let first = Keyring::generate();
         let second = Keyring::generate();
         let outsider = Keyring::generate();
-        let params =
-            PipeSessionParameters::new(b"group-session", 11, 41, 99, 0x40, 0).expect("parameters");
+        let params = PipeSessionParameters::new_id(
+            b"group-session",
+            PipeId::new(11).unwrap(),
+            41,
+            99,
+            0x40,
+            0,
+        )
+        .expect("parameters");
         let key = [8u8; 32];
         let offer = build_session_offer(
             &params,

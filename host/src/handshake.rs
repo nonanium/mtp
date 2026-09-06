@@ -186,7 +186,10 @@ impl HandshakeContext {
 
             let dispatcher = Arc::new(PipeDispatcher {
                 pending_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
-                expired_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
+                expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
+                    self.config.policy.pipe_tombstone_ttl.as_secs_f64() * 1000.0,
+                    self.config.policy.pipe_tombstone_capacity,
+                )),
                 pending_pipes: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 policy: Arc::new(self.config.policy),
                 type_map: type_map.clone(),
@@ -276,7 +279,10 @@ impl HandshakeContext {
 
             let dispatcher = Arc::new(PipeDispatcher {
                 pending_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
-                expired_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
+                expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
+                    self.config.policy.pipe_tombstone_ttl.as_secs_f64() * 1000.0,
+                    self.config.policy.pipe_tombstone_capacity,
+                )),
                 pending_pipes: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 policy: Arc::new(self.config.policy),
                 type_map,

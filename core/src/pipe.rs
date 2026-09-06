@@ -1,3 +1,4 @@
+use mtp_common::PipeId;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -45,7 +46,7 @@ impl<S: tokio::io::AsyncWrite + Send + Unpin> AsyncWrite for PipeWriter<S> {
 pub struct PipeReader<R> {
     pub(crate) stream: R,
     pub(crate) description: String,
-    pub(crate) pipe_id: u32,
+    pub(crate) pipe_id: PipeId,
 }
 
 impl<R> PipeReader<R> {
@@ -57,8 +58,13 @@ impl<R> PipeReader<R> {
         &self.description
     }
 
-    pub fn pipe_id(&self) -> u32 {
+    pub fn pipe_id_value(&self) -> PipeId {
         self.pipe_id
+    }
+
+    #[deprecated(note = "use pipe_id_value")]
+    pub fn pipe_id(&self) -> u32 {
+        self.pipe_id.get()
     }
 }
 

@@ -4,43 +4,12 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, Instant};
 
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap};
+use mtp_common::PingId;
 use mtp_native::{Receiver, Sender};
 
 pub(crate) struct PingSession {
     pub(crate) last_ping: Arc<Mutex<Option<Duration>>>,
     pub(crate) task: tokio::task::JoinHandle<()>,
-}
-
-#[derive(Default)]
-struct PingTracker {
-    pending: Option<(u32, Instant)>,
-    missed_pings: usize,
-}
-
-impl PingTracker {
-    fn begin_round(&mut self) -> usize {
-        if self.pending.take().is_some() {
-            self.missed_pings += 1;
-        }
-        self.missed_pings
-    }
-
-    fn sent(&mut self, id: u32) {
-        self.pending = Some((id, Instant::now()));
-    }
-
-    fn received(&mut self, id: u32) -> Option<Duration> {
-        if self
-            .pending
-            .as_ref()
-            .is_none_or(|(pending, _)| *pending != id)
-        {
-            return None;
-        }
-        let (_, sent_at) = self.pending.take()?;
-        self.missed_pings = 0;
-        Some(sent_at.elapsed())
-    }
 }
 
 impl PingSession {
@@ -81,7 +50,7 @@ pub(crate) async fn start_ping_session(
     let task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await;
-        let mut tracker = PingTracker::default();
+        let mut tracker = mtp_common::PingTracker::default();
 
         loop {
             tokio::select! {
@@ -92,7 +61,7 @@ pub(crate) async fn start_ping_session(
                 }
                 _ = ticker.tick() => {
                     let missed_pings = tracker.begin_round();
-                    ping_receiver.set_expected_pong_id(None).await;
+                    ping_receiver.set_expected_pong_id_value(None).await;
                     if max_missed_pings > 0 && missed_pings >= max_missed_pings {
                         sender.close().await;
                         break;
@@ -123,21 +92,26 @@ pub(crate) async fn start_ping_session(
                         sender.close().await;
                         break;
                     };
-                    ping_receiver.set_expected_pong_id(Some(id)).await;
+                    let Some(id) = PingId::new(id) else {
+                        sender.close().await;
+                        break;
+                    };
+                    tracker.sent(id, Instant::now());
+                    ping_receiver.set_expected_pong_id_value(Some(id)).await;
                     if sender.send(&ping).await.is_err() {
-                        ping_receiver.set_expected_pong_id(None).await;
+                        ping_receiver.set_expected_pong_id_value(None).await;
                         sender.close().await;
                         break;
                     }
-                    tracker.sent(id);
                 }
                 pong = pong_rx.recv() => match pong {
                     Some(pong) => {
                         if let Some(id) = pong.id()
-                            && let Some(ping) = tracker.received(id)
+                            && let Some(ping_id) = PingId::new(id)
+                            && let Some(ping) = tracker.received(ping_id)
                         {
                             let mut last_ping = ping_state.lock().await;
-                            *last_ping = Some(ping);
+                            *last_ping = Some(ping.elapsed());
                         }
                     }
                     None => break,
@@ -151,29 +125,30 @@ pub(crate) async fn start_ping_session(
 
 #[cfg(test)]
 mod tests {
-    use super::PingTracker;
+    use mtp_common::PingId;
+    use tokio::time::Instant;
 
     #[test]
     fn successful_pong_resets_consecutive_misses() {
-        let mut tracker = PingTracker::default();
-        tracker.sent(1);
+        let mut tracker = mtp_common::PingTracker::default();
+        tracker.sent(PingId::new(1).unwrap(), Instant::now());
         assert_eq!(tracker.begin_round(), 1);
 
-        tracker.sent(2);
-        assert!(tracker.received(2).is_some());
+        tracker.sent(PingId::new(2).unwrap(), Instant::now());
+        assert!(tracker.received(PingId::new(2).unwrap()).is_some());
 
-        tracker.sent(3);
+        tracker.sent(PingId::new(3).unwrap(), Instant::now());
         assert_eq!(tracker.begin_round(), 1);
     }
 
     #[test]
     fn stale_pong_does_not_acknowledge_current_round() {
-        let mut tracker = PingTracker::default();
-        tracker.sent(1);
+        let mut tracker = mtp_common::PingTracker::default();
+        tracker.sent(PingId::new(1).unwrap(), Instant::now());
         assert_eq!(tracker.begin_round(), 1);
-        tracker.sent(2);
+        tracker.sent(PingId::new(2).unwrap(), Instant::now());
 
-        assert!(tracker.received(1).is_none());
+        assert!(tracker.received(PingId::new(1).unwrap()).is_none());
         assert_eq!(tracker.begin_round(), 2);
     }
 }

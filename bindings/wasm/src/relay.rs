@@ -184,11 +184,6 @@ pub(crate) fn relay_open_options(
             )?,
         },
         ProtectedLimits {
-            max_message_id_bytes: limit_usize(
-                limits,
-                "maxMessageIdBytes",
-                protected_defaults.max_message_id_bytes,
-            )?,
             max_metadata_encoded_bytes: limit_usize(
                 limits,
                 "maxMetadataEncodedBytes",
@@ -241,8 +236,8 @@ impl WasmVerifiedRelayMetadata {
         self.inner.final_recipient_id()
     }
 
-    pub fn message_id(&self) -> String {
-        self.inner.message_id().to_owned()
+    pub fn message_id(&self) -> u128 {
+        self.inner.message_id().get()
     }
 
     pub fn created_at(&self) -> u64 {
@@ -284,7 +279,7 @@ impl WasmVerifiedRelayContent {
     }
 
     pub fn message_type(&self) -> String {
-        self.inner.message_type.clone()
+        self.inner.message_type.name().to_owned()
     }
 
     pub fn content(&self) -> Result<Vec<u8>, JsValue> {

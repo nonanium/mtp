@@ -1,7 +1,7 @@
 use mtp_codec::{CommunicationValue, Version, registry::VersionedCodec};
 #[cfg(feature = "pipes")]
 use mtp_codec::{DataType, DataValue};
-use mtp_common::CommunicationError;
+use mtp_common::{CommunicationError, RequestId};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -50,17 +50,22 @@ impl MTPConnection {
         request: &CommunicationValue,
         expected_response: Option<mtp_codec::CommunicationType>,
     ) -> Result<CommunicationValue, CommunicationError> {
-        let request_id = request
-            .id()
-            .ok_or_else(|| CommunicationError::Other("request frame must contain an id".into()))?;
-        if request_id == 0 {
-            return Err(CommunicationError::Other(
-                "request frame must have a non-zero id".into(),
-            ));
-        }
+        let request_id = request.id().and_then(RequestId::new).ok_or_else(|| {
+            CommunicationError::Other("request frame must have a non-zero id".into())
+        })?;
+        let expected_type = expected_response
+            .map(|expected| {
+                expected.try_to_id(self.codec.type_map()).ok_or_else(|| {
+                    CommunicationError::Other(format!(
+                        "expected response type {expected:?} is absent from the type map"
+                    ))
+                })
+            })
+            .transpose()?;
         if crate::pipe::is_expired_request(&self.pipe_dispatcher, request_id).await {
             return Err(CommunicationError::Other(format!(
-                "request id {request_id} recently timed out; use a new request id"
+                "request id {} recently timed out; use a new request id",
+                request_id.get()
             )));
         }
 
@@ -68,18 +73,23 @@ impl MTPConnection {
         let token = Arc::new(());
         {
             let mut pending = self.pipe_dispatcher.pending_requests.lock().await;
-            if pending.contains_key(&request_id) {
+            if pending.pending.contains_key(&request_id) {
                 return Err(CommunicationError::Other(format!(
-                    "request id {request_id} is already pending"
+                    "request id {} is already pending",
+                    request_id.get()
                 )));
             }
-            pending.insert(
-                request_id,
-                PendingRequest {
-                    token: token.clone(),
-                    sender,
-                },
-            );
+            pending
+                .insert(
+                    request_id,
+                    PendingRequest {
+                        token: token.clone(),
+                        expected_type,
+                        sender,
+                    },
+                    mtp_common::unix_time_millis().unwrap_or_default() as f64,
+                )
+                .map_err(|_| CommunicationError::Other("request id is already pending".into()))?;
         }
 
         let response = match tokio::time::timeout(self.request_timeout, async {
@@ -101,23 +111,12 @@ impl MTPConnection {
                 crate::pipe::expire_pending_request(&self.pipe_dispatcher, request_id, &token)
                     .await;
                 return Err(CommunicationError::Other(format!(
-                    "request {request_id} timed out after {:?}",
+                    "request {} timed out after {:?}",
+                    request_id.get(),
                     self.request_timeout
                 )));
             }
         };
-
-        if let Some(expected) = expected_response {
-            let expected_type = expected.try_to_id(self.codec.type_map());
-            if Some(response.get_type()) != expected_type {
-                return Err(CommunicationError::Other(format!(
-                    "unexpected response type: expected {:?}, got {:?}; parsed {}",
-                    expected_type,
-                    response.get_type(),
-                    response
-                )));
-            }
-        }
 
         Ok(response)
     }
@@ -146,9 +145,8 @@ impl MTPConnection {
                 .lock()
                 .map_err(|_| mtp_common::PipeError::ConnectionClosed)?;
             let pipe_id = loop {
-                let candidate = rand::random::<u32>();
-                if candidate != 0
-                    && !pending.contains_key(&candidate)
+                let candidate = mtp_common::PipeId::random();
+                if !pending.contains_key(&candidate)
                     && !is_expired_creation(&self.pipe_dispatcher, candidate)
                 {
                     break candidate;
@@ -170,7 +168,7 @@ impl MTPConnection {
             mtp_codec::CommunicationType::PipeRequest,
             self.codec.type_map(),
         )
-        .with_id(pipe_id)
+        .with_id(pipe_id.get())
         .add_typed_default(DataType::Description, DataValue::Str(description.into()));
 
         if let Err(error) = self.sender.send(&request).await {
@@ -232,12 +230,17 @@ pub(crate) async fn connection_from_parts(
         let (pipe_req_tx, pipe_req_rx) = mpsc::channel::<PipeRequest>(receiver_queue_capacity);
 
         let dispatcher = Arc::new(PipeDispatcher {
-            pending_requests: Mutex::new(std::collections::HashMap::new()),
-            expired_requests: Mutex::new(std::collections::HashMap::new()),
+            pending_requests: Mutex::new(mtp_common::RequestTracker::new(
+                config.policy.request_tombstone_ttl.as_secs_f64() * 1000.0,
+                config.policy.request_tombstone_capacity,
+            )),
             #[cfg(feature = "pipes")]
             type_map: type_map.clone(),
             pending_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
-            expired_creations: std::sync::Mutex::new(std::collections::HashMap::new()),
+            expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
+                config.policy.pipe_tombstone_ttl.as_secs_f64() * 1000.0,
+                config.policy.pipe_tombstone_capacity,
+            )),
             pending_pipes: Mutex::new(std::collections::HashMap::new()),
             policy: Arc::new(config.policy),
         });
@@ -279,8 +282,10 @@ pub(crate) async fn connection_from_parts(
             receiver_queue_capacity,
         );
         let dispatcher = Arc::new(PipeDispatcher {
-            pending_requests: Mutex::new(std::collections::HashMap::new()),
-            expired_requests: Mutex::new(std::collections::HashMap::new()),
+            pending_requests: Mutex::new(mtp_common::RequestTracker::new(
+                config.policy.request_tombstone_ttl.as_secs_f64() * 1000.0,
+                config.policy.request_tombstone_capacity,
+            )),
             #[cfg(feature = "pipes")]
             type_map,
         });

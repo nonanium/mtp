@@ -24,7 +24,7 @@ pub async fn run_pipe_demo(
             println!("  [pipe {i}.{run}] creating pipe ({size} bytes): {description}");
 
             let handle = conn.create_pipe(&description).await?;
-            let pipe_id = handle.pipe_id();
+            let pipe_id = handle.pipe_id_value();
             println!("  [pipe {i}.{run}] create_pipe returned (pipe_id={pipe_id})");
 
             // Overall timer starts before any I/O

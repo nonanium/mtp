@@ -19,7 +19,7 @@ pub use mtp_native::SendMode;
 pub use mtp_native::Sender;
 
 #[cfg(feature = "pipes")]
-pub use mtp_common::PipeError;
+pub use mtp_common::{PipeError, PipeId};
 #[cfg(feature = "pipes")]
 pub use mtp_native::PipeWriter;
 #[cfg(feature = "pipes")]

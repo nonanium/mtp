@@ -82,7 +82,7 @@ export interface MTPRelayMetadataState {
   relayVersion: number;
   signerId: bigint;
   finalRecipientId: bigint;
-  messageId: string;
+  messageId: bigint;
   createdAt: bigint;
   hasMetadata: boolean;
   metadata?: MTPDataValue;
@@ -163,7 +163,7 @@ export class MTPVerifiedRelayMetadata {
   get finalRecipientId(): bigint {
     return this.state.finalRecipientId;
   }
-  get messageId(): string {
+  get messageId(): bigint {
     return this.state.messageId;
   }
   get createdAt(): bigint {

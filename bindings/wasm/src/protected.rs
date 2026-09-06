@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 use mtp_codec::{
-    DataValue, DecodeLimits, EncodeLimits, ProtectedError, ProtectedLimits,
+    CommunicationType, DataValue, DecodeLimits, EncodeLimits, ProtectedError, ProtectedLimits,
     ProtectedMessageBuilder, ProtectedOpenOptions, ProtectionError, ProtectionPolicy,
     ProtectionPurpose, VerifiedProtectedMessage,
 };
@@ -97,11 +97,6 @@ fn protected_open_options(
         max_output_size: limit_usize(limits, "maxOutputSize", encode_defaults.max_output_size)?,
     };
     let protected_limits = ProtectedLimits {
-        max_message_id_bytes: limit_usize(
-            limits,
-            "maxMessageIdBytes",
-            protected_defaults.max_message_id_bytes,
-        )?,
         max_metadata_encoded_bytes: limit_usize(
             limits,
             "maxMetadataEncodedBytes",
@@ -200,35 +195,35 @@ pub struct WasmVerifiedProtectedMessage {
 #[wasm_bindgen]
 impl WasmVerifiedProtectedMessage {
     pub fn protected_version(&self) -> u64 {
-        self.inner.protected_version
+        self.inner.protected_version()
     }
 
     pub fn signer_id(&self) -> u64 {
-        self.inner.signer_id
+        self.inner.signer_id()
     }
 
     pub fn final_recipient_id(&self) -> u64 {
-        self.inner.final_recipient_id
+        self.inner.final_recipient_id()
     }
 
-    pub fn message_id(&self) -> String {
-        self.inner.message_id.clone()
+    pub fn message_id(&self) -> u128 {
+        self.inner.message_id().get()
     }
 
     pub fn created_at(&self) -> u64 {
-        self.inner.created_at
+        self.inner.created_at()
     }
 
     pub fn message_type(&self) -> String {
-        self.inner.message_type.clone()
+        self.inner.message_type().name().to_owned()
     }
 
     pub fn content(&self) -> Result<Vec<u8>, JsValue> {
-        serialize_data_value(&self.inner.content)
+        serialize_data_value(self.inner.content())
     }
 
     pub fn matched_signer_key_index(&self) -> usize {
-        self.inner.matched_signer_key_index
+        self.inner.matched_signer_key_index()
     }
 }
 
@@ -242,7 +237,7 @@ pub fn build_protected_frame_with_keyring(
     encoded_content: &[u8],
     signer_id: u64,
     final_recipient_id: u64,
-    message_id: &str,
+    message_id: u128,
     created_at: u64,
     signature_purpose: u8,
     encryption_purpose: u8,
@@ -276,7 +271,7 @@ fn build_protected_frame_with_keyring_impl(
     encoded_content: &[u8],
     signer_id: u64,
     final_recipient_id: u64,
-    message_id: &str,
+    message_id: u128,
     created_at: u64,
     signature_purpose: u8,
     encryption_purpose: u8,
@@ -313,7 +308,9 @@ fn build_protected_frame_with_keyring_impl(
     let signer = relay_signer_from_keyring(&keyring, signature_suite)?;
     let recipients = public_key_bundles_from_js(&recipient_public_key_bundles)?;
     let mut builder = ProtectedMessageBuilder::new(
-        message_type,
+        CommunicationType::from_name(message_type).ok_or_else(|| {
+            structured_error("invalid-message-type", "unknown communication type")
+        })?,
         content,
         signer_id,
         final_recipient_id,
@@ -348,7 +345,7 @@ pub fn build_protected_frame_with_keyring_with_limits(
     encoded_content: &[u8],
     signer_id: u64,
     final_recipient_id: u64,
-    message_id: &str,
+    message_id: u128,
     created_at: u64,
     signature_purpose: u8,
     encryption_purpose: u8,
@@ -678,7 +675,7 @@ mod tests {
             &content,
             7,
             42,
-            "wasm-complete-frame",
+            123,
             123,
             SIGNATURE_PURPOSE,
             ENCRYPTION_PURPOSE,

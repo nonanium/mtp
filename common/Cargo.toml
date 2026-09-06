@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 thiserror = "2.0.18"
+rand = { version = "0.10.1", features = ["std", "std_rng"] }
 
 [features]
 pipes = []

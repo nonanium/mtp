@@ -1,9 +1,9 @@
-use crate::ConnectionHandle;
 use crate::framing::RetryClassifier;
 #[cfg(feature = "pipes")]
 use crate::pipe::PipeReader;
+use crate::{ConnectionHandle, PipeId};
 use mtp_codec::{CommunicationValue, DecodeError, DecodeLimits, EncodeLimits, TypeMap};
-use mtp_common::CommunicationError;
+use mtp_common::{CommunicationError, PingId};
 #[cfg(feature = "pipes")]
 use mtp_common::{FirstFrameDisposition, classify_first_frame};
 use mtp_core::RuntimePolicy;
@@ -79,7 +79,7 @@ enum SenderState {
 
 #[derive(Clone)]
 pub struct Sender {
-    send_guard: Arc<Mutex<()>>,
+    send_guard: Arc<RwLock<()>>,
     stream_guard: Arc<Mutex<Option<wtransport::SendStream>>>,
     state: Arc<Mutex<SenderState>>,
     handle: Arc<ConnectionHandle>,
@@ -92,7 +92,7 @@ impl Sender {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>, policy: Arc<Policy>) -> Self {
         let policy = Arc::new(RuntimePolicy::new(&policy));
         Self {
-            send_guard: Arc::new(Mutex::new(())),
+            send_guard: Arc::new(RwLock::new(())),
             stream_guard: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(SenderState::Open)),
             handle,
@@ -297,8 +297,18 @@ impl Sender {
 
     #[instrument(skip(self, data), level = "trace")]
     pub async fn send(&self, data: &CommunicationValue) -> Result<(), CommunicationError> {
-        let _send_lock = self.send_guard.lock().await;
+        if self.policy.send_mode == SendMode::SingleStreamPerMessage
+            && self.policy.parallel_multi_stream_sends
+        {
+            let _send_lock = self.send_guard.read().await;
+            self.send_locked(data).await
+        } else {
+            let _send_lock = self.send_guard.write().await;
+            self.send_locked(data).await
+        }
+    }
 
+    async fn send_locked(&self, data: &CommunicationValue) -> Result<(), CommunicationError> {
         {
             let state = self.state.lock().await;
             if *state != SenderState::Open {
@@ -358,7 +368,7 @@ impl Sender {
 
     #[instrument(skip(self), level = "trace")]
     pub async fn finish_stream(&self) -> Result<(), CommunicationError> {
-        let _send_lock = self.send_guard.lock().await;
+        let _send_lock = self.send_guard.write().await;
         if *self.state.lock().await != SenderState::Open {
             return Err(self
                 .handle
@@ -392,12 +402,28 @@ impl Sender {
 
     #[cfg(feature = "pipes")]
     #[instrument(skip(self, description), level = "trace")]
-    pub async fn open_pipe(
+    pub async fn open_pipe_id(
         &self,
-        pipe_id: u32,
+        pipe_id: PipeId,
         description: &str,
     ) -> Result<crate::pipe::PipeWriter, CommunicationError> {
-        let _send_lock = self.send_guard.lock().await;
+        if self.policy.send_mode == SendMode::SingleStreamPerMessage
+            && self.policy.parallel_multi_stream_sends
+        {
+            let _send_lock = self.send_guard.read().await;
+            return self.open_pipe_id_locked(pipe_id, description).await;
+        }
+
+        let _send_lock = self.send_guard.write().await;
+        self.open_pipe_id_locked(pipe_id, description).await
+    }
+
+    #[cfg(feature = "pipes")]
+    async fn open_pipe_id_locked(
+        &self,
+        pipe_id: PipeId,
+        description: &str,
+    ) -> Result<crate::pipe::PipeWriter, CommunicationError> {
         if *self.state.lock().await != SenderState::Open {
             return Err(self
                 .handle
@@ -421,7 +447,7 @@ impl Sender {
             mtp_codec::CommunicationType::PipeRequest,
             &type_map,
         )
-        .with_id(pipe_id)
+        .with_id(pipe_id.get())
         .add_typed_default(
             mtp_codec::DataType::Description,
             mtp_codec::DataValue::Str(description.to_string()),
@@ -430,6 +456,18 @@ impl Sender {
         Self::write_frame(&mut stream, &request, &self.policy).await?;
 
         Ok(crate::pipe::PipeWriter { stream })
+    }
+
+    #[cfg(feature = "pipes")]
+    #[deprecated(note = "use open_pipe_id with PipeId")]
+    pub async fn open_pipe(
+        &self,
+        pipe_id: u32,
+        description: &str,
+    ) -> Result<crate::pipe::PipeWriter, CommunicationError> {
+        let pipe_id = PipeId::try_from(pipe_id)
+            .map_err(|_| CommunicationError::Other("pipe id must be non-zero".into()))?;
+        self.open_pipe_id(pipe_id, description).await
     }
 
     #[instrument(skip(self), level = "trace")]
@@ -443,7 +481,7 @@ impl Sender {
         let state = self.state.clone();
 
         tokio::spawn(async move {
-            let _send_lock = send_guard.lock().await;
+            let _send_lock = send_guard.write().await;
             {
                 let mut sender_state = state.lock().await;
                 if *sender_state != SenderState::Open {
@@ -497,7 +535,7 @@ impl Sender {
         let connection = self.connection.clone();
         let handle = self.handle.clone();
         let policy = self.policy.clone();
-        let _send_lock = self.send_guard.lock().await;
+        let _send_lock = self.send_guard.write().await;
         {
             let mut state = self.state.lock().await;
             if *state != SenderState::Open {
@@ -589,7 +627,7 @@ struct ReceiverInner {
     type_map: Arc<RwLock<TypeMap>>,
     decode_rejections: Arc<DecodeRejectionCounters>,
     #[cfg(feature = "pipes")]
-    expected_pipes: Arc<std::sync::Mutex<HashSet<u32>>>,
+    expected_pipes: Arc<std::sync::Mutex<HashSet<PipeId>>>,
 }
 
 impl Clone for Receiver {
@@ -612,11 +650,11 @@ impl Drop for Receiver {
 struct PingControl {
     pong_sender: Option<Sender>,
     pong_observer: Option<mpsc::Sender<CommunicationValue>>,
-    expected_pong_id: Option<u32>,
+    expected_pong_id: Option<PingId>,
 }
 
 impl PingControl {
-    fn accepts_pong(&mut self, id: Option<u32>) -> bool {
+    fn accepts_pong(&mut self, id: Option<PingId>) -> bool {
         if self.expected_pong_id == id && id.is_some() {
             self.expected_pong_id = None;
             true
@@ -790,7 +828,7 @@ impl Receiver {
                                                         let is_pipe_request = msg.is_type(
                                                             mtp_codec::CommunicationType::PipeRequest,
                                                         );
-                                                        let pipe_id = msg.id().filter(|id| *id != 0);
+                                                        let pipe_id = msg.id().and_then(PipeId::new);
                                                         let pipe_is_expected = is_pipe_request && pipe_id.is_some_and(|pipe_id| {
                                                             stream_expected_pipes
                                                                 .lock()
@@ -798,7 +836,7 @@ impl Receiver {
                                                         });
                                                         let disposition = match classify_first_frame(
                                                             is_pipe_request,
-                                                            msg.id(),
+                                                            pipe_id.map(PipeId::get),
                                                             pipe_is_expected,
                                                         ) {
                                                             Ok(disposition) => disposition,
@@ -812,6 +850,9 @@ impl Receiver {
                                                         };
 
                                                         if let FirstFrameDisposition::Pipe(pipe_id) = disposition {
+                                                            let Some(pipe_id) = PipeId::new(pipe_id) else {
+                                                                unreachable!("classified pipe frames have a non-zero ID");
+                                                            };
                                                             let description = msg
                                                                 .get_str(mtp_codec::DataType::Description)
                                                                 .unwrap_or("")
@@ -872,7 +913,7 @@ impl Receiver {
                                                 if msg.is_type(mtp_codec::CommunicationType::Pong) {
                                                     let observer = {
                                                         let mut control = stream_ping_control.write().await;
-                                                        if control.accepts_pong(msg.id()) {
+                                                    if control.accepts_pong(msg.id().and_then(PingId::new)) {
                                                             control.pong_observer.clone()
                                                         } else {
                                                             None
@@ -994,10 +1035,7 @@ impl Receiver {
     }
 
     #[cfg(feature = "pipes")]
-    pub fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
-        if pipe_id == 0 {
-            return Err(CommunicationError::Other("pipe id must be non-zero".into()));
-        }
+    pub fn expect_pipe_id(&self, pipe_id: PipeId) -> Result<(), CommunicationError> {
         self.inner
             .expected_pipes
             .lock()
@@ -1007,9 +1045,25 @@ impl Receiver {
     }
 
     #[cfg(feature = "pipes")]
-    pub fn cancel_expected_pipe(&self, pipe_id: u32) {
+    #[deprecated(note = "use expect_pipe_id with PipeId")]
+    pub fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
+        let pipe_id = PipeId::try_from(pipe_id)
+            .map_err(|_| CommunicationError::Other("pipe id must be non-zero".into()))?;
+        self.expect_pipe_id(pipe_id)
+    }
+
+    #[cfg(feature = "pipes")]
+    pub fn cancel_expected_pipe_id(&self, pipe_id: PipeId) {
         if let Ok(mut expected) = self.inner.expected_pipes.lock() {
             expected.remove(&pipe_id);
+        }
+    }
+
+    #[cfg(feature = "pipes")]
+    #[deprecated(note = "use cancel_expected_pipe_id with PipeId")]
+    pub fn cancel_expected_pipe(&self, pipe_id: u32) {
+        if let Some(pipe_id) = PipeId::new(pipe_id) {
+            self.cancel_expected_pipe_id(pipe_id);
         }
     }
 
@@ -1035,8 +1089,14 @@ impl Receiver {
         self.inner.ping_control.write().await.pong_observer = Some(observer);
     }
 
-    pub async fn set_expected_pong_id(&self, expected_pong_id: Option<u32>) {
+    pub async fn set_expected_pong_id_value(&self, expected_pong_id: Option<PingId>) {
         self.inner.ping_control.write().await.expected_pong_id = expected_pong_id;
+    }
+
+    #[deprecated(note = "use set_expected_pong_id_value with PingId")]
+    pub async fn set_expected_pong_id(&self, expected_pong_id: Option<u32>) {
+        self.set_expected_pong_id_value(expected_pong_id.and_then(PingId::new))
+            .await;
     }
 
     #[instrument(skip(stream, policy, decode_rejections), level = "trace")]
@@ -1363,15 +1423,15 @@ mod tests {
     #[test]
     fn ping_control_accepts_only_the_current_expected_id() {
         let mut control = PingControl {
-            expected_pong_id: Some(7),
+            expected_pong_id: Some(PingId::new(7).unwrap()),
             ..PingControl::default()
         };
 
-        assert!(!control.accepts_pong(Some(6)));
-        assert_eq!(control.expected_pong_id, Some(7));
-        assert!(control.accepts_pong(Some(7)));
+        assert!(!control.accepts_pong(Some(PingId::new(6).unwrap())));
+        assert_eq!(control.expected_pong_id, Some(PingId::new(7).unwrap()));
+        assert!(control.accepts_pong(Some(PingId::new(7).unwrap())));
         assert_eq!(control.expected_pong_id, None);
-        assert!(!control.accepts_pong(Some(7)));
+        assert!(!control.accepts_pong(Some(PingId::new(7).unwrap())));
     }
 
     #[test]

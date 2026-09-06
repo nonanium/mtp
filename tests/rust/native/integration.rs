@@ -395,11 +395,17 @@ async fn test_semaphore_saturation_with_concurrent_streams()
         join.await??;
     }
 
-    for i in 0..6u128 {
+    let mut received_ids = std::collections::BTreeSet::new();
+    for _ in 0..6 {
         let received =
             tokio::time::timeout(std::time::Duration::from_secs(5), host_rx.receive()).await??;
-        assert_numbered_message(&received, CommunicationType::Ping, i, &tm);
+        assert!(received.is_type(CommunicationType::Ping));
+        match received.get_data(DataType::PqSignature) {
+            Some(DataValue::UnsignedNumber(id)) => assert!(received_ids.insert(*id)),
+            other => panic!("received Ping without its numeric test payload: {other:?}"),
+        }
     }
+    assert_eq!(received_ids, (0..6).collect());
 
     client_tx.close().await;
     h.shutdown();

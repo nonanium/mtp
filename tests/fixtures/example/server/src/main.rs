@@ -49,7 +49,7 @@ async fn handle_pipe_loopback(
     let return_pipe = conn.create_pipe("loopback").await?;
     println!(
         "  [loopback] Requested return pipe {}; waiting for client acceptance ...",
-        return_pipe.pipe_id()
+        return_pipe.pipe_id_value()
     );
     let Some(mut writer) = return_pipe.wait().await? else {
         return Err("client denied the return pipe".into());

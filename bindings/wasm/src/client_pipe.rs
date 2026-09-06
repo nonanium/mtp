@@ -9,6 +9,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue};
+use mtp_common::{PipeId, RequestId, RequestTracker};
 
 use crate::error::js_error;
 use crate::pipe::PipeReader;
@@ -26,11 +27,12 @@ pub(crate) struct PendingPipeCreation {
     pub(crate) token: Rc<()>,
     pub(crate) sender: oneshot::Sender<Result<bool, JsValue>>,
 }
-pub(crate) type PendingPipeCreations = Rc<RefCell<HashMap<u32, PendingPipeCreation>>>;
+pub(crate) type PendingPipeCreations = Rc<RefCell<HashMap<PipeId, PendingPipeCreation>>>;
 type PipeResponseReceiver = oneshot::Receiver<Result<bool, JsValue>>;
 type PipeResponseCell = Rc<RefCell<Option<PipeResponseReceiver>>>;
 
-const DEFAULT_PIPE_CREATION_TIMEOUT_MS: u32 = 30_000;
+const DEFAULT_PIPE_DECISION_TIMEOUT_MS: u32 = 30_000;
+const DEFAULT_PIPE_STREAM_OPEN_TIMEOUT_MS: u32 = 30_000;
 const EXPIRED_PIPE_CREATION_TOMBSTONE_TTL_MS: f64 = 60_000.0;
 const MAX_EXPIRED_PIPE_CREATION_TOMBSTONES: usize = 1024;
 
@@ -39,77 +41,44 @@ pub(crate) struct PendingPipe {
     pub(crate) sender: oneshot::Sender<Result<PipeReader, JsValue>>,
 }
 
-pub(crate) type PendingPipes = Rc<RefCell<HashMap<u32, PendingPipe>>>;
+pub(crate) type PendingPipes = Rc<RefCell<HashMap<PipeId, PendingPipe>>>;
 
 pub(crate) fn remove_pending_request(
-    pending_requests: &Rc<RefCell<HashMap<u32, PendingRequest>>>,
-    request_id: u32,
+    pending_requests: &Rc<RefCell<RequestTracker<PendingRequest>>>,
+    request_id: RequestId,
     token: &Rc<()>,
 ) {
-    let mut pending = pending_requests.borrow_mut();
-    if pending
-        .get(&request_id)
-        .is_some_and(|entry| Rc::ptr_eq(&entry.token, token))
-    {
-        pending.remove(&request_id);
-    }
+    pending_requests
+        .borrow_mut()
+        .remove_if(request_id, |entry| Rc::ptr_eq(&entry.token, token));
 }
-
-const EXPIRED_REQUEST_TOMBSTONE_TTL_MS: f64 = 60_000.0;
-const MAX_EXPIRED_REQUEST_TOMBSTONES: usize = 1024;
 
 pub(crate) fn expire_pending_request(
-    pending_requests: &Rc<RefCell<HashMap<u32, PendingRequest>>>,
-    expired_requests: &Rc<RefCell<HashMap<u32, f64>>>,
-    request_id: u32,
+    pending_requests: &Rc<RefCell<RequestTracker<PendingRequest>>>,
+    request_id: RequestId,
     token: &Rc<()>,
 ) {
-    let mut pending = pending_requests.borrow_mut();
-    if pending
-        .get(&request_id)
-        .is_some_and(|entry| Rc::ptr_eq(&entry.token, token))
-    {
-        pending.remove(&request_id);
-        drop(pending);
-        let now = js_sys::Date::now();
-        let mut expired = expired_requests.borrow_mut();
-        expired.retain(|_, expires_at| *expires_at > now);
-        if expired.len() >= MAX_EXPIRED_REQUEST_TOMBSTONES
-            && let Some(oldest) = expired
-                .iter()
-                .min_by(|(_, left), (_, right)| left.total_cmp(right))
-                .map(|(id, _)| *id)
-        {
-            expired.remove(&oldest);
-        }
-        expired.insert(request_id, now + EXPIRED_REQUEST_TOMBSTONE_TTL_MS);
-    }
-}
-
-pub(crate) fn consume_expired_request(
-    expired_requests: &Rc<RefCell<HashMap<u32, f64>>>,
-    request_id: u32,
-) -> bool {
-    let now = js_sys::Date::now();
-    let mut expired = expired_requests.borrow_mut();
-    expired.retain(|_, expires_at| *expires_at > now);
-    expired.remove(&request_id).is_some()
+    pending_requests.borrow_mut().expire_if(
+        request_id,
+        |entry| Rc::ptr_eq(&entry.token, token),
+        js_sys::Date::now(),
+    );
 }
 
 pub(crate) fn is_expired_request(
-    expired_requests: &Rc<RefCell<HashMap<u32, f64>>>,
-    request_id: u32,
+    pending_requests: &Rc<RefCell<RequestTracker<PendingRequest>>>,
+    request_id: RequestId,
 ) -> bool {
-    let now = js_sys::Date::now();
-    let mut expired = expired_requests.borrow_mut();
-    expired.retain(|_, expires_at| *expires_at > now);
-    expired.contains_key(&request_id)
+    pending_requests
+        .borrow_mut()
+        .is_expired(request_id, js_sys::Date::now())
 }
 
 #[wasm_bindgen(typescript_custom_section)]
 const PIPE_HANDLE_TS: &str = r#"
 export interface WasmPipeHandle {
   wait(): Promise<PipeWriter | null>;
+  cancel(): Promise<void>;
   readonly pipeId: number;
   readonly description: string;
 }
@@ -117,12 +86,12 @@ export interface WasmPipeHandle {
 
 #[wasm_bindgen]
 pub struct WasmPipeHandle {
-    pipe_id: u32,
+    pipe_id: PipeId,
     description: String,
     transport: WasmTransport,
     response_rx: PipeResponseCell,
     pending: PendingPipeCreations,
-    expired: Rc<RefCell<HashMap<u32, f64>>>,
+    expired: Rc<RefCell<HashMap<PipeId, f64>>>,
     generation: u32,
     token: Rc<()>,
 }
@@ -137,7 +106,7 @@ impl WasmPipeHandle {
             .ok_or_else(|| js_error("handle already consumed"))?;
 
         let response = rx.fuse();
-        let timeout = wait_for_timeout(DEFAULT_PIPE_CREATION_TIMEOUT_MS).fuse();
+        let timeout = wait_for_timeout(DEFAULT_PIPE_DECISION_TIMEOUT_MS).fuse();
         pin_mut!(response, timeout);
         let accepted = select! {
             result = response => match result {
@@ -163,7 +132,7 @@ impl WasmPipeHandle {
                     &self.token,
                 );
                 return Err(js_error(format!(
-                    "pipe creation timed out after {DEFAULT_PIPE_CREATION_TIMEOUT_MS}ms"
+                    "pipe decision timed out after {DEFAULT_PIPE_DECISION_TIMEOUT_MS}ms"
                 )));
             },
         };
@@ -172,7 +141,7 @@ impl WasmPipeHandle {
             Ok(true) => {
                 let writer = self
                     .transport
-                    .open_pipe(self.pipe_id, &self.description)
+                    .open_pipe(self.pipe_id.get(), &self.description)
                     .await?;
                 Ok(JsValue::from(writer))
             }
@@ -181,9 +150,27 @@ impl WasmPipeHandle {
         }
     }
 
+    /// Withdraw this request before opening its byte stream.
+    pub async fn cancel(&self) -> Result<(), JsValue> {
+        expire_pending_pipe_creation(
+            &self.pending,
+            &self.expired,
+            self.pipe_id,
+            self.generation,
+            &self.token,
+        );
+        let type_map = self.transport.type_map();
+        let abort = CommunicationValue::new_with_type_map(CommunicationType::PipeAbort, &type_map)
+            .with_id(self.pipe_id.get());
+        let bytes = abort
+            .to_bytes()
+            .map_err(|error| js_error(format!("encode failed: {error}")))?;
+        self.transport.send_frame(&bytes).await
+    }
+
     #[wasm_bindgen(getter)]
     pub fn pipe_id(&self) -> u32 {
-        self.pipe_id
+        self.pipe_id.get()
     }
 
     #[wasm_bindgen(getter)]
@@ -238,8 +225,8 @@ async fn wait_for_timeout(timeout_ms: u32) -> Result<(), JsValue> {
 
 fn expire_pending_pipe_creation(
     pending: &PendingPipeCreations,
-    expired: &Rc<RefCell<HashMap<u32, f64>>>,
-    pipe_id: u32,
+    expired: &Rc<RefCell<HashMap<PipeId, f64>>>,
+    pipe_id: PipeId,
     generation: u32,
     token: &Rc<()>,
 ) {
@@ -274,8 +261,8 @@ fn expire_pending_pipe_creation(
 
 struct PendingPipeCreationGuard {
     pending: PendingPipeCreations,
-    expired: Rc<RefCell<HashMap<u32, f64>>>,
-    pipe_id: u32,
+    expired: Rc<RefCell<HashMap<PipeId, f64>>>,
+    pipe_id: PipeId,
     generation: u32,
     token: Rc<()>,
     armed: bool,
@@ -284,8 +271,8 @@ struct PendingPipeCreationGuard {
 impl PendingPipeCreationGuard {
     fn new(
         pending: PendingPipeCreations,
-        expired: Rc<RefCell<HashMap<u32, f64>>>,
-        pipe_id: u32,
+        expired: Rc<RefCell<HashMap<PipeId, f64>>>,
+        pipe_id: PipeId,
         generation: u32,
         token: Rc<()>,
     ) -> Self {
@@ -320,12 +307,12 @@ impl Drop for PendingPipeCreationGuard {
 
 struct PendingPipeGuard {
     pending: PendingPipes,
-    pipe_id: u32,
+    pipe_id: PipeId,
     generation: u32,
 }
 
 impl PendingPipeGuard {
-    fn new(pending: PendingPipes, pipe_id: u32, generation: u32) -> Self {
+    fn new(pending: PendingPipes, pipe_id: PipeId, generation: u32) -> Self {
         Self {
             pending,
             pipe_id,
@@ -341,8 +328,8 @@ impl Drop for PendingPipeGuard {
 }
 
 pub(crate) fn consume_expired_pipe_creation(
-    expired: &Rc<RefCell<HashMap<u32, f64>>>,
-    pipe_id: u32,
+    expired: &Rc<RefCell<HashMap<PipeId, f64>>>,
+    pipe_id: PipeId,
 ) -> bool {
     let now = js_sys::Date::now();
     let mut expired = expired.borrow_mut();
@@ -350,7 +337,7 @@ pub(crate) fn consume_expired_pipe_creation(
     expired.remove(&pipe_id).is_some()
 }
 
-fn is_expired_pipe_creation(expired: &Rc<RefCell<HashMap<u32, f64>>>, pipe_id: u32) -> bool {
+fn is_expired_pipe_creation(expired: &Rc<RefCell<HashMap<PipeId, f64>>>, pipe_id: PipeId) -> bool {
     let now = js_sys::Date::now();
     let mut expired = expired.borrow_mut();
     expired.retain(|_, expires_at| *expires_at > now);
@@ -369,31 +356,30 @@ pub(crate) async fn wasm_create_pipe(
     description: &str,
     pipe_id: u32,
     pending_pipe_creations: &PendingPipeCreations,
-    expired_pipe_creations: &Rc<RefCell<HashMap<u32, f64>>>,
+    expired_pipe_creations: &Rc<RefCell<HashMap<PipeId, f64>>>,
     generation: u32,
     current_generation: &Rc<std::cell::Cell<u32>>,
 ) -> Result<WasmPipeHandle, JsValue> {
     let (tx, rx) = oneshot::channel();
     let token = Rc::new(());
-    let mut pipe_id = pipe_id;
+    let mut pipe_id = PipeId::new(pipe_id).ok_or_else(|| js_error("pipe id must be non-zero"))?;
     for _ in 0..128 {
-        let occupied = pipe_id == 0
-            || pending_pipe_creations.borrow().contains_key(&pipe_id)
+        let occupied = pending_pipe_creations.borrow().contains_key(&pipe_id)
             || is_expired_pipe_creation(expired_pipe_creations, pipe_id);
         if !occupied {
             break;
         }
-        pipe_id = random_pipe_id()?;
+        pipe_id =
+            PipeId::new(random_pipe_id()?).ok_or_else(|| js_error("generated zero pipe id"))?;
     }
-    if pipe_id == 0
-        || pending_pipe_creations.borrow().contains_key(&pipe_id)
+    if pending_pipe_creations.borrow().contains_key(&pipe_id)
         || is_expired_pipe_creation(expired_pipe_creations, pipe_id)
     {
         return Err(js_error("could not allocate a unique pipe id"));
     }
     let type_map = transport.type_map();
     let request = CommunicationValue::new_with_type_map(CommunicationType::PipeRequest, &type_map)
-        .with_id(pipe_id)
+        .with_id(pipe_id.get())
         .add_typed_default(
             DataType::Description,
             DataValue::Str(description.to_string()),
@@ -418,7 +404,7 @@ pub(crate) async fn wasm_create_pipe(
     );
     debug!(
         target = "mtp.wasm",
-        pipe_id,
+        ?pipe_id,
         description,
         frame_len = request_bytes.len(),
         "sending pipe request"
@@ -450,16 +436,14 @@ pub(crate) async fn wasm_accept_pipe(
     generation: u32,
     current_generation: &Rc<std::cell::Cell<u32>>,
 ) -> Result<PipeReader, JsValue> {
-    if pipe_id == 0 {
-        return Err(js_error("pipe id must be non-zero"));
-    }
+    let pipe_id = PipeId::new(pipe_id).ok_or_else(|| js_error("pipe id must be non-zero"))?;
     if current_generation.get() != generation {
         return Err(js_error("connection attempt superseded"));
     }
 
     let type_map = transport.type_map();
     let resp = CommunicationValue::new_with_type_map(CommunicationType::PipeResponse, &type_map)
-        .with_id(pipe_id)
+        .with_id(pipe_id.get())
         .add_typed_default(DataType::Accepted, DataValue::BoolTrue);
     let resp_bytes = resp
         .to_bytes()
@@ -469,7 +453,10 @@ pub(crate) async fn wasm_accept_pipe(
     {
         let mut pending = pending_pipes.borrow_mut();
         if pending.contains_key(&pipe_id) {
-            return Err(js_error(format!("pipe {pipe_id} is already pending")));
+            return Err(js_error(format!(
+                "pipe {} is already pending",
+                pipe_id.get()
+            )));
         }
         pending.insert(
             pipe_id,
@@ -483,7 +470,7 @@ pub(crate) async fn wasm_accept_pipe(
 
     debug!(
         target = "mtp.wasm",
-        pipe_id,
+        ?pipe_id,
         accepted = true,
         frame_len = resp_bytes.len(),
         "sending pipe response"
@@ -496,7 +483,7 @@ pub(crate) async fn wasm_accept_pipe(
     }
 
     let response = rx.fuse();
-    let timeout = wait_for_timeout(DEFAULT_PIPE_CREATION_TIMEOUT_MS).fuse();
+    let timeout = wait_for_timeout(DEFAULT_PIPE_STREAM_OPEN_TIMEOUT_MS).fuse();
     pin_mut!(response, timeout);
     let result = select! {
         result = response => match result {
@@ -510,14 +497,14 @@ pub(crate) async fn wasm_accept_pipe(
             result?;
             remove_pending_pipe(pending_pipes, pipe_id, generation);
             return Err(js_error(format!(
-                "pipe acceptance timed out after {DEFAULT_PIPE_CREATION_TIMEOUT_MS}ms"
+                "pipe stream opening timed out after {DEFAULT_PIPE_STREAM_OPEN_TIMEOUT_MS}ms"
             )));
         },
     };
     result
 }
 
-fn remove_pending_pipe(pending_pipes: &PendingPipes, pipe_id: u32, generation: u32) {
+fn remove_pending_pipe(pending_pipes: &PendingPipes, pipe_id: PipeId, generation: u32) {
     let mut pending = pending_pipes.borrow_mut();
     if pending
         .get(&pipe_id)
@@ -528,12 +515,10 @@ fn remove_pending_pipe(pending_pipes: &PendingPipes, pipe_id: u32, generation: u
 }
 
 pub(crate) async fn wasm_deny_pipe(transport: &WasmTransport, pipe_id: u32) -> Result<(), JsValue> {
-    if pipe_id == 0 {
-        return Err(js_error("pipe id must be non-zero"));
-    }
+    let pipe_id = PipeId::new(pipe_id).ok_or_else(|| js_error("pipe id must be non-zero"))?;
     let type_map = transport.type_map();
     let resp = CommunicationValue::new_with_type_map(CommunicationType::PipeResponse, &type_map)
-        .with_id(pipe_id)
+        .with_id(pipe_id.get())
         .add_typed_default(DataType::Accepted, DataValue::BoolFalse);
     let resp_bytes = resp
         .to_bytes()

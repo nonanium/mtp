@@ -57,6 +57,7 @@ export interface PipeReader {
 
 export interface WasmPipeHandle {
     wait(): Promise<PipeWriter | null>;
+    cancel(): Promise<void>;
     readonly pipeId: number;
     readonly description: string;
 }
@@ -248,6 +249,7 @@ export class WasmPipeHandle {
     free(): void;
     [Symbol.dispose](): void;
     wait(): Promise<any>;
+    cancel(): Promise<void>;
     readonly description: string;
     readonly pipe_id: number;
 }
@@ -290,7 +292,7 @@ export class WasmVerifiedProtectedMessage {
     created_at(): bigint;
     final_recipient_id(): bigint;
     matched_signer_key_index(): number;
-    message_id(): string;
+    message_id(): bigint;
     message_type(): string;
     protected_version(): bigint;
     signer_id(): bigint;
@@ -314,7 +316,7 @@ export class WasmVerifiedRelayMetadata {
     encrypted_content(): Uint8Array;
     final_recipient_id(): bigint;
     matched_signer_key_index(): number;
-    message_id(): string;
+    message_id(): bigint;
     metadata(): any;
     relay_version(): bigint;
     signer_id(): bigint;
@@ -324,13 +326,13 @@ export class WasmVerifiedRelayMetadata {
  * Build a relay frame using an explicit Ed25519 or dual-signature policy.
  * `created_at` is Unix epoch milliseconds.
  */
-export function build_encrypted_relay_frame_with_keyring(message_type: string, data: any, signer_id: bigint, final_recipient_id: bigint, next_hop_id: bigint, message_id: string, created_at: bigint, encoded_metadata: Uint8Array | null | undefined, keyring_bytes: Uint8Array, signature_suite: number, metadata_recipient_public_key_bundles: any, content_recipient_public_key_bundles: any): Uint8Array;
+export function build_encrypted_relay_frame_with_keyring(message_type: string, data: any, signer_id: bigint, final_recipient_id: bigint, next_hop_id: bigint, message_id: bigint, created_at: bigint, encoded_metadata: Uint8Array | null | undefined, keyring_bytes: Uint8Array, signature_suite: number, metadata_recipient_public_key_bundles: any, content_recipient_public_key_bundles: any): Uint8Array;
 
 /**
  * Build a sealed relay frame with explicit encoder and semantic field
  * limits. The same limits are applied by the native relay builder.
  */
-export function build_encrypted_relay_frame_with_keyring_with_limits(message_type: string, data: any, signer_id: bigint, final_recipient_id: bigint, next_hop_id: bigint, message_id: string, created_at: bigint, encoded_metadata: Uint8Array | null | undefined, keyring_bytes: Uint8Array, signature_suite: number, metadata_recipient_public_key_bundles: any, content_recipient_public_key_bundles: any, limits: any): Uint8Array;
+export function build_encrypted_relay_frame_with_keyring_with_limits(message_type: string, data: any, signer_id: bigint, final_recipient_id: bigint, next_hop_id: bigint, message_id: bigint, created_at: bigint, encoded_metadata: Uint8Array | null | undefined, keyring_bytes: Uint8Array, signature_suite: number, metadata_recipient_public_key_bundles: any, content_recipient_public_key_bundles: any, limits: any): Uint8Array;
 
 /**
  * Build a typed MTP frame using generated communication/data type names.
@@ -370,13 +372,13 @@ export function build_ping_frame(client_id: bigint, description: string, timesta
  * The native builder owns both the protected envelope and the clear outer
  * routing fields, including the optional sender exposure and frame ID.
  */
-export function build_protected_frame_with_keyring(message_type: string, encoded_content: Uint8Array, signer_id: bigint, final_recipient_id: bigint, message_id: string, created_at: bigint, signature_purpose: number, encryption_purpose: number, keyring_bytes: Uint8Array, signature_suite: number, frame_id: number | null | undefined, expose_sender: boolean, recipient_public_key_bundles: any): Uint8Array;
+export function build_protected_frame_with_keyring(message_type: string, encoded_content: Uint8Array, signer_id: bigint, final_recipient_id: bigint, message_id: bigint, created_at: bigint, signature_purpose: number, encryption_purpose: number, keyring_bytes: Uint8Array, signature_suite: number, frame_id: number | null | undefined, expose_sender: boolean, recipient_public_key_bundles: any): Uint8Array;
 
 /**
  * Build a complete encrypted protected frame with explicit encoder and
  * semantic protected-field limits.
  */
-export function build_protected_frame_with_keyring_with_limits(message_type: string, encoded_content: Uint8Array, signer_id: bigint, final_recipient_id: bigint, message_id: string, created_at: bigint, signature_purpose: number, encryption_purpose: number, keyring_bytes: Uint8Array, signature_suite: number, frame_id: number | null | undefined, expose_sender: boolean, recipient_public_key_bundles: any, limits: any): Uint8Array;
+export function build_protected_frame_with_keyring_with_limits(message_type: string, encoded_content: Uint8Array, signer_id: bigint, final_recipient_id: bigint, message_id: bigint, created_at: bigint, signature_purpose: number, encryption_purpose: number, keyring_bytes: Uint8Array, signature_suite: number, frame_id: number | null | undefined, expose_sender: boolean, recipient_public_key_bundles: any, limits: any): Uint8Array;
 
 /**
  * Decrypt a serialized `Encrypted<Value>` wrapper with a serialized keyring.

@@ -600,7 +600,7 @@ await describe("Relay recipient separation", async () => {
       11n,
       42n,
       7n,
-      "message-1",
+      1n,
       123n,
       bindings.encode_data_value({ ExampleType: "metadata" }),
       senderKeyring,
@@ -687,7 +687,7 @@ await describe("Relay recipient separation", async () => {
       11n,
       42n,
       7n,
-      "message-explicit-identity",
+      2n,
       456n,
       bindings.encode_data_value({ ExampleType: "forwarded" }),
       senderKeyring,
@@ -779,7 +779,7 @@ await describe("Relay recipient key history", async () => {
         11n,
         42n,
         42n,
-        "message-current-key",
+        3n,
         1n,
         null,
         senderKeyring,
@@ -823,7 +823,7 @@ await describe("Relay recipient key history", async () => {
           11n,
           42n,
           7n,
-          "message-rotated-key",
+          4n,
           2n,
           bindings.encode_data_value({ ExampleType: "rotated-metadata" }),
           senderKeyring,
@@ -867,7 +867,7 @@ await describe("Relay recipient key history", async () => {
         11n,
         42n,
         42n,
-        "message-wrong-key",
+        5n,
         3n,
         null,
         senderKeyring,
@@ -1006,7 +1006,7 @@ await describe("Protected send APIs", async () => {
     assert.equal(signed.value.Content.ExampleType, "direct");
     assert.equal(signed.value.MessageType, "ProtectedMessage");
     assert.equal(BigInt(signed.value.FinalRecipientId), 22n);
-    assert.equal(typeof signed.value.MessageId, "string");
+    assert.equal(typeof signed.value.MessageId, "bigint");
     assert.equal(BigInt(signed.value.CreatedAt) > 0n, true);
     bindings.verify_data_value_with_policy(
       signedBytes,
@@ -1329,7 +1329,7 @@ await describe("Protected receive APIs", async () => {
     assert.equal(exposed.finalRecipientId, 22n);
     assert.equal(exposed.receiver, 22n);
     assert.equal(exposed.outerSender, 11n);
-    assert.equal(typeof exposed.messageId, "string");
+    assert.equal(typeof exposed.messageId, "bigint");
     assert.equal(typeof exposed.createdAt, "bigint");
     assert.deepEqual(exposed.data, {
       ExampleType: "direct-receive",
@@ -2315,7 +2315,7 @@ await describe("Relay API invariants", async () => {
         11n,
         42n,
         42n,
-        "message-default-policy",
+        6n,
         456n,
         null,
         senderKeyring,
@@ -2350,7 +2350,7 @@ await describe("Relay API invariants", async () => {
         11n,
         42n,
         42n,
-        "message-inherited-policy",
+        7n,
         456n,
         null,
         senderKeyring,
@@ -2389,7 +2389,7 @@ await describe("Relay API invariants", async () => {
         11n,
         42n,
         42n,
-        "message-generic",
+        101n,
         relayCreatedAtMillis,
         bindings.encode_data_value({ ExampleType: "opaque-to-content-only-relays" }),
         senderKeyring,
@@ -2413,7 +2413,7 @@ await describe("Relay API invariants", async () => {
     assert.ok(metadata);
     assert.equal(metadata.signerId, 11n);
     assert.equal(metadata.finalRecipientId, 42n);
-    assert.equal(metadata.messageId, "message-generic");
+    assert.equal(metadata.messageId, 101n);
     assert.equal(metadata.createdAt, relayCreatedAtMillis);
     assert.deepEqual(metadata.metadata, {
       ExampleType: "opaque-to-content-only-relays",
@@ -2425,7 +2425,7 @@ await describe("Relay API invariants", async () => {
       data: { ExampleType: "generic" },
       signerId: 11n,
       finalRecipientId: 42n,
-      messageId: "message-generic",
+      messageId: 101n,
       createdAt: relayCreatedAtMillis,
       metadata: { ExampleType: "opaque-to-content-only-relays" },
     });
@@ -2441,7 +2441,7 @@ await describe("Relay API invariants", async () => {
         11n,
         42n,
         42n,
-        "message-scalar-values",
+        8n,
         456n,
         bindings.encode_data_value("opaque metadata"),
         senderKeyring,
@@ -2477,7 +2477,7 @@ await describe("Relay API invariants", async () => {
         11n,
         42n,
         42n,
-        "message-subscription",
+        102n,
         789n,
         bindings.encode_data_value({ ExampleType: "subscription" }),
         senderKeyring,
@@ -2525,7 +2525,7 @@ await describe("Relay API invariants", async () => {
       assert.equal(typeof subscribedHandler, "function");
       await subscribedHandler(frame);
       assert.equal(received.length, 1);
-      assert.equal(received[0].content.messageId, "message-subscription");
+      assert.equal(received[0].content.messageId, 102n);
       assert.deepEqual(received[0].content.metadata, {
         ExampleType: "subscription",
       });
@@ -2544,7 +2544,7 @@ await describe("Relay API invariants", async () => {
             relay: {
               signerId: 11n,
               finalRecipientId: 42n,
-              messageId: "message-subscription",
+              messageId: 102n,
               createdAt: 789n,
             },
           },
@@ -2571,7 +2571,7 @@ await describe("Relay API invariants", async () => {
         11n,
         42n,
         42n,
-        "message-relay-fanout",
+        9n,
         789n,
         bindings.encode_data_value({ ExampleType: "fanout-metadata" }),
         senderKeyring,
@@ -2651,7 +2651,7 @@ await describe("Relay API invariants", async () => {
         11n,
         42n,
         42n,
-        "message-replay",
+        103n,
         123n,
         null,
         senderKeyring,
@@ -2681,7 +2681,7 @@ await describe("Relay API invariants", async () => {
       replayGuard,
     };
     const metadata = await client.openRelayMetadata(frame, options);
-    assert.equal(metadata.messageId, "message-replay");
+    assert.equal(metadata.messageId, 103n);
     await assert.rejects(
       () => client.openRelayMetadata(frame, options),
       (error) => error instanceof sdk.MTPReplayError,
@@ -2704,7 +2704,7 @@ await describe("Relay API invariants", async () => {
         11n,
         42n,
         42n,
-        "message-metadata-subscription",
+        104n,
         123n,
         null,
         senderKeyring,
@@ -2729,7 +2729,7 @@ await describe("Relay API invariants", async () => {
       client.subscribeRelayMetadata(
         (metadata) => {
           receivedMetadata = metadata;
-          assert.equal(metadata.messageId, "message-metadata-subscription");
+          assert.equal(metadata.messageId, 104n);
         },
         {
           recipient: { id: 42n, keyring: recipientKeyring },
@@ -2756,7 +2756,7 @@ await describe("Relay API invariants", async () => {
         11n,
         42n,
         42n,
-        "message-dispose-race",
+        10n,
         123n,
         null,
         senderKeyring,

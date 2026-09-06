@@ -2,8 +2,9 @@ use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
 use mtp_codec::{
-    DataValue, DecodeLimits, EncodeLimits, MtpProtectionPurpose, PROTOCOL_VERSION,
-    ProtectionPolicy, ProtectionPurpose, SealedRelayBuilder, SignaturePolicy, TypeMap,
+    CommunicationType, DataValue, DecodeLimits, EncodeLimits, MtpProtectionPurpose,
+    PROTOCOL_VERSION, ProtectionPolicy, ProtectionPurpose, SealedRelayBuilder, SignaturePolicy,
+    TypeMap,
 };
 use mtp_crypto::{
     AeadDecrypt, AeadEncrypt, DualSigner, Ed25519Signer, HybridKem, KemPrivateKey, KemPublicKey,
@@ -841,7 +842,7 @@ fn build_encrypted_relay_frame_impl(
     signer_id: u64,
     final_recipient_id: u64,
     next_hop_id: u64,
-    message_id: &str,
+    message_id: u128,
     created_at: u64,
     encoded_metadata: Option<Vec<u8>>,
     signer: &dyn SignatureScheme,
@@ -873,7 +874,9 @@ fn build_encrypted_relay_frame_impl(
     let metadata_recipients = public_key_bundles_from_js(&metadata_recipient_public_key_bundles)?;
 
     let builder = SealedRelayBuilder::new(
-        message_type,
+        CommunicationType::from_name(&message_type).ok_or_else(|| {
+            structured_error("invalid-message-type", "unknown communication type")
+        })?,
         application_content,
         signer_id,
         final_recipient_id,
@@ -909,7 +912,7 @@ pub fn build_encrypted_relay_frame_with_keyring(
     signer_id: u64,
     final_recipient_id: u64,
     next_hop_id: u64,
-    message_id: &str,
+    message_id: u128,
     created_at: u64,
     encoded_metadata: Option<Vec<u8>>,
     keyring_bytes: &[u8],
@@ -946,7 +949,7 @@ pub fn build_encrypted_relay_frame_with_keyring_with_limits(
     signer_id: u64,
     final_recipient_id: u64,
     next_hop_id: u64,
-    message_id: &str,
+    message_id: u128,
     created_at: u64,
     encoded_metadata: Option<Vec<u8>>,
     keyring_bytes: &[u8],
