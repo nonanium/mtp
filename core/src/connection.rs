@@ -596,27 +596,27 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             }
                         }
 
-                        if message.is_type(mtp_codec::CommunicationType::Ping) {
-                            if let Some(sender) = ping_sender.read().await.clone() {
-                                let mut pong = CommunicationValue::new_with_type_map(
-                                    mtp_codec::CommunicationType::Pong,
-                                    &negotiated_type_map,
-                                );
-                                if let Some(id) = message.id() {
-                                    pong = pong.with_id(id);
-                                } else {
-                                    pong = pong.without_id();
-                                }
-                                if let Some(timestamp) =
-                                    message.get_data(mtp_codec::DataType::Timestamp)
-                                {
-                                    pong = pong.add_typed_default(
-                                        mtp_codec::DataType::Timestamp,
-                                        timestamp.clone(),
-                                    );
-                                }
-                                let _ = sender.send(&pong).await;
+                        if message.is_type(mtp_codec::CommunicationType::Ping)
+                            && let Some(sender) = ping_sender.read().await.clone()
+                        {
+                            let mut pong = CommunicationValue::new_with_type_map(
+                                mtp_codec::CommunicationType::Pong,
+                                &negotiated_type_map,
+                            );
+                            if let Some(id) = message.id() {
+                                pong = pong.with_id(id);
+                            } else {
+                                pong = pong.without_id();
                             }
+                            if let Some(timestamp) =
+                                message.get_data(mtp_codec::DataType::Timestamp)
+                            {
+                                pong = pong.add_typed_default(
+                                    mtp_codec::DataType::Timestamp,
+                                    timestamp.clone(),
+                                );
+                            }
+                            let _ = sender.send(&pong).await;
                             continue;
                         }
                         if tx.send(Ok(message)).await.is_err() {
