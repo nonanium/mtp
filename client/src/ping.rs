@@ -4,7 +4,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, Instant};
 
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap};
-use mtp_transport::{Receiver, Sender};
+use mtp_native::{Receiver, Sender};
 
 pub(crate) struct PingSession {
     pub(crate) last_ping: Arc<Mutex<Option<Duration>>>,

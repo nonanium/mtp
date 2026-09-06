@@ -81,6 +81,16 @@ impl Default for DecodeLimits {
 pub const DEFAULT_TRANSPORT_ALLOCATION_FACTOR: u64 = 4;
 
 impl DecodeLimits {
+    pub fn intersection(self, other: Self) -> Self {
+        Self {
+            max_depth: self.max_depth.min(other.max_depth),
+            max_values: self.max_values.min(other.max_values),
+            max_blob_size: self.max_blob_size.min(other.max_blob_size),
+            max_recipients: self.max_recipients.min(other.max_recipients),
+            max_allocated_bytes: self.max_allocated_bytes.min(other.max_allocated_bytes),
+        }
+    }
+
     /// Derive codec allocation limits from the transport's admitted complete
     /// frame size. This keeps a larger explicitly configured transport policy
     /// from being rejected by an unrelated hard-coded blob bound while still
@@ -139,6 +149,14 @@ impl Default for EncodeLimits {
 }
 
 impl EncodeLimits {
+    pub fn intersection(self, other: Self) -> Self {
+        Self {
+            max_depth: self.max_depth.min(other.max_depth),
+            max_values: self.max_values.min(other.max_values),
+            max_output_size: self.max_output_size.min(other.max_output_size),
+        }
+    }
+
     /// Derive encoder limits from the transport's admitted complete frame size.
     pub fn for_transport_message_size(max_message_size: u64) -> Self {
         Self {

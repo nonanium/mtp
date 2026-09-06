@@ -8,15 +8,15 @@ pub mod pipe;
 #[cfg(feature = "pipes")]
 pub use mtp_common::PipeError;
 #[cfg(feature = "pipes")]
-pub use mtp_transport::PipeWriter;
+pub use mtp_native::PipeWriter;
 
 pub use MTPClient as Client;
 pub use MTPConnection as Connection;
 pub use config::{ClientConfig, ClientTlsConfig, Policy};
 pub use connection::MTPConnection;
-pub use mtp_transport::Receiver;
-pub use mtp_transport::SendMode;
-pub use mtp_transport::Sender;
+pub use mtp_native::Receiver;
+pub use mtp_native::SendMode;
+pub use mtp_native::Sender;
 
 #[cfg(feature = "crypto")]
 pub use error::AuthState;
@@ -120,7 +120,7 @@ pub struct MTPClient;
 impl MTPClient {
     pub async fn connect(config: ClientConfig) -> Result<MTPConnection, CommunicationError> {
         let (sender, receiver) =
-            mtp_transport::connect(&config.url, config.server_cert(), config.policy).await?;
+            mtp_native::connect(&config.url, config.server_cert(), config.policy).await?;
         let opening_codec = codec_for_version(&PROTOCOL_VERSION)?;
         sender.set_type_map(opening_codec.type_map()).await;
         receiver.set_type_map(opening_codec.type_map()).await;
@@ -215,7 +215,7 @@ impl MTPClient {
         use mtp_codec::CommunicationType;
 
         let (sender, receiver) =
-            mtp_transport::connect(&config.url, config.server_cert(), config.policy).await?;
+            mtp_native::connect(&config.url, config.server_cert(), config.policy).await?;
 
         let handshake_codec = codec_for_version(&PROTOCOL_VERSION)?;
         let tm = handshake_codec.type_map().clone();
@@ -408,7 +408,7 @@ impl MTPClient {
         use mtp_codec::CommunicationType;
 
         let (sender, receiver) =
-            mtp_transport::connect(&config.url, config.server_cert(), config.policy).await?;
+            mtp_native::connect(&config.url, config.server_cert(), config.policy).await?;
 
         let handshake_codec = codec_for_version(&PROTOCOL_VERSION)?;
         let tm = handshake_codec.type_map().clone();

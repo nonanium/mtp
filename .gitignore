@@ -4,6 +4,9 @@
 node_modules/
 dist/
 *.tgz
-wasm/pkg/
+bindings/wasm/pkg/
+sdk/.rust/
+sdk/bindings/wasm/pkg/
+sdk/type-map/
 web_client/
 .direnv

@@ -22,7 +22,7 @@ jobs:
             set -euo pipefail
 
             cargo fmt --all --check
-            cargo clippy --workspace --exclude mtp-wasm --all-targets --all-features -- -D warnings -W unreachable-pub
+            cargo clippy --workspace --exclude mtp-wasm --exclude client --exclude server --exclude keygen --all-targets --all-features -- -D warnings -W unreachable-pub
             cargo test --workspace --exclude mtp-wasm --all-features
             RUSTFLAGS="--cfg web_sys_unstable_apis" cargo build -p mtp-wasm --target wasm32-unknown-unknown
             cargo deny check advisories bans sources
@@ -30,19 +30,17 @@ jobs:
 
             pnpm install --frozen-lockfile
 
-            RUSTFLAGS="--cfg web_sys_unstable_apis" wasm-pack test --node wasm
-            RUSTFLAGS="--cfg web_sys_unstable_apis" wasm-pack build wasm --target web
+            RUSTFLAGS="--cfg web_sys_unstable_apis" wasm-pack test --node bindings/wasm
             RUSTFLAGS="--cfg web_sys_unstable_apis" pnpm run build
             pnpm --filter mtp-web-client run build
 
-            node test/e2ee.mjs
-            pnpm run test:secrets
-            pnpm run test:types
-            pnpm run test:boundary
+            pnpm --dir sdk run test:e2e
+            pnpm --dir sdk run test:secrets
+            pnpm --dir sdk run test:wasm-init
+            pnpm --dir sdk run test:types
+            pnpm --dir sdk run test:vite
+            pnpm --dir sdk run test:boundary
+            pnpm --dir sdk pack
 
-            (
-              cd example
-              export MTP_TYPE_MAPS="$PWD/type-maps.yaml"
-              cargo check --workspace --all-targets --all-features
-            )
+            cargo check -p client -p server -p keygen --all-targets --all-features
           '

@@ -1,0 +1,15 @@
+[package]
+name = "mtp-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mtp-codec.workspace = true
+mtp-common.workspace = true
+async-trait = "0.1"
+tokio = { version = "1", features = ["io-util", "rt", "sync", "time"] }
+tracing = "0.1"
+
+[features]
+test-helpers = []
+pipes = ["mtp-common/pipes", "mtp-codec/pipes"]

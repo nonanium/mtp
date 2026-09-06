@@ -1,6 +1,7 @@
 packages:
   - .
-  - example/web-client
+  - sdk
+  - tests/fixtures/example/web-client
 
 onlyBuiltDependencies:
   - esbuild

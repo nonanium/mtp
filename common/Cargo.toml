@@ -1,21 +1,11 @@
 [package]
 name = "mtp-common"
-version = "0.3.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 thiserror = "2.0.18"
 
 [features]
 pipes = []
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-wtransport = { version = "0.7.1", default-features = false, features = [
-    "aws-lc-rs",
-    "quinn",
-    "self-signed",
-] }
-quinn = { version = "0.11.11", default-features = false, features = [
-    "rustls-aws-lc-rs",
-    "rustls",
-] }
+test-helpers = []

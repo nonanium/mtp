@@ -15,7 +15,7 @@ use std::time::{Duration as StdDuration, Instant};
 #[cfg(feature = "crypto")]
 use tokio::time::Duration;
 
-pub use mtp_transport::Policy;
+pub use mtp_native::Policy;
 
 /// Callback that looks up a registered client by ID.
 ///

@@ -5,7 +5,7 @@ use mtp_codec::{
     Version,
     registry::{Registry, VersionedCodec},
 };
-use mtp_transport::{Receiver, Sender};
+use mtp_native::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
 #[cfg(feature = "pipes")]
@@ -21,7 +21,7 @@ use crate::pipe::PipeDispatcher;
 use crate::pipe::run_dispatcher;
 
 pub struct MTPHost {
-    pub(crate) transport: mtp_transport::Host,
+    pub(crate) transport: mtp_native::Host,
     pub(crate) context: Arc<HandshakeContext>,
     pub(crate) handshakes: tokio::task::JoinSet<Result<Option<MTPConnection>, AcceptError>>,
     pub(crate) transport_closed: bool,
@@ -36,7 +36,7 @@ impl MTPHost {
     pub async fn new(config: HostConfig) -> Result<Self, mtp_common::CommunicationError> {
         let registry = Registry::builtin();
 
-        let transport = mtp_transport::host(
+        let transport = mtp_native::host(
             config.ip,
             config.port,
             config.tls_fullchain.clone(),

@@ -1,0 +1,41 @@
+[package]
+name = "mtp-wasm"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["getrandom"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+futures-channel = "0.3"
+futures-util = "0.3"
+console_error_panic_hook = "0.1"
+tracing = "0.1"
+wasm-tracing = "2.1"
+
+hex = "0.4"
+
+getrandom = { version = "0.2.17", features = ["js"] }
+getrandom-v04 = { package = "getrandom", version = "0.4.3", features = ["wasm_js"] }
+
+mtp-common.workspace = true
+mtp-core.workspace = true
+mtp-type-map.workspace = true
+mtp-codec = { workspace = true, features = ["crypto", "pipes", "registry"] }
+mtp-crypto = { workspace = true, features = ["wasm", "password-kdf"] }
+zeroize = "1.9"
+wasm-bindgen-test = "0.3.76"
+
+
+[dev-dependencies]
+hex = "0.4"
+
+[features]
+default = []
+pipes = []

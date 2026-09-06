@@ -1,80 +1,12 @@
 {
-  "name": "mtp",
-  "version": "0.3.0",
-  "description": "MTP TypeScript SDK",
-  "type": "module",
+  "name": "mtp-monorepo",
+  "private": true,
   "packageManager": "pnpm@11.8.0",
-  "module": "./dist/sdk/index.js",
-  "types": "./dist/sdk/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/sdk/index.d.ts",
-      "import": "./dist/sdk/index.js",
-      "default": "./dist/sdk/index.js"
-    },
-    "./raw": {
-      "types": "./dist/raw/index.d.ts",
-      "import": "./dist/raw/index.js",
-      "default": "./dist/raw/index.js"
-    },
-    "./vite": {
-      "types": "./dist/vite/index.d.ts",
-      "import": "./dist/vite/index.js",
-      "default": "./dist/vite/index.js"
-    },
-    "./type-map": {
-      "types": "./dist/type-map/index.d.ts",
-      "import": "./dist/type-map/index.js",
-      "default": "./dist/type-map/index.js"
-    }
-  },
-  "files": [
-    "Cargo.lock",
-    "dist/",
-    "README.md",
-    "codec/Cargo.lock",
-    "codec/Cargo.toml",
-    "codec/src/",
-    "common/Cargo.lock",
-    "common/Cargo.toml",
-    "common/src/",
-    "crypto/Cargo.lock",
-    "crypto/Cargo.toml",
-    "crypto/src/",
-    "type-map/Cargo.lock",
-    "type-map/Cargo.toml",
-    "type-map/build.rs",
-    "type-map/reserved.json",
-    "type-map/src/",
-    "wasm/.cargo/",
-    "wasm/Cargo.toml",
-    "wasm/src/",
-    "wasm/pkg/",
-    "tsconfig.json"
-  ],
   "scripts": {
-    "example": "pnpm install && pnpm run build:all && nix develop .#autoStart",
-    "clean": "rm -rf dist wasm/pkg mtp-*.tgz",
-    "build:wasm": "MTP_TYPE_MAPS=$PWD/example-type-maps.yaml wasm-pack build wasm --target web --out-dir pkg --release && rm -f wasm/pkg/.gitignore",
-    "build:ts": "rm -rf dist && tsc",
-    "build": "pnpm run build:wasm && pnpm run build:ts",
-    "pack": "pnpm run release:web",
-    "release:web": "node create-web-release.mjs",
+    "build": "pnpm --dir sdk build",
     "build:all": "nix run .#build-all",
-    "test:e2e": "tsc && node test/e2ee.mjs",
-    "test:secrets": "tsc && node --test --test-isolation=none test/encrypted-secret.mjs",
-    "test:wasm-init": "tsc && node --test test/wasm-init.mjs",
-    "test:types": "tsc -p tsconfig.type-tests.json --noEmit",
-    "test:vite": "tsc && node test/vite-type-map.mjs",
-    "test:boundary": "node --test test/package-boundary.mjs",
-    "test": "pnpm run test:e2e && pnpm run test:secrets && pnpm run test:wasm-init && pnpm run test:types && pnpm run test:vite && pnpm run test:boundary"
-  },
-  "devDependencies": {
-    "@types/node": "^26.0.1",
-    "jscpd": "5.0.14",
-    "typescript": "^7.0.0"
-  },
-  "dependencies": {
-    "yaml": "^2.8.1"
+    "test": "pnpm --dir sdk test",
+    "test:boundary": "pnpm --dir sdk test:boundary",
+    "pack:sdk": "pnpm --dir sdk pack"
   }
 }

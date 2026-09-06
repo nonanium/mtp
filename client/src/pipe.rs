@@ -2,7 +2,7 @@ use mtp_codec::CommunicationValue;
 #[cfg(feature = "pipes")]
 use mtp_codec::TypeMap;
 use mtp_common::CommunicationError;
-use mtp_transport::Receiver;
+use mtp_native::Receiver;
 use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(feature = "pipes")]
@@ -15,7 +15,7 @@ use mtp_codec::{CommunicationType, DataType, DataValue};
 #[cfg(feature = "pipes")]
 use mtp_common::PipeError;
 #[cfg(feature = "pipes")]
-use mtp_transport::{Policy, Sender};
+use mtp_native::{Policy, Sender};
 
 #[cfg(feature = "pipes")]
 pub struct PipeHandle {
@@ -37,7 +37,7 @@ impl PipeHandle {
         &self.description
     }
 
-    pub async fn wait(mut self) -> Result<Option<mtp_transport::PipeWriter>, PipeError> {
+    pub async fn wait(mut self) -> Result<Option<mtp_native::PipeWriter>, PipeError> {
         let response =
             tokio::time::timeout(self.dispatcher.policy.read_timeout, &mut self.response_rx).await;
         match response {
@@ -123,7 +123,7 @@ impl PipeRequest {
         &self.description
     }
 
-    pub async fn accept(self) -> Result<mtp_transport::PipeReader, PipeError> {
+    pub async fn accept(self) -> Result<mtp_native::PipeReader, PipeError> {
         self.receiver
             .expect_pipe(self.pipe_id)
             .map_err(PipeError::from)?;
@@ -241,7 +241,7 @@ pub(crate) struct PipeDispatcher {
     pub(crate) expired_creations: StdMutex<HashMap<u32, Instant>>,
     #[cfg(feature = "pipes")]
     pub(crate) pending_pipes:
-        Mutex<HashMap<u32, tokio::sync::oneshot::Sender<mtp_transport::PipeReader>>>,
+        Mutex<HashMap<u32, tokio::sync::oneshot::Sender<mtp_native::PipeReader>>>,
     #[cfg(feature = "pipes")]
     pub(crate) policy: Arc<Policy>,
 }
@@ -436,7 +436,7 @@ pub(crate) async fn run_dispatcher(
 ) {
     loop {
         match receiver.receive_event().await {
-            Ok(mtp_transport::TransportEvent::Message(msg)) => {
+            Ok(mtp_native::TransportEvent::Message(msg)) => {
                 if msg.is_type(CommunicationType::PipeRequest) {
                     let Some(pipe_id) = msg.id().filter(|id| *id != 0) else {
                         let error = CommunicationError::Other(
@@ -487,7 +487,7 @@ pub(crate) async fn run_dispatcher(
                     break;
                 }
             }
-            Ok(mtp_transport::TransportEvent::Pipe(reader)) => {
+            Ok(mtp_native::TransportEvent::Pipe(reader)) => {
                 let pipe_id = reader.pipe_id();
                 let mut pending = dispatcher.pending_pipes.lock().await;
                 if let Some(tx) = pending.remove(&pipe_id) {

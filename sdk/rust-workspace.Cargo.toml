@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "bindings/wasm",
+    "codec",
+    "common",
+    "core",
+    "crypto",
+    "type-map",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+
+[workspace.dependencies]
+mtp-codec = { version = "0.3.0", path = "codec" }
+mtp-common = { version = "0.3.0", path = "common" }
+mtp-core = { version = "0.3.0", path = "core" }
+mtp-crypto = { version = "0.3.0", path = "crypto" }
+mtp-type-map = { version = "0.3.0", path = "type-map" }

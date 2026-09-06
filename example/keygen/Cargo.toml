@@ -1,7 +1,0 @@
-[package]
-name = "keygen"
-version = "0.3.0"
-edition = "2024"
-
-[dependencies]
-mtp = { version = "0.3.0", path = "../../", features = ["files", "raw"] }

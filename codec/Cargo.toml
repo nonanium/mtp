@@ -1,12 +1,12 @@
 [package]
 name = "mtp-codec"
-version = "0.3.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-mtp-type-map = { version = "0.3.0", path = "../type-map" }
-mtp-common = { version = "0.3.0", path = "../common" }
-mtp-crypto = { version = "0.3.0", path = "../crypto", optional = true }
+mtp-type-map.workspace = true
+mtp-common.workspace = true
+mtp-crypto = { workspace = true, optional = true }
 base64 = "0.23"
 byteorder = "1.5"
 rand = { version = "0.10.1", features = ["std", "std_rng"] }

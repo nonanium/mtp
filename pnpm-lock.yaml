@@ -6,7 +6,9 @@ settings:
 
 importers:
 
-  .:
+  .: {}
+
+  sdk:
     dependencies:
       yaml:
         specifier: ^2.8.1
@@ -22,11 +24,11 @@ importers:
         specifier: ^7.0.0
         version: 7.0.2
 
-  example/web-client:
+  tests/fixtures/example/web-client:
     dependencies:
       mtp:
         specifier: workspace:*
-        version: link:../..
+        version: link:../../../../sdk
     devDependencies:
       typescript:
         specifier: ^7.0.0

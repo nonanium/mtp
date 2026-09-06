@@ -1,0 +1,62 @@
+{
+  "name": "mtp",
+  "version": "0.3.0",
+  "description": "MTP TypeScript SDK",
+  "type": "module",
+  "packageManager": "pnpm@11.8.0",
+  "module": "./dist/sdk/index.js",
+  "types": "./dist/sdk/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/sdk/index.d.ts",
+      "import": "./dist/sdk/index.js",
+      "default": "./dist/sdk/index.js"
+    },
+    "./raw": {
+      "types": "./dist/raw/index.d.ts",
+      "import": "./dist/raw/index.js",
+      "default": "./dist/raw/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite/index.d.ts",
+      "import": "./dist/vite/index.js",
+      "default": "./dist/vite/index.js"
+    },
+    "./type-map": {
+      "types": "./dist/type-map/index.d.ts",
+      "import": "./dist/type-map/index.js",
+      "default": "./dist/type-map/index.js"
+    }
+  },
+  "files": [
+    ".rust/",
+    "dist/",
+    "README.md",
+    "bindings/wasm/pkg/",
+    "rust-workspace.Cargo.toml",
+    "type-map/reserved.json",
+    "tsconfig.json"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist bindings/wasm/pkg mtp-*.tgz",
+    "build:wasm": "MTP_TYPE_MAPS=$PWD/../tests/fixtures/e2e-type-maps.yaml wasm-pack build ../bindings/wasm --target web --out-dir ../../sdk/bindings/wasm/pkg --release && rm -f bindings/wasm/pkg/.gitignore",
+    "build:ts": "node scripts/prepare-assets.mjs && rm -rf dist && tsc",
+    "build": "pnpm run build:wasm && pnpm run build:ts",
+    "prepack": "pnpm run build && node scripts/stage-rust-source.mjs",
+    "test:e2e": "tsc && node ../tests/js/e2ee.mjs",
+    "test:secrets": "tsc && node --test --test-isolation=none ../tests/js/encrypted-secret.mjs",
+    "test:wasm-init": "tsc && node --test ../tests/js/wasm-init.mjs",
+    "test:types": "tsc -p tsconfig.type-tests.json --noEmit",
+    "test:vite": "tsc && node ../tests/js/vite-type-map.mjs",
+    "test:boundary": "node --test ../tests/js/package-boundary.mjs",
+    "test": "pnpm run test:e2e && pnpm run test:secrets && pnpm run test:wasm-init && pnpm run test:types && pnpm run test:vite && pnpm run test:boundary"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "jscpd": "5.0.14",
+    "typescript": "^7.0.0"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  }
+}

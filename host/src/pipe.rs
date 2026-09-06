@@ -1,6 +1,6 @@
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap};
 use mtp_common::{CommunicationError, PipeError};
-use mtp_transport::{PipeReader, PipeWriter, Policy, TransportEvent};
+use mtp_native::{PipeReader, PipeWriter, Policy, TransportEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -36,7 +36,7 @@ where
     ) -> impl std::future::Future<Output = Result<TransportEvent<P>, CommunicationError>> + Send;
 }
 
-impl PipeSender for mtp_transport::Sender {
+impl PipeSender for mtp_native::Sender {
     type Writer = wtransport::SendStream;
 
     async fn send_pipe_message(
@@ -51,11 +51,13 @@ impl PipeSender for mtp_transport::Sender {
         pipe_id: u32,
         description: &str,
     ) -> Result<PipeWriter<Self::Writer>, CommunicationError> {
-        self.open_pipe(pipe_id, description).await
+        Ok(PipeWriter::from_inner(
+            self.open_pipe(pipe_id, description).await?.into_inner(),
+        ))
     }
 }
 
-impl PipeReceiver<wtransport::RecvStream> for mtp_transport::Receiver {
+impl PipeReceiver<wtransport::RecvStream> for mtp_native::Receiver {
     fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
         self.expect_pipe(pipe_id)
     }
@@ -71,9 +73,9 @@ impl PipeReceiver<wtransport::RecvStream> for mtp_transport::Receiver {
     }
 }
 
-impl<C> PipeSender for mtp_transport::GenericSender<C>
+impl<C> PipeSender for mtp_core::GenericSender<C>
 where
-    C: mtp_transport::TransportConnection,
+    C: mtp_core::TransportConnection,
     C::SendStream: tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     type Writer = C::SendStream;
@@ -90,13 +92,15 @@ where
         pipe_id: u32,
         description: &str,
     ) -> Result<PipeWriter<Self::Writer>, CommunicationError> {
-        self.open_pipe(pipe_id, description).await
+        Ok(PipeWriter::from_inner(
+            self.open_pipe(pipe_id, description).await?.into_inner(),
+        ))
     }
 }
 
-impl<C> PipeReceiver<C::RecvStream> for mtp_transport::GenericReceiver<C>
+impl<C> PipeReceiver<C::RecvStream> for mtp_core::GenericReceiver<C>
 where
-    C: mtp_transport::TransportConnection,
+    C: mtp_core::TransportConnection,
     C::RecvStream: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
     fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
@@ -110,7 +114,18 @@ where
     async fn receive_pipe_event(
         &self,
     ) -> Result<TransportEvent<C::RecvStream>, CommunicationError> {
-        self.receive_event().await
+        match self.receive_event().await? {
+            mtp_core::TransportEvent::Message(message) => Ok(TransportEvent::Message(message)),
+            mtp_core::TransportEvent::Pipe(reader) => {
+                let description = reader.description().to_owned();
+                let pipe_id = reader.pipe_id();
+                Ok(TransportEvent::Pipe(PipeReader::from_parts(
+                    reader.into_inner(),
+                    description,
+                    pipe_id,
+                )))
+            }
+        }
     }
 }
 

@@ -17,14 +17,15 @@ MTP separates wire encoding, QUIC transport, connection policy, protocol negotia
                   └─────────┬─────────┘
                             │
                   ┌─────────▼─────────┐
-                  │ QUIC transport    │
+                  │     mtp-core      │
                   │ framing, policy   │
                   └─────────┬─────────┘
                             │
-          ┌─────────────────┴─────────────────┐
-          │                                   │
-      MTPHost                            MTPWebServer
-      native QUIC                    HTTPS + HTTP/3 + WebTransport
+          ┌─────────────────┼─────────────────┐
+          │                 │                 │
+    native binding      H3 binding       WASM binding
+          │                 │                 │
+      MTPHost          MTPWebServer        Browser SDK
           │                                   │
           └──────────────┬────────────────────┘
                          │
@@ -33,7 +34,7 @@ MTP separates wire encoding, QUIC transport, connection policy, protocol negotia
 ```
 
 `mtp-codec` owns `CommunicationValue` and `DataValue` serialization. A version-specific `TypeMap` translates generated type names to wire IDs.
-`mtp-transport` writes each frame as a four-byte big-endian length followed by the frame bytes and applies message, timeout, queue, and stream limits.
+`CommunicationValue` supplies the canonical four-byte length prefix. `mtp-core` applies the shared frame-size, retry, and policy decisions. `mtp-native`, `mtp-h3`, and `mtp-wasm` translate stream operations and platform errors at the adapter boundary.
 
 The top row represents application entry points. Native Rust code calls the client or host crates directly. Browser code calls the TypeScript SDK, which uses generated WASM bindings for the same codec and WebTransport session.
 Both clients exchange the same MTP frames with a host.

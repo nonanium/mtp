@@ -1,6 +1,10 @@
 pub use mtp_codec as codec;
 pub use mtp_common as common;
+pub use mtp_core as core;
 pub use mtp_type_map as type_map;
+
+#[cfg(feature = "native")]
+pub use mtp_native as native;
 
 #[cfg(feature = "crypto")]
 pub use mtp_crypto as crypto;

@@ -1,6 +1,6 @@
 use tokio::time::Duration;
 
-pub use mtp_transport::Policy;
+pub use mtp_native::Policy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientTlsConfig {

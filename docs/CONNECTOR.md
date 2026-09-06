@@ -7,7 +7,7 @@ This file documents the connection and version negotiation logic.
 The `registry` module provides a multi-version `Registry` used by the host for
 version negotiation. Accessed through the `mtp` facade (requires the `host`
 feature). In this repository, `Registry::builtin()` is generated from
-[`example/type-maps.yaml`](../example/type-maps.yaml), which currently contains
+[`tests/fixtures/example/type-maps.yaml`](../tests/fixtures/example/type-maps.yaml), which currently contains
 protocol version 3.0 only. Downstream projects can register additional versions
 in their own YAML configuration.
 

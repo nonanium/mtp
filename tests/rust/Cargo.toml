@@ -1,0 +1,56 @@
+[package]
+name = "mtp-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+mtp-client.workspace = true
+mtp-codec = { workspace = true, features = ["registry"] }
+mtp-common = { workspace = true, features = ["pipes", "test-helpers"] }
+mtp-core = { workspace = true, features = ["pipes", "test-helpers"] }
+mtp-host = { workspace = true, features = ["crypto", "pipes"] }
+mtp-native = { workspace = true, features = ["host", "insecure-tls", "pipes"] }
+mtp-webserver = { workspace = true, features = ["crypto", "pipes"] }
+async-trait = "0.1"
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rcgen = "0.14"
+rustls = "0.23"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+
+[features]
+default = ["pipes"]
+pipes = []
+
+[[test]]
+name = "client_ping"
+path = "client/ping.rs"
+
+[[test]]
+name = "common"
+path = "common.rs"
+
+[[test]]
+name = "core"
+path = "core.rs"
+
+[[test]]
+name = "native_adapter"
+path = "native/integration.rs"
+
+[[test]]
+name = "native_connection_handle"
+path = "native/connection_handle.rs"
+
+[[test]]
+name = "native_adapter_pipes"
+path = "native/generic_pipe.rs"
+
+[[test]]
+name = "webserver_adapter"
+path = "webserver/integration.rs"

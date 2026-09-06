@@ -27,7 +27,7 @@ For rotation, publish the replacement certificate or key before changing the ser
 
 ### Development Certificates
 
-The `tls` feature exposes `mtp_crypto::tls::generate_self_signed_cert`. It creates an ECDSA P-256 server certificate for the requested domain, `127.0.0.1`, and `::1`; the certificate is valid for 13 days. The lower-level `mtp_transport::HostConfig::self_signed` provides a transport-level self-signed setup without the crypto certificate helper.
+The `tls` feature exposes `mtp_crypto::tls::generate_self_signed_cert`. It creates an ECDSA P-256 server certificate for the requested domain, `127.0.0.1`, and `::1`; the certificate is valid for 13 days. The lower-level `mtp_native::HostConfig::self_signed` provides a transport-level self-signed setup without the crypto certificate helper.
 
 Self-signed certificates are for development. Production deployments should use a certificate trusted by the client or an explicitly pinned certificate.
 

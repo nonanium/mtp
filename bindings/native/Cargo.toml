@@ -1,0 +1,36 @@
+[package]
+name = "mtp-native"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mtp-codec.workspace = true
+mtp-common.workspace = true
+mtp-core.workspace = true
+mtp-crypto.workspace = true
+wtransport = { version = "0.7.1", default-features = false, features = [
+    "aws-lc-rs",
+    "quinn",
+    "self-signed",
+] }
+rustls = { version = "0.23.41" }
+tokio = { version = "1", features = ["full"] }
+rustls-native-certs = "0.8.4"
+rcgen = "0.14"
+tracing = "0.1"
+async-trait = "0.1"
+sha2 = "0.11"
+rand = "0.10.2"
+zeroize = "1.9"
+
+[features]
+# Enables hosting a MTP server
+host = []
+
+pipes = ["mtp-codec/pipes", "mtp-codec/crypto", "mtp-core/pipes"]
+
+# Compiles the insecure certificate verifier (NoopCertVerifier).
+# Even with this feature enabled, the verifier requires the environment
+# variable MTP_INSECURE_TLS=1 at runtime. Intended for local development
+# only; never enable in release builds.
+insecure-tls = []

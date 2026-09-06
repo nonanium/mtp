@@ -1,0 +1,8 @@
+[package]
+name = "keygen"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+mtp = { path = "../../../..", features = ["files", "raw"] }

@@ -1,9 +1,9 @@
 # Type Map
 
 This file documents the type-map and registry configuration used by MTP. The
-repository workspace uses [`example/type-maps.yaml`](../example/type-maps.yaml)
+repository workspace uses [`tests/fixtures/example/type-maps.yaml`](../tests/fixtures/example/type-maps.yaml)
 through [`.cargo/config.toml`](../.cargo/config.toml); that map currently
-selects protocol version 3.0. The root [`example-type-maps.yaml`](../example-type-maps.yaml)
+selects protocol version 3.0. The root [`tests/fixtures/e2e-type-maps.yaml`](../tests/fixtures/e2e-type-maps.yaml)
 is a separate illustrative multi-version configuration used by the manual WASM
 build script. Downstream applications should provide their own map.
 

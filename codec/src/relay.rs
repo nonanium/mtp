@@ -911,8 +911,8 @@ pub fn open_relay_content_with_limits_without_replay(
 ) -> Result<VerifiedRelayContent, RelayError> {
     let options = RelayOpenOptions {
         policy: options.policy,
-        decode_limits: restrict_decode_limits(options.decode_limits, metadata.decode_limits),
-        encode_limits: restrict_encode_limits(options.encode_limits, metadata.encode_limits),
+        decode_limits: options.decode_limits.intersection(metadata.decode_limits),
+        encode_limits: options.encode_limits.intersection(metadata.encode_limits),
         protected_limits: restrict_protected_limits(
             options.protected_limits,
             metadata.protected_limits,
@@ -965,24 +965,6 @@ pub fn open_relay_content_with_limits_without_replay(
         message_type,
         content: field(content, DataType::Content, type_map)?.clone(),
     })
-}
-
-fn restrict_decode_limits(left: DecodeLimits, right: DecodeLimits) -> DecodeLimits {
-    DecodeLimits {
-        max_depth: left.max_depth.min(right.max_depth),
-        max_values: left.max_values.min(right.max_values),
-        max_blob_size: left.max_blob_size.min(right.max_blob_size),
-        max_recipients: left.max_recipients.min(right.max_recipients),
-        max_allocated_bytes: left.max_allocated_bytes.min(right.max_allocated_bytes),
-    }
-}
-
-fn restrict_encode_limits(left: EncodeLimits, right: EncodeLimits) -> EncodeLimits {
-    EncodeLimits {
-        max_depth: left.max_depth.min(right.max_depth),
-        max_values: left.max_values.min(right.max_values),
-        max_output_size: left.max_output_size.min(right.max_output_size),
-    }
 }
 
 fn restrict_protected_limits(left: ProtectedLimits, right: ProtectedLimits) -> ProtectedLimits {

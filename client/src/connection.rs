@@ -22,8 +22,8 @@ use crate::pipe::{PendingRequest, PipeDispatcher, run_dispatcher};
 pub struct MTPConnection {
     pub version: Version,
     pub codec: VersionedCodec,
-    pub sender: mtp_transport::Sender,
-    pub receiver: mtp_transport::Receiver,
+    pub sender: mtp_native::Sender,
+    pub receiver: mtp_native::Receiver,
     pub description: Option<String>,
     /// The peer address observed by the underlying QUIC connection.
     pub remote_addr: Option<SocketAddr>,
@@ -199,8 +199,8 @@ impl MTPConnection {
 
 pub(crate) async fn connection_from_parts(
     config: ClientConfig,
-    sender: mtp_transport::Sender,
-    receiver: mtp_transport::Receiver,
+    sender: mtp_native::Sender,
+    receiver: mtp_native::Receiver,
     version: Version,
     codec: VersionedCodec,
     #[cfg(feature = "crypto")] auth_state: AuthState,

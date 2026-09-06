@@ -1,7 +1,7 @@
 [package]
 name = "mtp-files"
-version = "0.3.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 # Only the plain key types (`Keyring`, `PublicKeyBundle`, `CryptoError`) are
@@ -19,4 +19,4 @@ raw = []
 [dev-dependencies]
 # Enable suite implementations for bundle-loading tests without adding them to
 # the normal files-library dependency surface.
-mtp-crypto = { version = "0.3.0", path = "../crypto", features = ["mlkem-tls"] }
+mtp-crypto = { workspace = true, features = ["mlkem-tls"] }

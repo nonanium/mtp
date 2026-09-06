@@ -1,0 +1,37 @@
+[package]
+name = "mtp-webserver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mtp-common.workspace = true
+mtp-codec = { workspace = true, features = ["registry"] }
+mtp-host.workspace = true
+mtp-native.workspace = true
+mtp-core.workspace = true
+mtp-h3.workspace = true
+mtp-crypto.workspace = true
+bytes = "1"
+http = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
+http-body-util = "0.1"
+tokio-rustls = "0.26"
+tokio-stream = "0.1"
+h3 = "0.0.8"
+h3-quinn = { version = "0.0.10", features = ["datagram"] }
+h3-webtransport = "0.1.2"
+quinn = "0.11"
+rustls = "0.23"
+tracing = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+rcgen = "0.14"
+hyper = { version = "1", features = ["client", "http2"] }
+
+[features]
+default = []
+crypto = ["mtp-host/crypto", "mtp-h3/crypto"]
+pipes = ["mtp-host/pipes", "mtp-native/pipes", "mtp-h3/pipes"]

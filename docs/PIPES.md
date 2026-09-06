@@ -139,7 +139,7 @@ below is obtained from the authenticated pipe-establishment protocol:
 
 ```rust
 // Client
-use mtp_transport::{PipeSessionParameters, initiate_pipe_session};
+use mtp_native::{PipeSessionParameters, initiate_pipe_session};
 use tokio::io::AsyncReadExt;
 
 let handle = conn.create_pipe("file-upload").await?;
@@ -166,7 +166,7 @@ if let Some(writer) = handle.wait().await? {
 
 ```rust
 // Host
-use mtp_transport::{PipeSessionParameters, accept_pipe_session};
+use mtp_native::{PipeSessionParameters, accept_pipe_session};
 use sha2::{Digest, Sha256};
 
 // The streaming digest below requires `sha2` as a direct application dependency.

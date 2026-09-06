@@ -290,6 +290,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "client"
+version = "0.3.0"
+dependencies = [
+ "mtp",
+ "rand",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1183,6 +1195,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "keygen"
+version = "0.3.0"
+dependencies = [
+ "mtp",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1320,10 +1339,11 @@ dependencies = [
  "mtp-client",
  "mtp-codec",
  "mtp-common",
+ "mtp-core",
  "mtp-crypto",
  "mtp-files",
  "mtp-host",
- "mtp-transport",
+ "mtp-native",
  "mtp-type-map",
  "mtp-webserver",
 ]
@@ -1336,7 +1356,7 @@ dependencies = [
  "mtp-common",
  "mtp-crypto",
  "mtp-host",
- "mtp-transport",
+ "mtp-native",
  "rand",
  "rcgen",
  "tokio",
@@ -1359,9 +1379,18 @@ dependencies = [
 name = "mtp-common"
 version = "0.3.0"
 dependencies = [
- "quinn",
  "thiserror 2.0.20",
- "wtransport",
+]
+
+[[package]]
+name = "mtp-core"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "mtp-codec",
+ "mtp-common",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1400,13 +1429,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "mtp-h3"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "h3",
+ "h3-quinn",
+ "h3-webtransport",
+ "mtp-common",
+ "mtp-core",
+ "quinn",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mtp-host"
 version = "0.3.0"
 dependencies = [
  "mtp-codec",
  "mtp-common",
+ "mtp-core",
  "mtp-crypto",
- "mtp-transport",
+ "mtp-native",
  "rand",
  "thiserror 2.0.20",
  "tokio",
@@ -1415,12 +1461,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "mtp-transport"
+name = "mtp-native"
 version = "0.3.0"
 dependencies = [
  "async-trait",
  "mtp-codec",
  "mtp-common",
+ "mtp-core",
  "mtp-crypto",
  "rand",
  "rcgen",
@@ -1431,6 +1478,29 @@ dependencies = [
  "tracing",
  "wtransport",
  "zeroize",
+]
+
+[[package]]
+name = "mtp-tests"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "mtp-client",
+ "mtp-codec",
+ "mtp-common",
+ "mtp-core",
+ "mtp-host",
+ "mtp-native",
+ "mtp-webserver",
+ "rcgen",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -1454,6 +1524,7 @@ dependencies = [
  "js-sys",
  "mtp-codec",
  "mtp-common",
+ "mtp-core",
  "mtp-crypto",
  "mtp-type-map",
  "tracing",
@@ -1468,7 +1539,6 @@ dependencies = [
 name = "mtp-webserver"
 version = "0.3.0"
 dependencies = [
- "async-trait",
  "bytes",
  "h3",
  "h3-quinn",
@@ -1479,9 +1549,11 @@ dependencies = [
  "hyper-util",
  "mtp-codec",
  "mtp-common",
+ "mtp-core",
  "mtp-crypto",
+ "mtp-h3",
  "mtp-host",
- "mtp-transport",
+ "mtp-native",
  "quinn",
  "rcgen",
  "rustls",
@@ -2090,6 +2162,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "server"
+version = "0.3.0"
+dependencies = [
+ "base64 0.23.1",
+ "hex",
+ "http",
+ "mtp",
+ "rand",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "sha2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2458,6 +2545,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+ "valuable",
+]
+
+[[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
 ]
 
 [[package]]
@@ -2466,9 +2565,12 @@ version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
+ "nu-ansi-term",
  "sharded-slab",
+ "smallvec",
  "thread_local",
  "tracing-core",
+ "tracing-log",
 ]
 
 [[package]]
@@ -2534,6 +2636,12 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+
+[[package]]
+name = "valuable"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "version_check"

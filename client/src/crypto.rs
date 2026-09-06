@@ -196,7 +196,7 @@ pub(crate) async fn signed_challenge_response(
 }
 
 pub(crate) async fn receive_verified_challenge(
-    receiver: &mtp_transport::Receiver,
+    receiver: &mtp_native::Receiver,
     tm: &mtp_codec::TypeMap,
     host_public_key_bundle: &mtp_crypto::PublicKeyBundle,
     bound_id: u64,

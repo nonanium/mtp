@@ -83,7 +83,7 @@ network metadata, not an authenticated client identity.
 
 ## Version Negotiation
 
-`accept()` uses the version-bearing opening frame and registry flow in [Connector](CONNECTOR.md). The host registry is built from the type maps in [`example/type-maps.yaml`](../example/type-maps.yaml) by `Registry::builtin()` in this repository; downstream builds can provide their own `MTP_TYPE_MAPS` configuration.
+`accept()` uses the version-bearing opening frame and registry flow in [Connector](CONNECTOR.md). The host registry is built from the type maps in [`tests/fixtures/example/type-maps.yaml`](../tests/fixtures/example/type-maps.yaml) by `Registry::builtin()` in this repository; downstream builds can provide their own `MTP_TYPE_MAPS` configuration.
 
 ### Registry
 

@@ -14,14 +14,14 @@ pub use connection::{MTPConnection, MtpReceiverLike, MtpSenderLike};
 pub use engine::{HandshakeEngine, HandshakeReceiver, HandshakeResult, HandshakeSender};
 pub use error::AcceptError;
 pub use handshake::MTPHost;
-pub use mtp_transport::Receiver;
-pub use mtp_transport::SendMode;
-pub use mtp_transport::Sender;
+pub use mtp_native::Receiver;
+pub use mtp_native::SendMode;
+pub use mtp_native::Sender;
 
 #[cfg(feature = "pipes")]
 pub use mtp_common::PipeError;
 #[cfg(feature = "pipes")]
-pub use mtp_transport::PipeWriter;
+pub use mtp_native::PipeWriter;
 #[cfg(feature = "pipes")]
 pub use pipe::PipeRequest;
 

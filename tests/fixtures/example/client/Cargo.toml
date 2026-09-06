@@ -1,0 +1,17 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "client"
+path = "src/main.rs"
+
+[dependencies]
+mtp = { path = "../../../..", features = ["client", "crypto", "files", "pipes", "raw"] }
+tokio = { version = "1", features = ["full"] }
+rand = "0.10.1"
+tracing-subscriber = "0.3.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

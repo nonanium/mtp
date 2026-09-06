@@ -37,7 +37,7 @@ version. The selected version must exist in `type_maps`.
 
 You do not need to publish, fork, or copy an app-specific generated WASM package.
 
-The [web client example](../example/web-client/src/main.ts) shows the entry point. Its [Vite configuration](../example/web-client/vite.config.ts) shows the generated binding integration.
+The [web client example](../tests/fixtures/example/web-client/src/main.ts) shows the entry point. Its [Vite configuration](../tests/fixtures/example/web-client/vite.config.ts) shows the generated binding integration.
 
 ## SDK Quick Start
 

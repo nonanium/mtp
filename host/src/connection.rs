@@ -16,7 +16,7 @@ use crate::pipe::{
     is_expired_creation, run_dispatcher,
 };
 #[cfg(feature = "pipes")]
-use mtp_transport::Policy;
+use mtp_core::Policy;
 
 mod connection_capability {
     pub trait Sealed {}
@@ -29,32 +29,32 @@ pub trait MtpReceiverLike: connection_capability::Sealed + Clone + Send + Sync {
     ) -> impl std::future::Future<Output = Result<CommunicationValue, CommunicationError>> + Send;
 }
 
-impl connection_capability::Sealed for mtp_transport::Sender {}
-impl MtpSenderLike for mtp_transport::Sender {}
-impl connection_capability::Sealed for mtp_transport::Receiver {}
-impl MtpReceiverLike for mtp_transport::Receiver {
+impl connection_capability::Sealed for mtp_native::Sender {}
+impl MtpSenderLike for mtp_native::Sender {}
+impl connection_capability::Sealed for mtp_native::Receiver {}
+impl MtpReceiverLike for mtp_native::Receiver {
     async fn receive_message(&self) -> Result<CommunicationValue, CommunicationError> {
         self.receive().await
     }
 }
-impl<C: mtp_transport::TransportConnection> connection_capability::Sealed
-    for mtp_transport::GenericSender<C>
+impl<C: mtp_core::TransportConnection> connection_capability::Sealed
+    for mtp_core::GenericSender<C>
 {
 }
-impl<C: mtp_transport::TransportConnection> MtpSenderLike for mtp_transport::GenericSender<C> {}
-impl<C: mtp_transport::TransportConnection> connection_capability::Sealed
-    for mtp_transport::GenericReceiver<C>
+impl<C: mtp_core::TransportConnection> MtpSenderLike for mtp_core::GenericSender<C> {}
+impl<C: mtp_core::TransportConnection> connection_capability::Sealed
+    for mtp_core::GenericReceiver<C>
 {
 }
-impl<C: mtp_transport::TransportConnection> MtpReceiverLike for mtp_transport::GenericReceiver<C> {
+impl<C: mtp_core::TransportConnection> MtpReceiverLike for mtp_core::GenericReceiver<C> {
     async fn receive_message(&self) -> Result<CommunicationValue, CommunicationError> {
         self.receive().await
     }
 }
 
 pub struct MTPConnection<
-    S = mtp_transport::Sender,
-    R = mtp_transport::Receiver,
+    S = mtp_native::Sender,
+    R = mtp_native::Receiver,
     P = wtransport::RecvStream,
 > {
     pub version: Version,

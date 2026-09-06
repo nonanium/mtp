@@ -51,7 +51,7 @@ Feature summary:
 | `crypto` | `mtp::crypto` | AEAD, signatures, KEM, KDF, hashing, and connection authentication support |
 | `host` | `mtp::host` | Native QUIC host and version negotiation |
 | `client` | `mtp::client` | Native QUIC client connections |
-| `transport` | `mtp-transport` dependency | Low-level transport support; enabled automatically by `host` and `client` |
+| `native` | `mtp::native` | Native QUIC adapter; enabled automatically by `host` and `client` |
 | `pipes` | Pipe support in transport, host, client, and web server | Raw and encrypted byte streams |
 | `files` | `mtp::files` | `.mk` keyrings and `.mpkb` public bundles; also enables `crypto` |
 | `raw` | Raw file APIs | Legacy plaintext keyring migration APIs |
@@ -60,24 +60,24 @@ Feature summary:
 | `tls` | `mtp::crypto::tls` | Development self-signed certificate generation |
 | `insecure-tls` | Lower-level transport | Development-only certificate verification bypass, gated by `MTP_INSECURE_TLS=1` |
 
-The core modules always available from the facade are `codec`, `common`, and
-`type_map`. Native `client` and `host` modules re-export the transport policy
-types; the low-level transport crate is not exposed as `mtp::transport`. See the [native client](./docs/NATIVE-CLIENT.md) and [native host](./docs/NATIVE-HOST.md)
+The core modules always available from the facade are `core`, `codec`, `common`, and
+`type_map`. Native `client` and `host` modules re-export the connection policy
+types, and the native adapter is available as `mtp::native`. See the [native client](./docs/NATIVE-CLIENT.md) and [native host](./docs/NATIVE-HOST.md)
 guides for configuration and usage. See [Security](./docs/SECURITY.md) for security boundaries.
 
 ## Sub-crates
 
 The `mtp` facade re-exports the following modules:
-`mtp::codec`, `mtp::common`, `mtp::type_map`, `mtp::crypto`, `mtp::host`,
+`mtp::core`, `mtp::codec`, `mtp::common`, `mtp::type_map`, `mtp::native`, `mtp::crypto`, `mtp::host`,
 `mtp::client`, `mtp::files`, and `mtp::webserver` when their features are enabled.
 
 ### Codec
 
 The codec encodes and decodes MTP frames using Communication Types and Data Types resolved through a version-specific type map. It supports self-delimiting containers, integers, booleans, floats, strings, arrays, bytes, null values, and composable `Signed<Value>` and `Encrypted<Value>` protection wrappers. Wrap in either order to choose whether signer metadata is public or encrypted. See [Type Map](./docs/TYPE-MAP.md) for mapping configuration and [Connector](./docs/CONNECTOR.md) for negotiated codecs.
 
-### Transport
+### Core and bindings
 
-The transport crate wraps QUIC with `wtransport`. `Sender` and `Receiver` exchange framed messages over unidirectional streams. The transport supports a persistent stream and a single-stream-per-message mode, with configurable message limits, timeouts, queues, and stream concurrency.
+`mtp-core` owns portable framing, retry, limit, and policy decisions. The crates under `bindings/` adapt those decisions to native wtransport, H3 WebTransport, and browser WebTransport. Native `Sender` and `Receiver` retain their connection metadata API while sharing the portable policy and framing rules.
 
 Certificate verification is controlled by client configuration. Use system roots or explicit certificate and SPKI pinning for production. Development self-signed and insecure modes: [Security](./docs/SECURITY.md).
 
@@ -95,6 +95,10 @@ The browser client uses the `mtp` SDK over WebTransport. See [WASM Client](./doc
 
 Common defines shared errors such as `CodecError` and `CommunicationError`, as well as protocol-level types used by the other crates.
 
+## Repository layout
+
+Protocol and application crates stay at the root. Platform code lives under `bindings/`, the published TypeScript package lives in `sdk/`, and all cross-package suites and example fixtures live in `tests/`. Cargo and pnpm each use one workspace and one lockfile.
+
 ### Type Map
 
 The type-map build script reads YAML and generates `CommunicationType` and `DataType` enums at compile time. The runtime crate provides `TypeMap`, `Version`, ID types, and the multi-version `Registry` when the registry feature is enabled. See [Type Map](./docs/TYPE-MAP.md).
@@ -105,4 +109,4 @@ The type-map build script reads YAML and generates `CommunicationType` and `Data
 
 ## Examples
 
-The [`example/`](./example/) workspace contains native client, native server, key-generation, WebTransport server, and browser client examples. The example server stores its generated development certificate and host keys locally; use the certificate pin it prints when connecting the example client.
+The [`tests/fixtures/example/`](./tests/fixtures/example/) workspace contains native client, native server, key-generation, WebTransport server, and browser client examples. The example server stores its generated development certificate and host keys locally; use the certificate pin it prints when connecting the example client.

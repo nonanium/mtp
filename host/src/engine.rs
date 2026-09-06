@@ -1176,17 +1176,17 @@ async fn send_accepted_generic<S: HandshakeSender>(
 // Trait implementations for concrete transport types
 // ---------------------------------------------------------------------------
 
-impl HandshakeSender for mtp_transport::Sender {
+impl HandshakeSender for mtp_native::Sender {
     fn send(
         &self,
         msg: &CommunicationValue,
     ) -> impl std::future::Future<Output = Result<(), CommunicationError>> + Send {
-        mtp_transport::Sender::send(self, msg)
+        mtp_native::Sender::send(self, msg)
     }
     fn finish_stream(
         &self,
     ) -> impl std::future::Future<Output = Result<(), CommunicationError>> + Send {
-        mtp_transport::Sender::finish_stream(self)
+        mtp_native::Sender::finish_stream(self)
     }
     async fn set_type_map(&self, type_map: &TypeMap) {
         self.set_type_map(type_map).await;
@@ -1197,12 +1197,12 @@ impl HandshakeSender for mtp_transport::Sender {
     }
 }
 
-impl HandshakeReceiver for mtp_transport::Receiver {
+impl HandshakeReceiver for mtp_native::Receiver {
     fn receive(
         &self,
     ) -> impl std::future::Future<Output = Result<CommunicationValue, CommunicationError>> + Send
     {
-        mtp_transport::Receiver::receive(self)
+        mtp_native::Receiver::receive(self)
     }
 
     async fn set_type_map(&self, type_map: &TypeMap) {
@@ -1210,34 +1210,32 @@ impl HandshakeReceiver for mtp_transport::Receiver {
     }
 }
 
-impl<C: mtp_transport::TransportConnection> HandshakeSender for mtp_transport::GenericSender<C> {
+impl<C: mtp_core::TransportConnection> HandshakeSender for mtp_core::GenericSender<C> {
     fn send(
         &self,
         msg: &CommunicationValue,
     ) -> impl std::future::Future<Output = Result<(), CommunicationError>> + Send {
-        mtp_transport::GenericSender::send(self, msg)
+        mtp_core::GenericSender::send(self, msg)
     }
     fn finish_stream(
         &self,
     ) -> impl std::future::Future<Output = Result<(), CommunicationError>> + Send {
-        mtp_transport::GenericSender::finish_stream(self)
+        mtp_core::GenericSender::finish_stream(self)
     }
     async fn set_type_map(&self, type_map: &TypeMap) {
         self.set_type_map(type_map).await;
     }
     fn close(&self) {
-        mtp_transport::GenericSender::close(self);
+        mtp_core::GenericSender::close(self);
     }
 }
 
-impl<C: mtp_transport::TransportConnection> HandshakeReceiver
-    for mtp_transport::GenericReceiver<C>
-{
+impl<C: mtp_core::TransportConnection> HandshakeReceiver for mtp_core::GenericReceiver<C> {
     fn receive(
         &self,
     ) -> impl std::future::Future<Output = Result<CommunicationValue, CommunicationError>> + Send
     {
-        mtp_transport::GenericReceiver::receive(self)
+        mtp_core::GenericReceiver::receive(self)
     }
 
     async fn set_type_map(&self, type_map: &TypeMap) {
