@@ -2,7 +2,10 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::fmt;
 use std::io::Cursor;
 
-use crate::data_value::{DataKind, DataValue, DecodeError, DecodeLimits, EncodeLimits};
+use crate::data_value::{
+    ContainerMergeError, DataKind, DataValue, DecodeError, DecodeLimits, EncodeLimits,
+    MergeOptions, MergeReport, merge_container_from_with_limits,
+};
 use crate::rand_u32;
 use mtp_common::CodecError;
 use mtp_type_map::{
@@ -13,6 +16,29 @@ const FLAG_HAS_ID: u8 = 0b0000_0001;
 const FLAG_HAS_SENDER: u8 = 0b0000_0010;
 const FLAG_HAS_RECEIVER: u8 = 0b0000_0100;
 const FLAG_KNOWN: u8 = FLAG_HAS_ID | FLAG_HAS_SENDER | FLAG_HAS_RECEIVER;
+
+/// A reason why two communication values cannot be payload-merged.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MergeError {
+    #[error("communication value mapping is invalid: {0}")]
+    Mapping(CodecError),
+    #[error("type-map versions differ: expected {expected}, actual {actual}")]
+    TypeMapMismatch { expected: String, actual: String },
+    #[error("communication types differ")]
+    CommunicationTypeMismatch,
+    #[error("senders are incompatible")]
+    SenderMismatch,
+    #[error("receivers are incompatible")]
+    ReceiverMismatch,
+    #[error("left payload is not a container")]
+    LeftPayloadNotContainer,
+    #[error("right payload is not a container")]
+    RightPayloadNotContainer,
+    #[error("frame encode limit cannot accommodate merged payload: {0}")]
+    FrameLimit(CodecError),
+    #[error(transparent)]
+    Container(#[from] ContainerMergeError),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunicationValue {
@@ -272,39 +298,101 @@ impl CommunicationValue {
         response
     }
 
-    /// Merge clear container fields after confirming both values use the same
-    /// negotiated type map.
-    pub fn try_merge(&mut self, other: &Self) -> Result<(), CodecError> {
+    /// Merge clear payload fields from `other` into `self`.
+    ///
+    /// This operation is shallow and left-biased: fields already present in
+    /// `self` are preserved, while fields present only in `other` are appended
+    /// in their original order. Existing destination order is never changed.
+    /// Frame identity and routing are not copied from `other`; contradictory
+    /// sender or receiver values are rejected. Both payloads must be valid,
+    /// unique-field containers, use the same type-map version, and have the
+    /// same communication type. On error, `self` is unchanged.
+    pub fn try_merge_payload_from(&mut self, other: &Self) -> Result<MergeReport, MergeError> {
+        self.try_merge_payload_from_with(other, MergeOptions::default())
+    }
+
+    /// Merge clear payload fields with an explicit conflict and recursion policy.
+    pub fn try_merge_payload_from_with(
+        &mut self,
+        other: &Self,
+        options: MergeOptions,
+    ) -> Result<MergeReport, MergeError> {
+        self.try_merge_payload_from_with_limits(other, options, EncodeLimits::default())
+    }
+
+    /// Merge clear payload fields with explicit conflict, recursion, and
+    /// structural resource policies.
+    pub fn try_merge_payload_from_with_limits(
+        &mut self,
+        other: &Self,
+        options: MergeOptions,
+        limits: EncodeLimits,
+    ) -> Result<MergeReport, MergeError> {
         if let Some(error) = &self.mapping_error {
-            return Err(error.clone());
+            return Err(MergeError::Mapping(error.clone()));
         }
-        let left = self.type_map().ok_or(CodecError::MissingTypeMap)?;
-        let right = other.type_map().ok_or(CodecError::MissingTypeMap)?;
+        let left = self
+            .type_map()
+            .ok_or_else(|| MergeError::Mapping(CodecError::MissingTypeMap))?;
+        let right = other
+            .type_map()
+            .ok_or_else(|| MergeError::Mapping(CodecError::MissingTypeMap))?;
         if left.version != right.version {
-            return Err(CodecError::TypeMapMismatch {
+            return Err(MergeError::TypeMapMismatch {
                 expected: left.version.to_string(),
                 actual: right.version.to_string(),
             });
         }
         if let Some(error) = &other.mapping_error {
-            return Err(error.clone());
+            return Err(MergeError::Mapping(error.clone()));
+        }
+        if self.comm_type != other.comm_type {
+            return Err(MergeError::CommunicationTypeMismatch);
+        }
+        if !compatible_optional(&self.sender, &other.sender) {
+            return Err(MergeError::SenderMismatch);
+        }
+        if !compatible_optional(&self.receiver, &other.receiver) {
+            return Err(MergeError::ReceiverMismatch);
+        }
+
+        if self.payload.container_entries().is_none() {
+            return Err(MergeError::LeftPayloadNotContainer);
         }
         let other_entries = other
             .payload
             .container_entries()
-            .ok_or(CodecError::InvalidEncoding)?;
-        for (id, value) in other_entries {
-            self.insert_data(*id, value.clone())?;
-        }
-        Ok(())
+            .ok_or(MergeError::RightPayloadNotContainer)?;
+
+        let payload_limits = self
+            .payload_encode_limits(limits)
+            .map_err(MergeError::FrameLimit)?;
+
+        // Container merging validates both complete recursive value trees and
+        // applies its result only after all fallible work has completed.
+        let destination = self
+            .payload
+            .container_entries_mut()
+            .expect("payload was checked as a container");
+        merge_container_from_with_limits(destination, other_entries, options, payload_limits)
+            .map_err(MergeError::from)
     }
 
-    // Migrate to `try_merge` so a map mismatch cannot be silently recorded in
-    // a frame that is later sent over the wire.
-    #[deprecated(note = "migrate to try_merge to handle negotiated type-map mismatches")]
+    /// Deprecated wrapper retaining the previous `CodecError` return type.
+    /// It uses the new left-biased payload semantics.
+    #[deprecated(note = "use try_merge_payload_from for left-biased payload merging")]
+    pub fn try_merge(&mut self, other: &Self) -> Result<(), CodecError> {
+        self.try_merge_payload_from(other)
+            .map(|_| ())
+            .map_err(CodecError::from)
+    }
+
+    // This legacy infallible API records a merge failure in the frame so it
+    // cannot be silently sent later.
+    #[deprecated(note = "use try_merge_payload_from to handle merge errors")]
     pub fn merge(&mut self, other: &Self) {
-        if let Err(error) = self.try_merge(other) {
-            self.mapping_error.get_or_insert(error);
+        if let Err(error) = self.try_merge_payload_from(other) {
+            self.mapping_error.get_or_insert(error.into());
         }
     }
 
@@ -350,15 +438,9 @@ impl CommunicationValue {
         if let Some(error) = &self.mapping_error {
             return Err(error.clone());
         }
-        let header_len = self.frame_header_len();
-        let payload_limit = limits
-            .max_output_size
-            .checked_sub(header_len)
-            .ok_or(CodecError::TooManyEntries)?;
-        let payload = self.payload.to_bytes_with_limits(EncodeLimits {
-            max_output_size: payload_limit,
-            ..limits
-        })?;
+        let payload = self
+            .payload
+            .to_bytes_with_limits(self.payload_encode_limits(limits)?)?;
         let mut body = Vec::new();
         body.write_u16::<BigEndian>(self.comm_type.0)
             .map_err(|_| CodecError::InvalidEncoding)?;
@@ -406,6 +488,17 @@ impl CommunicationValue {
             + self.id.is_some() as usize * 4
             + self.sender.is_some() as usize * 8
             + self.receiver.is_some() as usize * 8
+    }
+
+    fn payload_encode_limits(&self, limits: EncodeLimits) -> Result<EncodeLimits, CodecError> {
+        let max_output_size = limits
+            .max_output_size
+            .checked_sub(self.frame_header_len())
+            .ok_or(CodecError::TooManyEntries)?;
+        Ok(EncodeLimits {
+            max_output_size,
+            ..limits
+        })
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CodecError> {
@@ -544,6 +637,28 @@ impl CommunicationValue {
             mapping_error: None,
         })
     }
+}
+
+impl From<MergeError> for CodecError {
+    fn from(error: MergeError) -> Self {
+        match error {
+            MergeError::Mapping(error) => error,
+            MergeError::TypeMapMismatch { expected, actual } => {
+                Self::TypeMapMismatch { expected, actual }
+            }
+            MergeError::CommunicationTypeMismatch
+            | MergeError::SenderMismatch
+            | MergeError::ReceiverMismatch
+            | MergeError::LeftPayloadNotContainer
+            | MergeError::RightPayloadNotContainer
+            | MergeError::FrameLimit(_)
+            | MergeError::Container(_) => Self::InvalidEncoding,
+        }
+    }
+}
+
+fn compatible_optional<T: PartialEq>(left: &Option<T>, right: &Option<T>) -> bool {
+    !matches!((left, right), (Some(left), Some(right)) if left != right)
 }
 
 #[cfg(feature = "registry")]
@@ -702,6 +817,7 @@ fn fmt_data_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_value::{MergeConflictPolicy, MergePath};
 
     #[test]
     fn canonical_flags_and_eight_byte_ids_roundtrip() {
@@ -802,6 +918,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn try_merge_rejects_frames_from_different_type_maps() {
         let left_map = TypeMap::new(mtp_type_map::Version::new(3, 0));
         let right_map = TypeMap::new(mtp_type_map::Version::new(4, 0));
@@ -816,6 +933,342 @@ mod tests {
             })
         );
         assert_eq!(left.data_len(), 0);
+    }
+
+    #[test]
+    fn merge_payload_is_left_biased_and_preserves_order() {
+        let mut left = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![
+                (DataTypeId(2), DataValue::UnsignedNumber(2)),
+                (DataTypeId(1), DataValue::UnsignedNumber(1)),
+            ]),
+        );
+        let right = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![
+                (DataTypeId(3), DataValue::UnsignedNumber(3)),
+                (DataTypeId(1), DataValue::UnsignedNumber(99)),
+                (DataTypeId(4), DataValue::UnsignedNumber(4)),
+            ]),
+        );
+
+        let report = left.try_merge_payload_from(&right).unwrap();
+
+        assert_eq!(
+            report.inserted,
+            vec![
+                MergePath::new(vec![DataTypeId(3)]),
+                MergePath::new(vec![DataTypeId(4)])
+            ]
+        );
+        assert_eq!(report.preserved, vec![MergePath::new(vec![DataTypeId(1)])]);
+        assert_eq!(
+            left.data(),
+            Some(
+                &[
+                    (DataTypeId(2), DataValue::UnsignedNumber(2)),
+                    (DataTypeId(1), DataValue::UnsignedNumber(1)),
+                    (DataTypeId(3), DataValue::UnsignedNumber(3)),
+                    (DataTypeId(4), DataValue::UnsignedNumber(4)),
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn bounded_frame_merge_uses_complete_frame_size_limits() {
+        let payload = DataValue::Container(vec![(DataTypeId(1), DataValue::BoolTrue)]);
+        let mut destination = CommunicationValue::new(CommunicationType::Ping)
+            .with_id(7)
+            .with_payload(payload.clone());
+        let source = CommunicationValue::new(CommunicationType::Ping)
+            .with_id(7)
+            .with_payload(DataValue::Container(Vec::new()));
+        let before = destination.clone();
+        let limits = EncodeLimits {
+            // The payload is six bytes alone, but this frame has an eleven-byte
+            // header and therefore cannot fit into sixteen bytes.
+            max_output_size: 16,
+            ..EncodeLimits::default()
+        };
+
+        assert!(payload.to_bytes_with_limits(limits).is_ok());
+        assert!(destination.to_bytes_with_limits(limits).is_err());
+        assert!(
+            destination
+                .try_merge_payload_from_with_limits(&source, MergeOptions::default(), limits)
+                .is_err()
+        );
+        assert_eq!(destination, before);
+    }
+
+    #[test]
+    fn merge_payload_rejects_malformed_containers_without_mutating_destination() {
+        let original = DataValue::Container(vec![(DataTypeId(1), DataValue::BoolTrue)]);
+        let mut left =
+            CommunicationValue::new(CommunicationType::Ping).with_payload(original.clone());
+        let right = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![
+                (DataTypeId(2), DataValue::BoolTrue),
+                (DataTypeId(2), DataValue::BoolFalse),
+            ]),
+        );
+
+        assert_eq!(
+            left.try_merge_payload_from(&right),
+            Err(MergeError::Container(
+                ContainerMergeError::SourceDuplicateField(DataTypeId(2))
+            ))
+        );
+        assert_eq!(left.payload(), &original);
+
+        let malformed_left = DataValue::Container(vec![
+            (DataTypeId(3), DataValue::BoolTrue),
+            (DataTypeId(3), DataValue::BoolFalse),
+        ]);
+        let mut left =
+            CommunicationValue::new(CommunicationType::Ping).with_payload(malformed_left.clone());
+        let right = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![(DataTypeId(4), DataValue::BoolTrue)]),
+        );
+        assert_eq!(
+            left.try_merge_payload_from(&right),
+            Err(MergeError::Container(
+                ContainerMergeError::DestinationDuplicateField(DataTypeId(3))
+            ))
+        );
+        assert_eq!(left.payload(), &malformed_left);
+    }
+
+    #[test]
+    fn merge_payload_rejects_nested_malformed_source_without_mutating_destination() {
+        let original = DataValue::Container(vec![(DataTypeId(1), DataValue::BoolTrue)]);
+        let mut left =
+            CommunicationValue::new(CommunicationType::Ping).with_payload(original.clone());
+        let right = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![(
+                DataTypeId(2),
+                DataValue::Container(vec![
+                    (DataTypeId(3), DataValue::BoolTrue),
+                    (DataTypeId(3), DataValue::BoolFalse),
+                ]),
+            )]),
+        );
+
+        assert_eq!(
+            left.try_merge_payload_from(&right),
+            Err(MergeError::Container(
+                ContainerMergeError::InvalidStructure(CodecError::InvalidEncoding)
+            ))
+        );
+        assert_eq!(left.payload(), &original);
+
+        let malformed_destination = DataValue::Container(vec![(
+            DataTypeId(4),
+            DataValue::Container(vec![
+                (DataTypeId(5), DataValue::BoolTrue),
+                (DataTypeId(5), DataValue::BoolFalse),
+            ]),
+        )]);
+        let mut left = CommunicationValue::new(CommunicationType::Ping)
+            .with_payload(malformed_destination.clone());
+        let right = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![(DataTypeId(6), DataValue::BoolTrue)]),
+        );
+        assert_eq!(
+            left.try_merge_payload_from(&right),
+            Err(MergeError::Container(
+                ContainerMergeError::InvalidStructure(CodecError::InvalidEncoding)
+            ))
+        );
+        assert_eq!(left.payload(), &malformed_destination);
+    }
+
+    #[test]
+    fn merge_payload_policies_and_recursion_are_explicit() {
+        let left_payload = DataValue::Container(vec![(
+            DataTypeId(1),
+            DataValue::Container(vec![(DataTypeId(2), DataValue::UnsignedNumber(2))]),
+        )]);
+        let right = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![(
+                DataTypeId(1),
+                DataValue::Container(vec![
+                    (DataTypeId(2), DataValue::UnsignedNumber(99)),
+                    (DataTypeId(3), DataValue::UnsignedNumber(3)),
+                ]),
+            )]),
+        );
+
+        let mut shallow =
+            CommunicationValue::new(CommunicationType::Ping).with_payload(left_payload.clone());
+        shallow.try_merge_payload_from(&right).unwrap();
+        assert_eq!(shallow.payload(), &left_payload);
+
+        let mut recursive =
+            CommunicationValue::new(CommunicationType::Ping).with_payload(left_payload);
+        let report = recursive
+            .try_merge_payload_from_with(
+                &right,
+                MergeOptions {
+                    conflicts: MergeConflictPolicy::KeepLeft,
+                    recursive_containers: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            report.inserted,
+            vec![MergePath::new(vec![DataTypeId(1), DataTypeId(3)])]
+        );
+        assert_eq!(
+            report.preserved,
+            vec![MergePath::new(vec![DataTypeId(1), DataTypeId(2)])]
+        );
+        assert_eq!(report.recursed, vec![MergePath::new(vec![DataTypeId(1)])]);
+
+        let mut replacing = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![(DataTypeId(4), DataValue::BoolTrue)]),
+        );
+        let replacement = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![(DataTypeId(4), DataValue::BoolFalse)]),
+        );
+        assert_eq!(
+            replacing
+                .try_merge_payload_from_with(
+                    &replacement,
+                    MergeOptions {
+                        conflicts: MergeConflictPolicy::RequireEqual,
+                        recursive_containers: false,
+                    },
+                )
+                .unwrap_err(),
+            MergeError::Container(ContainerMergeError::Conflict(MergePath::new(vec![
+                DataTypeId(4)
+            ])))
+        );
+        let report = replacing
+            .try_merge_payload_from_with(
+                &replacement,
+                MergeOptions {
+                    conflicts: MergeConflictPolicy::KeepRight,
+                    recursive_containers: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(report.replaced, vec![MergePath::new(vec![DataTypeId(4)])]);
+
+        let mut equal = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![(DataTypeId(5), DataValue::BoolTrue)]),
+        );
+        let equal_source = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![(DataTypeId(5), DataValue::BoolTrue)]),
+        );
+        assert_eq!(
+            equal
+                .try_merge_payload_from_with(
+                    &equal_source,
+                    MergeOptions {
+                        conflicts: MergeConflictPolicy::RequireEqual,
+                        recursive_containers: false,
+                    },
+                )
+                .unwrap()
+                .matched,
+            vec![MergePath::new(vec![DataTypeId(5)])]
+        );
+        assert_eq!(
+            equal
+                .try_merge_payload_from_with(
+                    &equal_source,
+                    MergeOptions {
+                        conflicts: MergeConflictPolicy::Reject,
+                        recursive_containers: false,
+                    },
+                )
+                .unwrap_err(),
+            MergeError::Container(ContainerMergeError::Conflict(MergePath::new(vec![
+                DataTypeId(5)
+            ])))
+        );
+    }
+
+    #[test]
+    fn merge_payload_rejects_incompatible_frame_metadata() {
+        let mut left = CommunicationValue::new(CommunicationType::Ping).with_sender(7);
+        let different_type = CommunicationValue::new(CommunicationType::Pong);
+        assert_eq!(
+            left.try_merge_payload_from(&different_type),
+            Err(MergeError::CommunicationTypeMismatch)
+        );
+
+        let different_sender = CommunicationValue::new(CommunicationType::Ping).with_sender(8);
+        assert_eq!(
+            left.try_merge_payload_from(&different_sender),
+            Err(MergeError::SenderMismatch)
+        );
+
+        let receiver_left = CommunicationValue::new(CommunicationType::Ping).with_receiver(7);
+        let receiver_right = CommunicationValue::new(CommunicationType::Ping).with_receiver(8);
+        assert_eq!(
+            receiver_left
+                .clone()
+                .try_merge_payload_from(&receiver_right),
+            Err(MergeError::ReceiverMismatch)
+        );
+    }
+
+    #[test]
+    fn merge_payload_keeps_destination_frame_id() {
+        let mut left = CommunicationValue::new(CommunicationType::Ping)
+            .with_id(123)
+            .with_payload(DataValue::Container(vec![]));
+        let right = CommunicationValue::new(CommunicationType::Ping)
+            .with_id(456)
+            .with_payload(DataValue::Container(vec![(
+                DataTypeId(1),
+                DataValue::BoolTrue,
+            )]));
+
+        left.try_merge_payload_from(&right).unwrap();
+        assert_eq!(left.id(), Some(123));
+    }
+
+    #[test]
+    fn default_merge_is_identity_for_empty_and_idempotent_for_same_source() {
+        let mut destination = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![(DataTypeId(1), DataValue::BoolTrue)]),
+        );
+        let empty = CommunicationValue::new(CommunicationType::Ping);
+        assert_eq!(
+            destination.try_merge_payload_from(&empty).unwrap(),
+            MergeReport::default()
+        );
+
+        let source = CommunicationValue::new(CommunicationType::Ping).with_payload(
+            DataValue::Container(vec![(DataTypeId(2), DataValue::BoolFalse)]),
+        );
+        destination.try_merge_payload_from(&source).unwrap();
+        let once = destination.payload().clone();
+        destination.try_merge_payload_from(&source).unwrap();
+        assert_eq!(destination.payload(), &once);
+    }
+
+    #[test]
+    fn merge_payload_rejects_non_container_payloads() {
+        let mut scalar_left =
+            CommunicationValue::new(CommunicationType::Ping).with_payload(DataValue::BoolTrue);
+        let container = CommunicationValue::new(CommunicationType::Ping);
+        assert_eq!(
+            scalar_left.try_merge_payload_from(&container),
+            Err(MergeError::LeftPayloadNotContainer)
+        );
+
+        let mut container_left = CommunicationValue::new(CommunicationType::Ping);
+        let scalar_right =
+            CommunicationValue::new(CommunicationType::Ping).with_payload(DataValue::BoolTrue);
+        assert_eq!(
+            container_left.try_merge_payload_from(&scalar_right),
+            Err(MergeError::RightPayloadNotContainer)
+        );
     }
 
     #[test]

@@ -130,6 +130,79 @@ export function decode(frame: MTPBytesInput): ParsedFrame {
   return bindings.parse_frame(bytesFrom(frame, "frame"));
 }
 
+export interface MTPMergeOptions {
+  conflicts?: "keep-left" | "keep-right" | "require-equal" | "reject";
+  recursiveContainers?: boolean;
+  receiveLimits?: MTPReceiveLimits;
+  encodeLimits?: MTPEncodeLimits;
+}
+
+export type MTPMergePath = number[];
+
+export interface MTPMergeReport {
+  inserted: MTPMergePath[];
+  preserved: MTPMergePath[];
+  replaced: MTPMergePath[];
+  matched: MTPMergePath[];
+  recursed: MTPMergePath[];
+}
+
+export interface MTPMergeResult {
+  frame: Uint8Array;
+  report: MTPMergeReport;
+}
+
+/**
+ * Merge clear payload fields from `source` into `destination`.
+ *
+ * Existing destination fields win. Source-only fields are appended in source
+ * order, and frame identity/routing stays with the destination.
+ */
+export function mergePayloadFrom(
+  destination: MTPBytesInput,
+  source: MTPBytesInput,
+): Uint8Array {
+  return mergePayloadFromDetailed(destination, source).frame;
+}
+
+export function mergePayloadFromDetailed(
+  destination: MTPBytesInput,
+  source: MTPBytesInput,
+  options: MTPMergeOptions = {},
+): MTPMergeResult {
+  return bindings.merge_frame_payload_from_detailed_with_limits(
+    bytesFrom(destination, "destination"),
+    bytesFrom(source, "source"),
+    options,
+    options.receiveLimits ?? {},
+    options.encodeLimits ?? {},
+  );
+}
+
+/** Merge serialized clear `DataValue::Container` content before protection. */
+export function mergeDataValues(
+  destination: MTPBytesInput,
+  source: MTPBytesInput,
+  options: MTPMergeOptions = {},
+): Uint8Array {
+  return mergeDataValuesDetailed(destination, source, options).frame;
+}
+
+/** Merge serialized clear `DataValue::Container` content with diagnostics. */
+export function mergeDataValuesDetailed(
+  destination: MTPBytesInput,
+  source: MTPBytesInput,
+  options: MTPMergeOptions = {},
+): MTPMergeResult {
+  return bindings.merge_data_value_containers_detailed_with_limits(
+    bytesFrom(destination, "destination data value"),
+    bytesFrom(source, "source data value"),
+    options,
+    options.receiveLimits ?? {},
+    options.encodeLimits ?? {},
+  );
+}
+
 export function decodeWithLimits(
   frame: MTPBytesInput,
   limits: MTPReceiveLimits,

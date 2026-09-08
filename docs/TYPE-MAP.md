@@ -216,9 +216,59 @@ let migrated = codec.encode_migrating(&value).unwrap();
 `VersionedCodec::encode` compares the retained map identity (its protocol
 version) and returns `CodecError::MissingTypeMap` or
 `CodecError::TypeMapMismatch` on failure. `reply_to` retains the request's
-map, while `try_merge` rejects frames from different maps before copying any
-fields. The deprecated `merge` method records the error for compatibility; new
-code should migrate to `try_merge` and handle the result.
+map, while `try_merge_payload_from` rejects frames from different maps before
+copying any fields. Payload merging is shallow and left-biased: a field already
+present in the destination keeps its value and position, and a field present
+only in the source is appended in source order. The frames must also have the
+same communication type; contradictory sender or receiver metadata is
+rejected. Frame IDs and routing metadata are never copied from the source.
+
+Use `try_merge_payload_from` for the detailed `MergeError` and `MergeReport`.
+The deprecated `try_merge` and `merge` compatibility methods retain their
+`CodecError` behavior, but now use the same left-biased semantics. Code that
+previously used `try_merge` for right-biased overrides must switch to
+`try_merge_payload_from_with` and `MergeConflictPolicy::KeepRight`.
+
+## Payload merging
+
+Compose clear application content before building a protected message. The
+default merge is shallow and destination-biased:
+
+```rust
+let report = destination.try_merge_payload_from(&source)?;
+// destination fields win; source-only fields are appended in source order.
+```
+
+The destination frame ID and routing metadata remain unchanged. A sender or
+receiver present on both frames must agree; routing values are never copied
+from the source. Both payloads must be structurally valid containers, so
+signed, encrypted, scalar, and malformed nested values are rejected.
+
+`MergeOptions` provides explicit `KeepRight`, `RequireEqual`, and `Reject`
+conflict policies, plus opt-in recursive container merging. When
+`recursiveContainers` is enabled and both overlapping values are containers,
+their children are merged before the leaf conflict policy is applied. Arrays
+remain ordinary field values and are never concatenated.
+
+Detailed reports contain complete numeric field paths. For a source that adds
+`City` below an existing `Metadata` container, the report is:
+
+```ts
+{
+  inserted: [[metadataId, cityId]],
+  preserved: [],
+  replaced: [],
+  matched: [],
+  recursed: [[metadataId]],
+}
+```
+
+The TypeScript SDK offers `mergePayloadFrom`, `mergePayloadFromDetailed`,
+`mergeDataValues`, and `mergeDataValuesDetailed`; the data-value helpers are
+useful for combining content before `ProtectedMessageBuilder`, signing, or
+encryption. `EncodeLimits` passed to frame merging bound the complete encoded
+frame, while limits passed to standalone data-value merging bound the complete
+serialized `DataValue`.
 
 ## Customizing Type Maps in Downstream Projects
 
