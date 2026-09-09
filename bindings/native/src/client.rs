@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use mtp_common::CommunicationError;
+use mtp_common::{CommunicationError, TransportPhase};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore, pki_types::pem::PemObject};
 use wtransport::{ClientConfig as WTransportClientConfig, Endpoint};
 
@@ -174,15 +174,19 @@ pub async fn connect_with_config(
     tracing::debug!(elapsed = ?config_started.elapsed(), "client connect: configure TLS");
 
     let endpoint_started = Instant::now();
-    let endpoint = Endpoint::client(client_config)
-        .map_err(|e| CommunicationError::Other(format!("Endpoint creation failed: {}", e)))?;
+    let endpoint = Endpoint::client(client_config).map_err(|e| {
+        CommunicationError::transport(
+            TransportPhase::Connect,
+            format!("Endpoint creation failed: {}", e),
+        )
+    })?;
     tracing::debug!(elapsed = ?endpoint_started.elapsed(), "client connect: create endpoint");
 
     let transport_connect_started = Instant::now();
     let connection = endpoint
         .connect(url)
         .await
-        .map_err(|e| CommunicationError::ConnectingError(e.to_string()))?;
+        .map_err(|e| CommunicationError::transport(TransportPhase::Connect, e.to_string()))?;
     tracing::debug!(elapsed = ?transport_connect_started.elapsed(), "client connect: establish WebTransport session");
 
     let handle = Arc::new(ConnectionHandle::with_remote_addr(
@@ -240,11 +244,24 @@ fn configure_client_system_roots(
     policy: &Policy,
 ) -> Result<WTransportClientConfig, CommunicationError> {
     let mut root_store = RootCertStore::empty();
+    let loaded = rustls_native_certs::load_native_certs();
 
-    let certs = rustls_native_certs::load_native_certs().certs;
+    if !loaded.errors.is_empty() {
+        tracing::warn!(errors = ?loaded.errors, "client TLS: some native root certificates could not be loaded");
+    }
 
-    for cert in certs {
-        root_store.add(cert).ok();
+    let mut usable_roots = 0;
+    for cert in loaded.certs {
+        match root_store.add(cert) {
+            Ok(()) => usable_roots += 1,
+            Err(error) => {
+                tracing::warn!(%error, "client TLS: native root certificate was rejected");
+            }
+        }
+    }
+
+    if usable_roots == 0 {
+        return Err(CommunicationError::CertificateLoadFailed);
     }
 
     client_config_from_roots(root_store, policy)

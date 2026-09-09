@@ -8,8 +8,10 @@ use mtp_codec::{
 use mtp_native::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Semaphore;
 #[cfg(feature = "pipes")]
 use tokio::sync::mpsc;
+use tokio::time::{Instant as TokioInstant, timeout_at};
 
 use crate::config::{AuthenticationContext, HostConfig};
 use crate::connection::MTPConnection;
@@ -24,6 +26,7 @@ pub struct MTPHost {
     pub(crate) transport: mtp_native::Host,
     pub(crate) context: Arc<HandshakeContext>,
     pub(crate) handshakes: tokio::task::JoinSet<Result<Option<MTPConnection>, AcceptError>>,
+    pub(crate) authentication_limit: Arc<Semaphore>,
     pub(crate) transport_closed: bool,
 }
 
@@ -36,14 +39,19 @@ impl MTPHost {
     pub async fn new(config: HostConfig) -> Result<Self, mtp_common::CommunicationError> {
         let registry = Registry::builtin();
 
-        let transport = mtp_native::host(
+        let transport = mtp_native::host_with_config(
             config.ip,
             config.port,
-            config.tls_fullchain.clone(),
-            config.tls_key.clone(),
-            config.policy,
+            mtp_native::HostConfig::new(
+                config.tls_fullchain.clone(),
+                config.tls_key.clone(),
+                config.policy,
+            )
+            .with_max_transport_handshakes(config.max_transport_handshakes)
+            .with_max_pending_connections(config.max_pending_connections),
         )
         .await?;
+        let authentication_limit = Arc::new(Semaphore::new(config.max_pending_authentications));
 
         Ok(Self {
             transport,
@@ -52,6 +60,7 @@ impl MTPHost {
                 config: Arc::new(config),
             }),
             handshakes: tokio::task::JoinSet::new(),
+            authentication_limit,
             transport_closed: false,
         })
     }
@@ -74,7 +83,13 @@ impl MTPHost {
                     Some((sender, receiver)) => {
                         tracing::debug!(elapsed = ?incoming_started.elapsed(), "host accept loop: dispatch authentication handshake");
                         let context = self.context.clone();
+                        let Ok(permit) = self.authentication_limit.clone().try_acquire_owned()
+                        else {
+                            tracing::debug!("dropping connection: authentication budget exhausted");
+                            continue;
+                        };
                         self.handshakes.spawn(async move {
+                            let _permit = permit;
                             let handshake_started = Instant::now();
                             let result = context.accept_pair_timed(sender, receiver).await;
                             tracing::debug!(elapsed = ?handshake_started.elapsed(), success = result.is_ok(), "host accept loop: authentication handshake finished");
@@ -104,8 +119,13 @@ impl MTPHost {
                         Some((sender, receiver)) => {
                             tracing::debug!("host accept loop: dispatch authentication handshake");
                             let context = self.context.clone();
+                            let Ok(permit) = self.authentication_limit.clone().try_acquire_owned() else {
+                                tracing::debug!("dropping connection: authentication budget exhausted");
+                                continue;
+                            };
                             self.handshakes
                                 .spawn(async move {
+                                    let _permit = permit;
                                     let handshake_started = Instant::now();
                                     let result = context.accept_pair_timed(sender, receiver).await;
                                     tracing::debug!(elapsed = ?handshake_started.elapsed(), success = result.is_ok(), "host accept loop: authentication handshake finished");
@@ -126,6 +146,27 @@ impl MTPHost {
     pub fn registry(&self) -> &Registry {
         &self.context.registry
     }
+
+    pub fn stop_accepting(&self) {
+        self.transport.stop_accepting();
+    }
+
+    /// Stop admission, then reap authentication and transport work by the
+    /// caller's deadline. Remaining work is aborted before return.
+    pub async fn shutdown(&mut self, deadline: TokioInstant) {
+        self.stop_accepting();
+        while !self.handshakes.is_empty() {
+            if timeout_at(deadline, self.handshakes.join_next())
+                .await
+                .is_err()
+            {
+                self.handshakes.abort_all();
+                break;
+            }
+        }
+        while self.handshakes.join_next().await.is_some() {}
+        self.transport.shutdown(deadline).await;
+    }
 }
 
 impl HandshakeContext {
@@ -136,10 +177,7 @@ impl HandshakeContext {
     ) -> Result<Option<MTPConnection>, AcceptError> {
         let engine = HandshakeEngine::new(self.registry.clone(), self.config.clone());
         let authentication_context = AuthenticationContext {
-            peer_network_identity: sender
-                .handle()
-                .remote_addr()
-                .map(|address| address.to_string()),
+            peer_network_identity: sender.handle().remote_addr().map(|address| address.ip()),
             connection_id: sender.handle().connection_id(),
         };
         let result = engine
@@ -219,6 +257,7 @@ impl HandshakeContext {
                 description: result.description,
                 _dispatcher_task: task,
                 _connection_guard: None,
+                _session_task: None,
                 auth_state: result.auth_state,
                 client_id: result.client_id,
                 client_public_key: result.client_public_key,
@@ -245,6 +284,7 @@ impl HandshakeContext {
                 description: result.description,
                 _dispatcher_task: task,
                 _connection_guard: None,
+                _session_task: None,
                 auth_state: result.auth_state,
                 client_id: result.client_id,
                 client_public_key: result.client_public_key,
@@ -312,6 +352,7 @@ impl HandshakeContext {
                 description,
                 _dispatcher_task: task,
                 _connection_guard: None,
+                _session_task: None,
             }
         }
 
@@ -334,6 +375,7 @@ impl HandshakeContext {
                 description,
                 _dispatcher_task: task,
                 _connection_guard: None,
+                _session_task: None,
             }
         }
     }

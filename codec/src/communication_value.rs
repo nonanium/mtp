@@ -333,10 +333,10 @@ impl CommunicationValue {
         }
         let left = self
             .type_map()
-            .ok_or_else(|| MergeError::Mapping(CodecError::MissingTypeMap))?;
+            .ok_or(MergeError::Mapping(CodecError::MissingTypeMap))?;
         let right = other
             .type_map()
-            .ok_or_else(|| MergeError::Mapping(CodecError::MissingTypeMap))?;
+            .ok_or(MergeError::Mapping(CodecError::MissingTypeMap))?;
         if left.version != right.version {
             return Err(MergeError::TypeMapMismatch {
                 expected: left.version.to_string(),

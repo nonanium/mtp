@@ -1,10 +1,19 @@
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap};
 use mtp_common::{CommunicationError, ExpiringSet, PipeError, PipeId};
-use mtp_native::{PipeReader, PipeWriter, Policy, TransportEvent};
+use mtp_native::{PipeReader, PipeWriter, Policy};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::{Mutex, mpsc};
+
+/// A message or an incoming pipe stream delivered by a [`PipeReceiver`].
+///
+/// This remains generic so the host pipe dispatcher can work with both the
+/// native adapter and transport-independent core receivers.
+pub enum TransportEvent<P> {
+    Message(CommunicationValue),
+    Pipe(PipeReader<P>),
+}
 
 /// The sender operations needed by the transport-independent pipe protocol.
 pub trait PipeSender: Clone + Send + Sync + 'static {
@@ -97,7 +106,10 @@ impl PipeReceiver<wtransport::RecvStream> for mtp_native::Receiver {
     async fn receive_pipe_event(
         &self,
     ) -> Result<TransportEvent<wtransport::RecvStream>, CommunicationError> {
-        self.receive_event().await
+        match self.receive_event().await? {
+            mtp_native::TransportEvent::Message(message) => Ok(TransportEvent::Message(message)),
+            mtp_native::TransportEvent::Pipe(reader) => Ok(TransportEvent::Pipe(reader)),
+        }
     }
 }
 

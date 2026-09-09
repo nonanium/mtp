@@ -1,7 +1,7 @@
 use mtp_codec::{CommunicationValue, Version, registry::VersionedCodec};
 #[cfg(feature = "pipes")]
 use mtp_codec::{DataType, DataValue};
-use mtp_common::{CommunicationError, RequestId};
+use mtp_common::{CommunicationError, RequestId, TransportPhase};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
@@ -92,40 +92,36 @@ impl MTPConnection {
                 .map_err(|_| CommunicationError::Other("request id is already pending".into()))?;
         }
 
-        let response = match tokio::time::timeout(self.request_timeout, async {
-            self.sender.send(request).await?;
-            receiver
-                .await
-                .map_err(|_| CommunicationError::StreamClosed)?
-        })
-        .await
-        {
-            Ok(result) => {
-                if result.is_err() {
-                    crate::pipe::remove_pending_request(&self.pipe_dispatcher, request_id, &token)
-                        .await;
-                }
-                result?
+        if let Err(error) = self.sender.send(request).await {
+            crate::pipe::remove_pending_request(&self.pipe_dispatcher, request_id, &token).await;
+            return Err(error);
+        }
+
+        let response = match tokio::time::timeout(self.request_timeout, receiver).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => {
+                crate::pipe::remove_pending_request(&self.pipe_dispatcher, request_id, &token)
+                    .await;
+                return Err(CommunicationError::ConnectionLost);
             }
             Err(_) => {
                 crate::pipe::expire_pending_request(&self.pipe_dispatcher, request_id, &token)
                     .await;
-                return Err(CommunicationError::Other(format!(
-                    "request {} timed out after {:?}",
-                    request_id.get(),
-                    self.request_timeout
-                )));
+                return Err(CommunicationError::timeout(TransportPhase::WaitResponse));
             }
         };
 
-        Ok(response)
+        if response.is_err() {
+            crate::pipe::remove_pending_request(&self.pipe_dispatcher, request_id, &token).await;
+        }
+        response
     }
 
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
         let mut rx = self.app_rx.lock().await;
         match rx.recv().await {
             Some(result) => result,
-            None => Err(CommunicationError::StreamClosed),
+            None => Err(CommunicationError::ConnectionLost),
         }
     }
 }
@@ -190,7 +186,7 @@ impl MTPConnection {
         let mut rx = self.pipe_req_rx.lock().await;
         match rx.recv().await {
             Some(req) => Ok(req),
-            None => Err(CommunicationError::StreamClosed),
+            None => Err(CommunicationError::ConnectionLost),
         }
     }
 }

@@ -65,7 +65,9 @@ while let Some(conn) = host.accept().await? {
 }
 ```
 
-The host reads the reserved opening frame, extracts `DataType::Version`, calls `registry.negotiate`, and returns `AcceptError::UnsupportedVersion` when no registered version matches.
+The host reads the reserved opening frame, extracts the structured
+`DataType::Version` offer, calls `registry.negotiate`, and returns
+`AcceptError::UnsupportedVersion` when no registered version matches.
 
 Authentication follows the version-bearing hello when the host enables it.
 The sequence is defined in [Protocol Reference](PROTOCOL-REFERENCE.md).
@@ -74,7 +76,8 @@ The sequence is defined in [Protocol Reference](PROTOCOL-REFERENCE.md).
 
 ## Client
 
-The client connects to a host and uses a single compiled-in protocol version.
+The client connects to a host and offers every type-map version compiled into
+its builtin registry, ordered highest first.
 
 ```rust
 use mtp::client::{ClientConfig, MTPClient};
@@ -92,28 +95,29 @@ let conn = MTPClient::auth_connect(pinned.with_client_id(8765), &keys, &host_pk)
 let conn = MTPClient::auth_register(config, &keys, &host_pk).await?;
 ```
 
-The client's `PROTOCOL_VERSION` constant is set by `protocol_version` in `type-maps.yaml` and baked in at compile time. The client uses one version and does not import the registry.
+The newest compiled client version is `PROTOCOL_VERSION`; native clients also
+use the registry to offer older compiled maps during a migration.
 
 ---
 
 ## Version Negotiation Flow
 
 ```
-Client (v3.0)         Host (v3.0)
+Client (v3.0, v2.0)   Host (v3.0, v2.0)
     |                        |
     |  QUIC connect          |
     |----------------------->|
     |                        |
     |  CommValue{ Ident. }   |
-    |    Version -> "3.0"    |
+    |    Version -> ["3.0", "2.0"] |
     |    Id -> 8765          |
     |  (unsigned hello; auth |
     |   challenge follows)   |
     |----------------------->|
-    |                        |  registry.negotiate(&[Version(3,0)])
+    |                        |  registry.negotiate(&[Version(3,0), Version(2,0)])
     |                        |  -> Some(Version(3,0))
     |                        |
-    |  Response              |  selected v3.0 TypeMap
+    |  Bootstrap selection   |  selected v3.0 TypeMap
     |<-----------------------|
     |  Status, version       |
     |                        |

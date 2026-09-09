@@ -1,4 +1,4 @@
-use mtp_common::PipeId;
+use mtp_common::{PipeId, TransportPhase};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -13,7 +13,9 @@ impl PipeWriter {
     pub async fn finish(mut self) -> Result<(), mtp_common::CommunicationError> {
         self.stream.finish().await.map_err(|e| {
             warn!("[PipeWriter] finish failed: {e}");
-            mtp_common::CommunicationError::StreamError
+            mtp_common::CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::FinishStream,
+            }
         })
     }
 
@@ -37,7 +39,9 @@ impl<S: tokio::io::AsyncWrite + Send + Unpin> PipeWriter<S> {
             .await
             .map_err(|e| {
                 warn!("[PipeWriter] finish_async failed: {e}");
-                mtp_common::CommunicationError::StreamError
+                mtp_common::CommunicationError::DeliveryUnknownAt {
+                    phase: TransportPhase::FinishStream,
+                }
             })
     }
 }

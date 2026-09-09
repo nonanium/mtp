@@ -6,10 +6,10 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::error::js_error;
+use crate::error::{from_communication_error, js_error};
 use crate::frame::parse_frame_value_with_limits;
 use mtp_codec::{DecodeLimits, EncodeLimits, TypeMap};
-use mtp_common::{FirstFrameDisposition, classify_first_frame};
+use mtp_common::{CommunicationError, FirstFrameDisposition, TransportPhase, classify_first_frame};
 use mtp_core::{decode_frame_length, encode_frame};
 
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
@@ -50,6 +50,17 @@ pub(crate) fn log_stream_error_code(error: &JsValue, context: &str) {
     {
         let _ = warn.call1(&console, &JsValue::from_str(&formatted));
     }
+}
+
+fn js_error_message(error: &JsValue) -> String {
+    error
+        .as_string()
+        .or_else(|| {
+            js_sys::Reflect::get(error, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|value| value.as_string())
+        })
+        .unwrap_or_else(|| format!("{error:?}"))
 }
 
 /// Given a `SendStream` (old API with `.writable` or new API where stream IS a WritableStream),
@@ -370,7 +381,14 @@ impl WasmTransport {
         max_message_size: u32,
         configured_limits: Option<DecodeLimits>,
     ) -> Result<Self, JsValue> {
-        let connection = BrowserConnection::connect(url, cert_hashes).await?;
+        let connection = BrowserConnection::connect(url, cert_hashes)
+            .await
+            .map_err(|error| {
+                from_communication_error(CommunicationError::transport(
+                    TransportPhase::Connect,
+                    js_error_message(&error),
+                ))
+            })?;
         let transport_limits = DecodeLimits::for_transport_message_size(max_message_size as u64);
         let decode_limits = configured_limits
             .map(|limits| limits.intersection(transport_limits))
@@ -415,7 +433,9 @@ impl WasmTransport {
         if frame.len() as u64 > self.max_message_size as u64
             || frame.len() as u64 >= CLOSE_FRAME_LEN as u64
         {
-            return Err(js_error("message too large"));
+            return Err(from_communication_error(
+                CommunicationError::MessageTooLarge,
+            ));
         }
 
         // Use one WebTransport uni-stream per MTP frame. Chromium reliably
@@ -424,17 +444,30 @@ impl WasmTransport {
         // in accept_uni() until the authentication deadline. The bytes are
         // already the canonical MTP self-framed value, so no extra stream
         // length prefix is added here.
-        let mut stream = self.connection.open_uni().await?;
+        let mut stream = self.connection.open_uni().await.map_err(|error| {
+            from_communication_error(CommunicationError::transport(
+                TransportPhase::OpenStream,
+                js_error_message(&error),
+            ))
+        })?;
         if let Err(e) = stream.write_all(frame).await {
             log_stream_error_code(&e, "send_frame write");
             stream.release();
-            return Err(e);
+            return Err(from_communication_error(
+                CommunicationError::DeliveryUnknownAt {
+                    phase: TransportPhase::WriteFrame,
+                },
+            ));
         }
 
         if let Err(e) = stream.finish().await {
-            // The frame was already written; do not retry it merely because
-            // FIN failed, as that would duplicate the MTP frame.
             log_stream_error_code(&e, "send_frame close");
+            stream.release();
+            return Err(from_communication_error(
+                CommunicationError::DeliveryUnknownAt {
+                    phase: TransportPhase::FinishStream,
+                },
+            ));
         }
         stream.release();
 
@@ -444,7 +477,13 @@ impl WasmTransport {
     /// Accept the next incoming uni-directional stream and make it current.
     /// Returns `false` if the incoming-streams readable has ended.
     async fn open_next_stream(&self) -> Result<bool, JsValue> {
-        let Some(stream) = self.connection.accept_uni().await? else {
+        let Some(stream) = self.connection.accept_uni().await.map_err(|error| {
+            from_communication_error(CommunicationError::transport(
+                TransportPhase::ReadFrame,
+                js_error_message(&error),
+            ))
+        })?
+        else {
             return Ok(false);
         };
 
@@ -464,7 +503,10 @@ impl WasmTransport {
             Err(e) => {
                 log_stream_error_code(&e, "read_chunk");
                 stream.release();
-                return Err(js_error(format!("read failed: {:?}", e)));
+                return Err(from_communication_error(CommunicationError::transport(
+                    TransportPhase::ReadFrame,
+                    js_error_message(&e),
+                )));
             }
         };
         if result.is_some() {
@@ -485,10 +527,10 @@ impl WasmTransport {
         let frame_end = match decode_frame_length(prefix, max_message_size as u64, CLOSE_FRAME_LEN)
         {
             Ok(frame_len) => frame_len,
-            Err(mtp_common::CommunicationError::StreamClosed) => {
+            Err(mtp_common::CommunicationError::ClosedByPeer) => {
                 return Ok(Some(FrameOutcome::Closed));
             }
-            Err(error) => return Err(js_error(error.to_string())),
+            Err(error) => return Err(from_communication_error(error)),
         };
         if frame_end > buf.len() {
             return Ok(None);
@@ -522,7 +564,9 @@ impl WasmTransport {
                         let mut buffer = self.buffer.borrow_mut();
                         let maximum_buffer = max_message_size as usize + 4;
                         if buffer.len().saturating_add(chunk.len()) > maximum_buffer {
-                            return Err(js_error("message too large"));
+                            return Err(from_communication_error(
+                                CommunicationError::MessageTooLarge,
+                            ));
                         }
                         buffer
                             .try_reserve(chunk.len())
@@ -539,7 +583,7 @@ impl WasmTransport {
                     // either mode must reject a truncated frame instead of
                     // silently dropping its prefix.
                     if !self.buffer.borrow().is_empty() {
-                        return Err(js_error("stream ended in the middle of a frame"));
+                        return Err(from_communication_error(CommunicationError::ClosedByPeer));
                     }
                 }
             }
@@ -553,8 +597,9 @@ impl WasmTransport {
             .await?
         {
             FrameOutcome::Frame(frame) => Ok(frame),
-            FrameOutcome::Closed => Err(js_error("connection closed before frame")),
-            FrameOutcome::Ended => Err(js_error("stream ended before frame")),
+            FrameOutcome::Closed | FrameOutcome::Ended => {
+                Err(from_communication_error(CommunicationError::ClosedByPeer))
+            }
         }
     }
 
@@ -716,7 +761,12 @@ impl WasmTransport {
         description: &str,
     ) -> Result<crate::pipe::PipeWriter, JsValue> {
         let _send_guard = self.send_lock.lock().await;
-        let mut stream = self.connection.open_uni().await?;
+        let mut stream = self.connection.open_uni().await.map_err(|error| {
+            from_communication_error(CommunicationError::transport(
+                TransportPhase::OpenStream,
+                js_error_message(&error),
+            ))
+        })?;
 
         let type_map = self.type_map();
         let request = mtp_codec::CommunicationValue::new_with_type_map(
@@ -729,12 +779,16 @@ impl WasmTransport {
             mtp_codec::DataValue::Str(description.to_string()),
         );
         let frame_bytes = encode_frame(&request, self.max_message_size as u64, CLOSE_FRAME_LEN)
-            .map_err(|error| js_error(error.to_string()))?;
+            .map_err(from_communication_error)?;
 
         if let Err(e) = stream.write_all(&frame_bytes).await {
             log_stream_error_code(&e, "open_pipe write");
             stream.release();
-            return Err(e);
+            return Err(from_communication_error(
+                CommunicationError::DeliveryUnknownAt {
+                    phase: TransportPhase::WriteFrame,
+                },
+            ));
         }
 
         Ok(crate::pipe::PipeWriter::new(stream, pipe_id))

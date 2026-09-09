@@ -74,16 +74,6 @@ pub(crate) fn is_expired_request(
         .is_expired(request_id, js_sys::Date::now())
 }
 
-#[wasm_bindgen(typescript_custom_section)]
-const PIPE_HANDLE_TS: &str = r#"
-export interface WasmPipeHandle {
-  wait(): Promise<PipeWriter | null>;
-  cancel(): Promise<void>;
-  readonly pipeId: number;
-  readonly description: string;
-}
-"#;
-
 #[wasm_bindgen]
 pub struct WasmPipeHandle {
     pipe_id: PipeId,

@@ -1971,15 +1971,14 @@ fn merge_container_into_borrowed(
         };
 
         let destination_value = &mut destination[index].1;
-        if options.recursive_containers {
-            if let DataValue::Container(left) = destination_value {
-                if let DataValue::Container(right) = source_value {
-                    let path = merge_path(prefix, *id);
-                    report.recursed.push(path.clone());
-                    merge_container_into_borrowed(left, right, options, path.as_slice(), report)?;
-                    continue;
-                }
-            }
+        if options.recursive_containers
+            && let DataValue::Container(left) = destination_value
+            && let DataValue::Container(right) = source_value
+        {
+            let path = merge_path(prefix, *id);
+            report.recursed.push(path.clone());
+            merge_container_into_borrowed(left, right, options, path.as_slice(), report)?;
+            continue;
         }
 
         match options.conflicts {

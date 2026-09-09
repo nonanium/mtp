@@ -1,4 +1,4 @@
-use mtp_common::CommunicationError;
+use mtp_common::{CommunicationError, TransportPhase};
 use mtp_core::{TransportConnection, TransportRecvStream, TransportSendStream};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -24,6 +24,40 @@ impl NativeConnection {
 
     pub fn inner(&self) -> &wtransport::Connection {
         &self.connection
+    }
+}
+
+impl NativeSendStream {
+    pub fn into_inner(self) -> wtransport::SendStream {
+        self.stream
+    }
+}
+
+impl NativeRecvStream {
+    pub fn into_inner(self) -> wtransport::RecvStream {
+        self.stream
+    }
+}
+
+fn connection_error(error: wtransport::error::ConnectionError) -> CommunicationError {
+    match error {
+        wtransport::error::ConnectionError::ConnectionClosed(_)
+        | wtransport::error::ConnectionError::ApplicationClosed(_) => {
+            CommunicationError::ClosedByPeer
+        }
+        wtransport::error::ConnectionError::LocallyClosed
+        | wtransport::error::ConnectionError::LocalH3Error(_) => CommunicationError::ClosedLocally,
+        wtransport::error::ConnectionError::TimedOut
+        | wtransport::error::ConnectionError::QuicProto(_)
+        | wtransport::error::ConnectionError::CidsExhausted => CommunicationError::ConnectionLost,
+    }
+}
+
+fn read_error(error: wtransport::error::StreamReadError) -> CommunicationError {
+    match error {
+        wtransport::error::StreamReadError::Reset(_) => CommunicationError::ClosedByPeer,
+        wtransport::error::StreamReadError::NotConnected
+        | wtransport::error::StreamReadError::QuicProto => CommunicationError::ConnectionLost,
     }
 }
 
@@ -61,25 +95,28 @@ impl TransportSendStream for NativeSendStream {
         self.stream
             .write_all(buf)
             .await
-            .map_err(|error| match error {
-                wtransport::error::StreamWriteError::Stopped(_) => {
-                    CommunicationError::DeliveryUnknown
-                }
-                _ => CommunicationError::StreamError,
+            // Once wtransport has accepted a write attempt it cannot tell us
+            // whether any prefix reached the peer. Retrying could duplicate an
+            // application message, so preserve that ambiguity for the core
+            // framing policy.
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::WriteFrame,
             })
     }
 
     async fn finish(&mut self) -> Result<(), CommunicationError> {
-        self.stream.finish().await.map_err(|error| match error {
-            wtransport::error::StreamWriteError::Stopped(_) => CommunicationError::DeliveryUnknown,
-            _ => CommunicationError::StreamError,
-        })
+        self.stream
+            .finish()
+            .await
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::FinishStream,
+            })
     }
 
     fn reset(&mut self, code: u32) -> Result<(), CommunicationError> {
         self.stream
             .reset(wtransport::VarInt::from_u32(code))
-            .map_err(|_| CommunicationError::StreamClosed)
+            .map_err(|_| CommunicationError::ClosedLocally)
     }
 }
 
@@ -89,17 +126,17 @@ impl TransportRecvStream for NativeRecvStream {
         self.stream
             .read_exact(buf)
             .await
-            .map_err(|_| CommunicationError::StreamClosed)
+            .map_err(|error| match error {
+                wtransport::error::StreamReadExactError::FinishedEarly(_) => {
+                    CommunicationError::ClosedByPeer
+                }
+                wtransport::error::StreamReadExactError::Read(error) => read_error(error),
+            })
     }
 
     async fn read_chunk(&mut self, max: usize) -> Result<Option<Vec<u8>>, CommunicationError> {
         let mut bytes = vec![0; max];
-        let Some(read) = self
-            .stream
-            .read(&mut bytes)
-            .await
-            .map_err(|_| CommunicationError::StreamError)?
-        else {
+        let Some(read) = self.stream.read(&mut bytes).await.map_err(read_error)? else {
             return Ok(None);
         };
         bytes.truncate(read);
@@ -118,15 +155,15 @@ impl TransportConnection for NativeConnection {
     type RecvStream = NativeRecvStream;
 
     async fn open_uni(&self) -> Result<Self::SendStream, CommunicationError> {
-        let opening = self
-            .connection
-            .open_uni()
-            .await
-            .map_err(|_| CommunicationError::ConnectionLost)?;
+        let opening = self.connection.open_uni().await.map_err(|error| {
+            CommunicationError::transport(TransportPhase::OpenStream, error.to_string())
+        })?;
         opening
             .await
             .map(|stream| NativeSendStream { stream })
-            .map_err(|_| CommunicationError::StreamError)
+            .map_err(|error| {
+                CommunicationError::transport(TransportPhase::OpenStream, error.to_string())
+            })
     }
 
     async fn accept_uni(&self) -> Result<Self::RecvStream, CommunicationError> {
@@ -134,14 +171,14 @@ impl TransportConnection for NativeConnection {
             .accept_uni()
             .await
             .map(|stream| NativeRecvStream { stream })
-            .map_err(|_| CommunicationError::ConnectionLost)
+            .map_err(connection_error)
     }
 
     fn close_reason(&self) -> Option<CommunicationError> {
         self.connection
             .quic_connection()
             .close_reason()
-            .map(|_| CommunicationError::StreamClosed)
+            .map(|error| connection_error(error.into()))
     }
 
     fn close(&self, code: u32, reason: &[u8]) {

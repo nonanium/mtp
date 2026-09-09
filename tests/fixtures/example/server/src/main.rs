@@ -212,8 +212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                                Err(mtp::common::CommunicationError::StreamClosed)
-                                | Err(mtp::common::CommunicationError::ClosedByPeer) => {
+                                Err(mtp::common::CommunicationError::ClosedByPeer) => {
                                     println!("Pipe channel closed normally");
                                     pipe_open = false;
                                 }
@@ -260,8 +259,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                                Err(mtp::common::CommunicationError::StreamClosed)
-                                | Err(mtp::common::CommunicationError::ClosedByPeer) => {
+                                Err(mtp::common::CommunicationError::ClosedByPeer) => {
                                     println!("Message channel closed normally");
                                     message_open = false;
                                 }

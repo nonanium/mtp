@@ -84,6 +84,8 @@ pub struct MTPConnection<
     /// Native hosts leave it empty; WebTransport hosts use it to make the
     /// configured connection limit cover the session lifetime.
     pub(crate) _connection_guard: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// Cancels host-owned transport work when the application drops this connection.
+    pub(crate) _session_task: Option<tokio::task::JoinHandle<()>>,
     #[cfg(feature = "crypto")]
     pub auth_state: crate::error::AuthState,
     #[cfg(feature = "crypto")]
@@ -100,9 +102,22 @@ impl<S, R, P> MTPConnection<S, R, P> {
         self._connection_guard = Some(guard);
     }
 
+    /// Attach transport work whose lifetime must end with this connection.
+    pub fn set_session_task(&mut self, task: tokio::task::JoinHandle<()>) {
+        self._session_task = Some(task);
+    }
+
     #[cfg(feature = "crypto")]
     pub fn set_guest_id_lease(&mut self, lease: Option<crate::engine::GuestIdLease>) {
         self.guest_id_lease = lease;
+    }
+}
+
+impl<S, R, P> Drop for MTPConnection<S, R, P> {
+    fn drop(&mut self) {
+        if let Some(task) = self._session_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -181,6 +196,7 @@ where
             description,
             _dispatcher_task: task,
             _connection_guard: None,
+            _session_task: None,
             #[cfg(feature = "crypto")]
             auth_state: crate::error::AuthState::Unauthenticated,
             #[cfg(feature = "crypto")]
@@ -239,6 +255,7 @@ where
             description,
             _dispatcher_task: task,
             _connection_guard: None,
+            _session_task: None,
             #[cfg(feature = "crypto")]
             auth_state: crate::error::AuthState::Unauthenticated,
             #[cfg(feature = "crypto")]
@@ -292,6 +309,7 @@ impl<S, R, P> MTPConnection<S, R, P> {
             _pipe_stream: std::marker::PhantomData,
             _dispatcher_task: tokio::spawn(async {}),
             _connection_guard: None,
+            _session_task: None,
             #[cfg(feature = "crypto")]
             auth_state: crate::error::AuthState::Unauthenticated,
             #[cfg(feature = "crypto")]
@@ -327,7 +345,7 @@ where
                 Ok(message)
             }
             Some(Err(error)) => Err(error),
-            None => Err(CommunicationError::StreamClosed),
+            None => Err(CommunicationError::ConnectionLost),
         }
     }
 
@@ -392,6 +410,6 @@ where
             .await
             .recv()
             .await
-            .ok_or(CommunicationError::StreamClosed)
+            .ok_or(CommunicationError::ConnectionLost)
     }
 }

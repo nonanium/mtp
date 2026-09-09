@@ -6,6 +6,15 @@ use crate::EncodeLimits;
 
 pub use mtp_type_map::Registry;
 
+/// Type map used until version negotiation selects an application map.
+///
+/// Opening handshake fields and communication types are reserved IDs, which
+/// are stable across application type-map versions.  The latest map therefore
+/// provides a version-independent representation for that bootstrap exchange.
+pub fn bootstrap_type_map() -> TypeMap {
+    TypeMap::latest()
+}
+
 /*
  * A version-aware codec that uses a multi-version registry to resolve
  * the correct TypeMap for encoding and decoding operations.

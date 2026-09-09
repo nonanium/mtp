@@ -19,7 +19,7 @@ MTP reports codec failures separately from connection and transport failures.
 
 An application should select a `TypeMap` for the negotiated version and treat `UnknownCommunicationType` and `UnknownDataType` as a type-map compatibility failure. Do not send the unmapped variant again on that connection.
 
-Retry guidance: retry `ConnectionLost`, `ConnectingError`, and transient stream errors after applying backoff. Correct the request before retrying `MessageTooLarge`, `InvalidEncoding`, `MissingField`, and type-map errors.
+Retry guidance: retry transport failures whose phase is `Connect`, `Handshake`, or `OpenStream` after applying backoff. Correct the request before retrying `MessageTooLarge`, `InvalidEncoding`, `MissingField`, and type-map errors.
 Retry `AuthenticationFailed` only after changing credentials or host policy;
 repeating the same proof does not repair a validation failure.
 
@@ -34,8 +34,7 @@ repeating the same proof does not repair a validation failure.
 | `ParseCommunicationValue` or `ParseError` | An incoming frame or certificate could not be parsed. |
 | `Encode` | An outgoing value could not be serialized. |
 | `MessageTooLarge` | A frame exceeds `Policy::max_message_size` or the handshake limit. |
-| `StreamClosed` or `StreamError` | A QUIC stream ended or returned an I/O error. |
-| `ConnectingError` or `ConnectionError` | The endpoint could not establish or maintain QUIC. |
+| `Timeout`, `Transport`, or `DeliveryUnknownAt` | A transport operation failed; each variant includes the affected phase. |
 | `AuthenticationFailed` | A login, registration, signature, nonce, or host response failed validation. |
 | `CertificateParseFailed` or `CertificateLoadFailed` | TLS certificate input is malformed or unavailable. |
 | `CryptoProviderInstallFailed` | The native TLS crypto provider could not be installed. |

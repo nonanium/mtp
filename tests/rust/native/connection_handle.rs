@@ -11,14 +11,14 @@ fn new_handle_is_open() {
 #[test]
 fn close_transitions_state_and_preserves_the_first_reason() {
     let handle = ConnectionHandle::new();
-    handle.close(Some(CommunicationError::StreamClosed));
+    handle.close(Some(CommunicationError::ClosedByPeer));
     handle.close(Some(CommunicationError::UseAfterClosed));
 
     assert!(!handle.is_open());
     assert!(handle.is_closed());
     assert_eq!(
         handle.close_reason(),
-        Some(CommunicationError::StreamClosed)
+        Some(CommunicationError::ClosedByPeer)
     );
 }
 

@@ -29,9 +29,11 @@ pub use mtp_codec::registry::Registry;
 
 #[cfg(feature = "crypto")]
 pub use config::{
-    AuthenticationAttempt, AuthenticationAttemptLimiter, AuthenticationContext,
-    AuthenticationLimitError, AuthenticationPolicy, CompleteRegister, FindRegisteredClient,
+    AuthenticationAttempt, AuthenticationAttemptLimiter, AuthenticationBucketPolicy,
+    AuthenticationClock, AuthenticationContext, AuthenticationLimitError,
+    AuthenticationLimiterConfig, AuthenticationPolicy, CompleteRegister, FindRegisteredClient,
     GetExistingClient, GuestIdGenerator, InMemoryAuthenticationAttemptLimiter,
+    SystemAuthenticationClock, normalize_ip_addr,
 };
 #[cfg(feature = "crypto")]
 pub use error::AuthState;

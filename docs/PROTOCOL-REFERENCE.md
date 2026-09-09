@@ -109,7 +109,14 @@ identity-specific response for deployments where IDs are public.
 
 ## Version Negotiation
 
-The client sends one compiled-in protocol version. The host compares it with the versions in its registry and returns the selected version in the opening response. Subsequent frames use that version's type map. An unsupported version closes the connection with `AcceptError::UnsupportedVersion`.
+The client sends a non-empty, descending list of supported protocol versions in
+the reserved `Version` opening field as a `DataValue::Array` of strings. The
+host intersects that offer with its registry and selects the highest common
+version. It returns that selection in a bootstrap `IdentificationResponse`
+before either peer switches to the selected type map. The client rejects a
+selection that was absent from its offer. An unsupported offer receives an
+`ErrorBadVersion` whose `Version` field is the same structured array format.
+Subsequent frames use the selected map.
 
 The current self-delimiting `DataValue` codec and three-bit communication header
 are used by the repository's protocol 3.0 map. The checked-in builtin registry

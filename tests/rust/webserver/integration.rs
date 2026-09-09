@@ -120,20 +120,26 @@ fn error_display() {
     let err = WebServerError::Http("body too large".into());
     assert_eq!(err.to_string(), "HTTP error: body too large");
 
-    let err = WebServerError::Transport(mtp_common::CommunicationError::StreamClosed);
-    assert_eq!(err.to_string(), "transport error: Stream Closed");
+    let err = WebServerError::Transport(mtp_common::CommunicationError::ClosedByPeer);
+    assert_eq!(
+        err.to_string(),
+        "transport error: Connection closed by peer"
+    );
 }
 
 #[test]
 fn error_from_communication_error() {
-    let comm_err = mtp_common::CommunicationError::StreamError;
+    let comm_err = mtp_common::CommunicationError::transport(
+        mtp_common::TransportPhase::OpenStream,
+        "stream opening failed",
+    );
     let web_err: WebServerError = comm_err.into();
     assert!(matches!(web_err, WebServerError::Transport(_)));
 }
 
 #[test]
 fn error_source_chain() {
-    let inner = mtp_common::CommunicationError::StreamClosed;
+    let inner = mtp_common::CommunicationError::ClosedByPeer;
     let err = WebServerError::Transport(inner);
     let source = std::error::Error::source(&err);
     assert!(source.is_some());

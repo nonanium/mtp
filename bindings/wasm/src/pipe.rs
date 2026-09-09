@@ -1,22 +1,8 @@
 use wasm_bindgen::prelude::*;
 
+use crate::error::from_communication_error;
 use crate::transport::{BrowserRecvStream, BrowserSendStream, log_stream_error_code};
-
-#[wasm_bindgen(typescript_custom_section)]
-const PIPE_TS: &str = r#"
-export interface PipeWriter {
-  write(data: Uint8Array): Promise<void>;
-  close(): Promise<void>;
-  abort(): void;
-  readonly pipeId: number;
-}
-
-export interface PipeReader {
-  read(): Promise<Uint8Array | null>;
-  readonly pipeId: number;
-  readonly description: string;
-}
-"#;
+use mtp_common::{CommunicationError, TransportPhase};
 
 #[wasm_bindgen]
 pub struct PipeWriter {
@@ -39,7 +25,11 @@ impl Drop for PipeWriter {
 #[wasm_bindgen]
 impl PipeWriter {
     pub async fn write(&mut self, data: &[u8]) -> Result<(), JsValue> {
-        self.stream.write_all(data).await
+        self.stream.write_all(data).await.map_err(|_| {
+            from_communication_error(CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::WriteFrame,
+            })
+        })
     }
 
     pub async fn close(mut self) -> Result<(), JsValue> {
@@ -48,7 +38,11 @@ impl PipeWriter {
             log_stream_error_code(error, "pipe writer close");
         }
         self.stream.release();
-        result
+        result.map_err(|_| {
+            from_communication_error(CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::FinishStream,
+            })
+        })
     }
 
     pub fn abort(&mut self) -> Result<(), JsValue> {
@@ -100,7 +94,12 @@ impl PipeReader {
             return Ok(JsValue::NULL);
         }
 
-        match self.stream.read_chunk().await? {
+        match self.stream.read_chunk().await.map_err(|_| {
+            from_communication_error(CommunicationError::transport(
+                TransportPhase::ReadFrame,
+                "pipe read failed",
+            ))
+        })? {
             Some(value) => Ok(js_sys::Uint8Array::from(&value[..]).into()),
             None => {
                 self.stream.release();

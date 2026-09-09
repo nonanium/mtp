@@ -37,6 +37,10 @@ pub struct WebServerConfig {
     pub(crate) mtp_path: String,
     pub max_request_body: usize,
     pub max_connections: usize,
+    pub max_concurrent_requests_per_connection: usize,
+    pub max_concurrent_webtransport_requests_per_session: usize,
+    pub max_webtransport_sessions: usize,
+    pub max_concurrent_requests: Option<usize>,
     pub serve_tcp_https: bool,
     pub max_tcp_connections: usize,
     pub tls_handshake_timeout: Duration,
@@ -58,6 +62,10 @@ impl WebServerConfig {
             mtp_path: "/".to_string(),
             max_request_body: 4 * 1024 * 1024,
             max_connections: 256,
+            max_concurrent_requests_per_connection: 32,
+            max_concurrent_webtransport_requests_per_session: 32,
+            max_webtransport_sessions: 16,
+            max_concurrent_requests: None,
             serve_tcp_https: true,
             max_tcp_connections: 256,
             tls_handshake_timeout: Duration::from_secs(10),
@@ -141,6 +149,30 @@ impl WebServerConfig {
 
     pub fn max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
+        self
+    }
+
+    /// Limit HTTP/3 handler tasks for each QUIC connection.
+    pub fn max_concurrent_requests_per_connection(mut self, max: usize) -> Self {
+        self.max_concurrent_requests_per_connection = max;
+        self
+    }
+
+    /// Limit HTTP handler tasks created by an individual WebTransport session.
+    pub fn max_concurrent_webtransport_requests_per_session(mut self, max: usize) -> Self {
+        self.max_concurrent_webtransport_requests_per_session = max;
+        self
+    }
+
+    /// Limit WebTransport sessions accepted on each HTTP/3 connection.
+    pub fn max_webtransport_sessions(mut self, max: usize) -> Self {
+        self.max_webtransport_sessions = max;
+        self
+    }
+
+    /// Optionally limit HTTP and WebTransport handler tasks across the server.
+    pub fn max_concurrent_requests(mut self, max: Option<usize>) -> Self {
+        self.max_concurrent_requests = max;
         self
     }
 
@@ -229,6 +261,9 @@ impl MTPWebServer {
         let (shutdown_tx, shutdown_rx) = watch::channel(());
         let connection_semaphore = Arc::new(Semaphore::new(web_config.max_connections));
         let auth_semaphore = Arc::new(Semaphore::new(web_config.max_connections));
+        let request_semaphore = web_config
+            .max_concurrent_requests
+            .map(|max| Arc::new(Semaphore::new(max)));
         let router = web_config.router.clone();
         let metrics = web_config.metrics.clone();
         let driver_config = DriverConfig {
@@ -242,6 +277,12 @@ impl MTPWebServer {
             host_config,
             metrics: web_config.metrics.clone(),
             auth_semaphore,
+            max_concurrent_requests_per_connection: web_config
+                .max_concurrent_requests_per_connection,
+            max_concurrent_webtransport_requests_per_session: web_config
+                .max_concurrent_webtransport_requests_per_session,
+            max_webtransport_sessions: web_config.max_webtransport_sessions,
+            request_semaphore: request_semaphore.clone(),
         };
         let quic_driver = tokio::spawn(run_driver(
             driver_endpoint,
@@ -262,6 +303,7 @@ impl MTPWebServer {
                     drain_timeout: web_config.drain_timeout,
                     max_connections: web_config.max_tcp_connections,
                     metrics,
+                    request_semaphore,
                 },
                 shutdown_rx,
             ))

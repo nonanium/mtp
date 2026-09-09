@@ -11,7 +11,7 @@ mod request;
 mod stream;
 mod time;
 
-pub use error::{CodecError, CommunicationError};
+pub use error::{CodecError, CommunicationError, CommunicationErrorCode, TransportPhase};
 pub use expiring_set::ExpiringSet;
 pub use handshake::{HandshakeOutcome, RejectionReason};
 pub use id::{MessageId, PingId, PipeId, RequestId, ZeroIdError};

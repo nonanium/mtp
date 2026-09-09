@@ -1,11 +1,13 @@
 use std::net::IpAddr;
 
 #[cfg(feature = "crypto")]
-use std::collections::HashMap;
+use std::cmp::{Ordering, Reverse};
 #[cfg(feature = "crypto")]
 use std::collections::HashSet;
 #[cfg(feature = "crypto")]
 use std::collections::VecDeque;
+#[cfg(feature = "crypto")]
+use std::collections::{BinaryHeap, HashMap};
 #[cfg(feature = "crypto")]
 use std::pin::Pin;
 #[cfg(feature = "crypto")]
@@ -91,14 +93,14 @@ pub enum AuthenticationPolicy {
 /// the zero/empty defaults exist only for transport-neutral callers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuthenticationContext {
-    pub peer_network_identity: Option<String>,
+    pub peer_network_identity: Option<IpAddr>,
     pub connection_id: u64,
 }
 
 #[cfg(feature = "crypto")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticationAttempt {
-    pub peer_network_identity: Option<String>,
+    pub peer_network_identity: Option<IpAddr>,
     pub connection_id: u64,
     pub claimed_client_id: Option<u64>,
     pub registration: bool,
@@ -119,7 +121,7 @@ pub trait AuthenticationAttemptLimiter: Send + Sync {
 #[cfg(feature = "crypto")]
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 enum AuthenticationLimitKey {
-    Peer(String),
+    Peer(IpAddr),
     Connection(u64),
     Client(u64),
     Registration,
@@ -127,113 +129,293 @@ enum AuthenticationLimitKey {
 }
 
 #[cfg(feature = "crypto")]
-#[derive(Debug)]
 pub struct InMemoryAuthenticationAttemptLimiter {
-    max_attempts: usize,
-    window: StdDuration,
-    max_keys: usize,
-    by_peer: bool,
-    by_connection: bool,
-    by_client: bool,
-    by_registration: bool,
-    attempts: Mutex<HashMap<AuthenticationLimitKey, VecDeque<Instant>>>,
+    config: AuthenticationLimiterConfig,
+    clock: Arc<dyn AuthenticationClock>,
+    attempts: Mutex<AuthenticationLimiterState>,
+}
+
+#[cfg(feature = "crypto")]
+struct AuthenticationLimiterState {
+    attempts: HashMap<AuthenticationLimitKey, AuthenticationBucketState>,
+    expirations: BinaryHeap<Reverse<AuthenticationExpiry>>,
+    dynamic_key_count: usize,
+}
+
+#[cfg(feature = "crypto")]
+struct AuthenticationBucketState {
+    history: VecDeque<Instant>,
+    generation: u64,
+}
+
+#[cfg(feature = "crypto")]
+#[derive(Clone, Eq)]
+struct AuthenticationExpiry {
+    at: Instant,
+    generation: u64,
+    key: AuthenticationLimitKey,
+}
+
+#[cfg(feature = "crypto")]
+impl Ord for AuthenticationExpiry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.at
+            .cmp(&other.at)
+            .then_with(|| self.generation.cmp(&other.generation))
+    }
+}
+
+#[cfg(feature = "crypto")]
+impl PartialOrd for AuthenticationExpiry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[cfg(feature = "crypto")]
+impl PartialEq for AuthenticationExpiry {
+    fn eq(&self, other: &Self) -> bool {
+        self.at == other.at && self.generation == other.generation
+    }
+}
+
+#[cfg(feature = "crypto")]
+#[derive(Debug, Clone)]
+pub struct AuthenticationBucketPolicy {
+    pub max_attempts: usize,
+    pub window: StdDuration,
+}
+
+#[cfg(feature = "crypto")]
+#[derive(Debug, Clone)]
+pub struct AuthenticationLimiterConfig {
+    pub peer: Option<AuthenticationBucketPolicy>,
+    pub connection: Option<AuthenticationBucketPolicy>,
+    pub client: Option<AuthenticationBucketPolicy>,
+    pub registration: Option<AuthenticationBucketPolicy>,
+    pub global: Option<AuthenticationBucketPolicy>,
+    pub max_dynamic_keys: usize,
+}
+
+#[cfg(feature = "crypto")]
+impl AuthenticationLimiterConfig {
+    pub fn with_default_policies(max_attempts: usize, window: StdDuration) -> Self {
+        let policy = AuthenticationBucketPolicy {
+            max_attempts,
+            window,
+        };
+        Self {
+            peer: Some(policy.clone()),
+            connection: Some(policy.clone()),
+            client: Some(policy.clone()),
+            registration: Some(policy),
+            global: None,
+            max_dynamic_keys: 100_000,
+        }
+    }
+}
+
+#[cfg(feature = "crypto")]
+pub trait AuthenticationClock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+#[cfg(feature = "crypto")]
+#[derive(Debug, Default)]
+pub struct SystemAuthenticationClock;
+
+#[cfg(feature = "crypto")]
+impl AuthenticationClock for SystemAuthenticationClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 #[cfg(feature = "crypto")]
 impl InMemoryAuthenticationAttemptLimiter {
-    pub fn new(max_attempts: usize, window: StdDuration) -> Self {
+    pub fn new(config: AuthenticationLimiterConfig) -> Self {
+        Self::with_clock(config, Arc::new(SystemAuthenticationClock))
+    }
+
+    pub fn with_clock(
+        config: AuthenticationLimiterConfig,
+        clock: Arc<dyn AuthenticationClock>,
+    ) -> Self {
         Self {
-            max_attempts,
-            window,
-            max_keys: 100_000,
-            by_peer: true,
-            by_connection: true,
-            by_client: true,
-            by_registration: true,
-            attempts: Mutex::new(HashMap::new()),
+            config,
+            clock,
+            attempts: Mutex::new(AuthenticationLimiterState {
+                attempts: HashMap::new(),
+                expirations: BinaryHeap::new(),
+                dynamic_key_count: 0,
+            }),
         }
     }
 
-    pub fn with_keys(
-        mut self,
-        by_peer: bool,
-        by_connection: bool,
-        by_client: bool,
-        by_registration: bool,
-    ) -> Self {
-        self.by_peer = by_peer;
-        self.by_connection = by_connection;
-        self.by_client = by_client;
-        self.by_registration = by_registration;
-        self
+    fn policy(&self, key: &AuthenticationLimitKey) -> Option<&AuthenticationBucketPolicy> {
+        match key {
+            AuthenticationLimitKey::Peer(_) => self.config.peer.as_ref(),
+            AuthenticationLimitKey::Connection(_) => self.config.connection.as_ref(),
+            AuthenticationLimitKey::Client(_) => self.config.client.as_ref(),
+            AuthenticationLimitKey::Registration => self.config.registration.as_ref(),
+            AuthenticationLimitKey::Global => self.config.global.as_ref(),
+        }
     }
 
-    pub fn with_max_keys(mut self, max_keys: usize) -> Self {
-        self.max_keys = max_keys.max(1);
-        self
+    fn is_dynamic_key(key: &AuthenticationLimitKey) -> bool {
+        matches!(
+            key,
+            AuthenticationLimitKey::Peer(_)
+                | AuthenticationLimitKey::Connection(_)
+                | AuthenticationLimitKey::Client(_)
+        )
     }
 
     fn keys(&self, context: &AuthenticationAttempt) -> Vec<AuthenticationLimitKey> {
         let mut keys = Vec::with_capacity(5);
-        if self.by_peer
+        if self.config.peer.is_some()
             && let Some(peer) = context.peer_network_identity.as_ref()
         {
-            keys.push(AuthenticationLimitKey::Peer(peer.clone()));
+            keys.push(AuthenticationLimitKey::Peer(normalize_ip_addr(*peer)));
         }
-        if self.by_connection && context.connection_id != 0 {
+        if self.config.connection.is_some() && context.connection_id != 0 {
             keys.push(AuthenticationLimitKey::Connection(context.connection_id));
         }
-        if self.by_client
+        if self.config.client.is_some()
             && let Some(client_id) = context.claimed_client_id
         {
             keys.push(AuthenticationLimitKey::Client(client_id));
         }
-        if self.by_registration && context.registration {
+        if self.config.registration.is_some() && context.registration {
             keys.push(AuthenticationLimitKey::Registration);
         }
-        // Keep one global bucket as a backstop when an attacker varies the
-        // claimed client ID or presents no peer/connection identity.
-        keys.push(AuthenticationLimitKey::Global);
+        if self.config.global.is_some() {
+            keys.push(AuthenticationLimitKey::Global);
+        }
         keys
+    }
+
+    fn schedule_expiry(
+        state: &mut AuthenticationLimiterState,
+        key: AuthenticationLimitKey,
+        first_attempt: Instant,
+        generation: u64,
+        policy: &AuthenticationBucketPolicy,
+    ) {
+        let Some(at) = first_attempt.checked_add(policy.window) else {
+            return;
+        };
+        state.expirations.push(Reverse(AuthenticationExpiry {
+            at,
+            generation,
+            key,
+        }));
+    }
+
+    fn remove_bucket(&self, state: &mut AuthenticationLimiterState, key: &AuthenticationLimitKey) {
+        if state.attempts.remove(key).is_some() && Self::is_dynamic_key(key) {
+            state.dynamic_key_count -= 1;
+        }
+    }
+
+    fn expire_buckets(&self, state: &mut AuthenticationLimiterState, now: Instant) {
+        while state
+            .expirations
+            .peek()
+            .is_some_and(|entry| entry.0.at <= now)
+        {
+            let expiry = state.expirations.pop().expect("heap entry disappeared").0;
+            let Some(policy) = self.policy(&expiry.key) else {
+                self.remove_bucket(state, &expiry.key);
+                continue;
+            };
+            let Some(bucket) = state.attempts.get_mut(&expiry.key) else {
+                continue;
+            };
+            if bucket.generation != expiry.generation {
+                continue;
+            }
+
+            let cutoff = now.checked_sub(policy.window);
+            while bucket
+                .history
+                .front()
+                .is_some_and(|timestamp| cutoff.is_some_and(|cutoff| *timestamp <= cutoff))
+            {
+                bucket.history.pop_front();
+            }
+            if bucket.history.is_empty() {
+                self.remove_bucket(state, &expiry.key);
+            } else {
+                bucket.generation = bucket.generation.wrapping_add(1);
+                let first_attempt = *bucket.history.front().expect("bucket is nonempty");
+                let generation = bucket.generation;
+                Self::schedule_expiry(state, expiry.key, first_attempt, generation, policy);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "crypto")]
+pub fn normalize_ip_addr(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map_or(IpAddr::V6(address), IpAddr::V4),
+        IpAddr::V4(_) => address,
     }
 }
 
 #[cfg(feature = "crypto")]
 impl AuthenticationAttemptLimiter for InMemoryAuthenticationAttemptLimiter {
     fn allow(&self, context: &AuthenticationAttempt) -> Result<bool, AuthenticationLimitError> {
-        if self.max_attempts == 0 {
-            return Ok(false);
-        }
-        let now = Instant::now();
-        let cutoff = now.checked_sub(self.window);
+        let now = self.clock.now();
         let keys = self.keys(context);
         let mut attempts = self
             .attempts
             .lock()
             .map_err(|_| AuthenticationLimitError::Store)?;
 
+        self.expire_buckets(&mut attempts, now);
+
         for key in &keys {
-            if let Some(history) = attempts.get_mut(key) {
-                while history
-                    .front()
-                    .is_some_and(|timestamp| cutoff.is_some_and(|cutoff| *timestamp <= cutoff))
-                {
-                    history.pop_front();
-                }
-                if history.len() >= self.max_attempts {
-                    return Ok(false);
-                }
+            let policy = self.policy(key).expect("configured key policy");
+            if policy.max_attempts == 0 {
+                return Ok(false);
+            }
+            if let Some(bucket) = attempts.attempts.get(key)
+                && bucket.history.len() >= policy.max_attempts
+            {
+                return Ok(false);
             }
         }
 
+        let new_dynamic_keys = keys
+            .iter()
+            .filter(|key| Self::is_dynamic_key(key) && !attempts.attempts.contains_key(*key))
+            .count();
+        if attempts.dynamic_key_count + new_dynamic_keys > self.config.max_dynamic_keys {
+            return Ok(false);
+        }
+
         for key in keys {
-            if !attempts.contains_key(&key)
-                && attempts.len() >= self.max_keys
-                && let Some(oldest) = attempts.keys().next().cloned()
-            {
-                attempts.remove(&oldest);
+            if let Some(bucket) = attempts.attempts.get_mut(&key) {
+                bucket.history.push_back(now);
+                continue;
             }
-            attempts.entry(key).or_default().push_back(now);
+
+            let policy = self.policy(&key).expect("configured key policy");
+            let mut history = VecDeque::new();
+            history.push_back(now);
+            let bucket = AuthenticationBucketState {
+                history,
+                generation: 0,
+            };
+            if Self::is_dynamic_key(&key) {
+                attempts.dynamic_key_count += 1;
+            }
+            Self::schedule_expiry(&mut attempts, key.clone(), now, bucket.generation, policy);
+            attempts.attempts.insert(key, bucket);
         }
         Ok(true)
     }
@@ -247,6 +429,12 @@ pub struct HostConfig {
 
     pub policy: Policy,
     pub send_pongs: bool,
+    /// Maximum native transport handshakes admitted at once.
+    pub max_transport_handshakes: usize,
+    /// Maximum native connections allowed to await application handoff.
+    pub max_pending_connections: usize,
+    /// Maximum authentication handshakes admitted at once.
+    pub max_pending_authentications: usize,
 
     #[cfg(feature = "crypto")]
     pub authentication_policy: AuthenticationPolicy,
@@ -287,6 +475,9 @@ impl HostConfig {
             tls_key,
             policy: Policy::default(),
             send_pongs: true,
+            max_transport_handshakes: 64,
+            max_pending_connections: 64,
+            max_pending_authentications: 64,
             #[cfg(feature = "crypto")]
             authentication_policy: AuthenticationPolicy::Unauthenticated,
             #[cfg(feature = "crypto")]
@@ -320,8 +511,7 @@ impl HostConfig {
             find_registered_client: None,
             #[cfg(feature = "crypto")]
             auth_limiter: Arc::new(InMemoryAuthenticationAttemptLimiter::new(
-                32,
-                StdDuration::from_secs(60),
+                AuthenticationLimiterConfig::with_default_policies(32, StdDuration::from_secs(60)),
             )),
             #[cfg(feature = "crypto")]
             conceal_authentication_identities: true,
@@ -335,6 +525,21 @@ impl HostConfig {
 
     pub fn with_pongs(mut self, send_pongs: bool) -> Self {
         self.send_pongs = send_pongs;
+        self
+    }
+
+    pub fn with_max_transport_handshakes(mut self, limit: usize) -> Self {
+        self.max_transport_handshakes = limit;
+        self
+    }
+
+    pub fn with_max_pending_connections(mut self, limit: usize) -> Self {
+        self.max_pending_connections = limit;
+        self
+    }
+
+    pub fn with_max_pending_authentications(mut self, limit: usize) -> Self {
+        self.max_pending_authentications = limit;
         self
     }
 
@@ -408,8 +613,17 @@ mod tests {
 
     #[test]
     fn authentication_attempt_limiter_rejects_repeated_attempts() {
-        let limiter = InMemoryAuthenticationAttemptLimiter::new(1, StdDuration::from_secs(60))
-            .with_keys(false, true, false, false);
+        let limiter = InMemoryAuthenticationAttemptLimiter::new(AuthenticationLimiterConfig {
+            peer: None,
+            connection: Some(AuthenticationBucketPolicy {
+                max_attempts: 1,
+                window: StdDuration::from_secs(60),
+            }),
+            client: None,
+            registration: None,
+            global: None,
+            max_dynamic_keys: 100,
+        });
         let attempt = AuthenticationAttempt {
             peer_network_identity: None,
             connection_id: 9,
@@ -423,8 +637,17 @@ mod tests {
 
     #[test]
     fn authentication_attempt_limiter_can_scope_registration_separately() {
-        let limiter = InMemoryAuthenticationAttemptLimiter::new(2, StdDuration::from_secs(60))
-            .with_keys(false, false, false, true);
+        let limiter = InMemoryAuthenticationAttemptLimiter::new(AuthenticationLimiterConfig {
+            peer: None,
+            connection: None,
+            client: None,
+            registration: Some(AuthenticationBucketPolicy {
+                max_attempts: 2,
+                window: StdDuration::from_secs(60),
+            }),
+            global: None,
+            max_dynamic_keys: 100,
+        });
         let login = AuthenticationAttempt {
             peer_network_identity: None,
             connection_id: 1,
@@ -440,12 +663,17 @@ mod tests {
         assert!(
             limiter
                 .allow(&registration)
-                .expect("registration attempt decision")
+                .expect("first registration decision")
+        );
+        assert!(
+            limiter
+                .allow(&registration)
+                .expect("second registration decision")
         );
         assert!(
             !limiter
                 .allow(&registration)
-                .expect("repeated registration decision")
+                .expect("third registration decision")
         );
     }
 

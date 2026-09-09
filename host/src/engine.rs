@@ -8,7 +8,7 @@ use crate::config::{AuthenticationContext, HostConfig};
 use crate::error::AcceptError;
 use mtp_codec::{
     CommunicationType, CommunicationValue, DataType, DataValue, TypeMap, Version,
-    registry::{Registry, VersionedCodec},
+    registry::{Registry, VersionedCodec, bootstrap_type_map},
 };
 use mtp_common::{CommunicationError, RejectionReason};
 #[cfg(feature = "crypto")]
@@ -216,6 +216,9 @@ impl HandshakeEngine {
         receiver: &R,
         _authentication_context: &AuthenticationContext,
     ) -> Result<HandshakeResult, AcceptError> {
+        let bootstrap = bootstrap_type_map();
+        sender.set_type_map(&bootstrap).await;
+        receiver.set_type_map(&bootstrap).await;
         let mut first_msg = receiver.receive().await.map_err(AcceptError::Receive)?;
         tracing::debug!(
             message_type = ?first_msg.get_type(),
@@ -224,8 +227,8 @@ impl HandshakeEngine {
             "received MTP opening message"
         );
 
-        let version_str = match first_msg.get_data(DataType::Version) {
-            Some(DataValue::Str(s)) => s.clone(),
+        let client_versions = match parse_version_offer(&first_msg) {
+            Some(versions) => versions,
             _ => {
                 send_rejection_generic(
                     sender,
@@ -239,26 +242,9 @@ impl HandshakeEngine {
                 return Err(AcceptError::MissingVersion);
             }
         };
-        let client_version = match Version::parse(&version_str) {
-            Some(v) => v,
-            _ => {
-                send_rejection_generic(
-                    sender,
-                    RejectionReason::AuthenticationFailed {
-                        detail: "opening message omitted a valid protocol version".into(),
-                    },
-                    None,
-                )
-                .await;
-                sender.close();
-                return Err(AcceptError::MissingVersion);
-            }
-        };
+        let client_version = client_versions[0].clone();
 
-        let negotiated = match self
-            .registry
-            .negotiate(std::slice::from_ref(&client_version))
-        {
+        let negotiated = match self.registry.negotiate(&client_versions) {
             Some(v) => v,
             None => {
                 send_rejection_generic(
@@ -286,6 +272,9 @@ impl HandshakeEngine {
         let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
             .ok_or_else(|| AcceptError::UnsupportedVersion(negotiated.clone()))?;
 
+        send_selection_bootstrap(sender, &negotiated, &bootstrap)
+            .await
+            .map_err(AcceptError::Send)?;
         sender.set_type_map(codec.type_map()).await;
         receiver.set_type_map(codec.type_map()).await;
         first_msg.set_type_map(codec.type_map());
@@ -317,7 +306,7 @@ impl HandshakeEngine {
             );
             if authentication_requested {
                 let attempt = crate::config::AuthenticationAttempt {
-                    peer_network_identity: _authentication_context.peer_network_identity.clone(),
+                    peer_network_identity: _authentication_context.peer_network_identity,
                     connection_id: _authentication_context.connection_id,
                     claimed_client_id,
                     registration,
@@ -345,10 +334,10 @@ impl HandshakeEngine {
                         sender,
                         receiver,
                         first_msg,
-                        negotiated,
+                        negotiated.clone(),
                         codec,
                         description,
-                        &version_str,
+                        &negotiated.to_string(),
                         client_version,
                     )
                     .await
@@ -358,10 +347,10 @@ impl HandshakeEngine {
                         sender,
                         receiver,
                         first_msg,
-                        negotiated,
+                        negotiated.clone(),
                         codec,
                         description,
-                        &version_str,
+                        &negotiated.to_string(),
                         client_version,
                     )
                     .await
@@ -1113,7 +1102,13 @@ async fn send_rejection_generic<S: HandshakeSender>(
             CommunicationValue::new_with_type_map(CommunicationType::ErrorBadVersion, &type_map)
                 .add_typed_default(
                     DataType::Version,
-                    DataValue::Str(supported_versions.join(",")),
+                    DataValue::Array(
+                        supported_versions
+                            .iter()
+                            .cloned()
+                            .map(DataValue::Str)
+                            .collect(),
+                    ),
                 )
                 .add_typed_default(DataType::ErrorMessage, DataValue::Str(reason.to_string()))
         }
@@ -1131,6 +1126,32 @@ async fn send_rejection_generic<S: HandshakeSender>(
         "sending MTP handshake rejection"
     );
     let _ = sender.send(&response).await;
+}
+
+fn parse_version_offer(message: &CommunicationValue) -> Option<Vec<Version>> {
+    let DataValue::Array(values) = message.get_data(DataType::Version)? else {
+        return None;
+    };
+    let versions: Option<Vec<_>> = values
+        .iter()
+        .map(|value| match value {
+            DataValue::Str(version) => Version::parse(version),
+            _ => None,
+        })
+        .collect();
+    versions.filter(|versions| !versions.is_empty())
+}
+
+async fn send_selection_bootstrap<S: HandshakeSender>(
+    sender: &S,
+    version: &Version,
+    bootstrap: &TypeMap,
+) -> Result<(), CommunicationError> {
+    let selection =
+        CommunicationValue::new_with_type_map(CommunicationType::IdentificationResponse, bootstrap)
+            .add_typed_default(DataType::Connected, DataValue::BoolTrue)
+            .add_typed_default(DataType::Version, DataValue::Str(version.to_string()));
+    sender.send(&selection).await
 }
 
 #[cfg(feature = "crypto")]
