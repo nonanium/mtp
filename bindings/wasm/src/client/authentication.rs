@@ -16,6 +16,10 @@ fn server_rejection_message(outcome: &CommunicationValue) -> Option<&str> {
     })
 }
 
+fn version_offer() -> DataValue {
+    DataValue::Array(vec![DataValue::Str(PROTOCOL_VERSION.to_string())])
+}
+
 #[wasm_bindgen]
 #[allow(deprecated)]
 impl WasmClient {
@@ -45,7 +49,6 @@ impl WasmClient {
         }
 
         let result = async {
-            let version_str = format!("{}", PROTOCOL_VERSION);
             let opening_codec = mtp_codec::registry::VersionedCodec::for_version(
                 mtp_codec::registry::Registry::builtin(),
                 PROTOCOL_VERSION,
@@ -56,7 +59,7 @@ impl WasmClient {
                 CommunicationType::Identification,
                 opening_codec.type_map(),
             )
-            .add_typed_default(DataType::Version, DataValue::Str(version_str))
+            .add_typed_default(DataType::Version, version_offer())
             .add_typed_default(
                 DataType::Id,
                 DataValue::UnsignedNumber(config.client_id as u128),
@@ -248,7 +251,7 @@ impl WasmClient {
         let result = async {
             let mut hello =
                 CommunicationValue::new_with_type_map(CommunicationType::Identification, &tm)
-                    .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
+                    .add_typed_default(DataType::Version, version_offer())
                     .add_typed_default(DataType::Id, DataValue::UnsignedNumber(client_id as u128))
                     // Mark this as an authentication-capable opening so a
                     // non-crypto host can reject it explicitly.
@@ -463,7 +466,7 @@ impl WasmClient {
 
         let result = async {
             let mut hello = CommunicationValue::new_with_type_map(CommunicationType::Register, &tm)
-                .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
+                .add_typed_default(DataType::Version, version_offer())
                 .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
             if let Some(desc) = &config.description {
                 hello =
@@ -663,7 +666,7 @@ impl WasmClient {
 
 #[cfg(test)]
 mod tests {
-    use super::server_rejection_message;
+    use super::{server_rejection_message, version_offer};
     use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue};
 
     #[test]
@@ -679,5 +682,14 @@ mod tests {
             server_rejection_message(&response),
             Some("authentication handshake timed out")
         );
+    }
+
+    #[test]
+    fn opening_version_is_a_non_empty_offer() {
+        assert!(matches!(
+            version_offer(),
+            DataValue::Array(versions)
+                if matches!(versions.as_slice(), [DataValue::Str(version)] if !version.is_empty())
+        ));
     }
 }
