@@ -380,7 +380,7 @@ pub(crate) fn parse_frame_value_with_limits(
         )?;
     }
 
-    set_prop(&obj, "data", &data_value_to_js(comm.payload(), &tm)?)?;
+    set_prop(&obj, "data", &data_value_to_js(comm.payload(), tm)?)?;
     set_prop(&obj, "raw", &js_sys::Uint8Array::from(frame).into())?;
 
     Ok(obj.into())

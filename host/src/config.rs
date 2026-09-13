@@ -49,10 +49,8 @@ pub type GuestIdGenerator =
 #[cfg(feature = "crypto")]
 /// Callback that commits a new registration and returns its non-zero ID.
 ///
-/// The host serializes registration commits and remembers successful identity
-/// assignments for the lifetime of the host. Applications that need retry
-/// recovery across a host restart should also configure [`FindRegisteredClient`]
-/// to look up the public identity in persistent storage.
+/// Applications own registration idempotence and must persist identity
+/// assignments when retries can span host restarts.
 pub type CompleteRegister = Box<
     dyn Fn(
             mtp_crypto::PublicKeyBundle,
@@ -64,10 +62,8 @@ pub type CompleteRegister = Box<
 
 /// Callback that recovers an existing registration by its public identity.
 ///
-/// Returning an ID makes a registration retry idempotent: the host can send
-/// the same final response when the original response was lost after the
-/// application committed the registration. Returning `None` asks the host to
-/// invoke [`CompleteRegister`] for a new registration.
+/// Returning an ID makes a registration retry idempotent. Returning `None`
+/// asks the host to invoke [`CompleteRegister`] for a new registration.
 #[cfg(feature = "crypto")]
 pub type FindRegisteredClient = Box<
     dyn Fn(
@@ -263,8 +259,6 @@ pub struct HostConfig {
     #[cfg(feature = "crypto")]
     pub(crate) active_guest_ids: Arc<Mutex<HashSet<u64>>>,
     #[cfg(feature = "crypto")]
-    pub(crate) registration_ids: Arc<Mutex<HashMap<Vec<u8>, u64>>>,
-    #[cfg(feature = "crypto")]
     pub(crate) registration_lock: Arc<tokio::sync::Mutex<()>>,
     #[cfg(feature = "crypto")]
     pub guest_id_generator: Option<GuestIdGenerator>,
@@ -308,9 +302,6 @@ impl HostConfig {
             get_existing_client: Box::new(|_, _| Box::pin(async { None })),
             #[cfg(feature = "crypto")]
             active_guest_ids: Arc::new(Mutex::new(HashSet::new())),
-            #[cfg(feature = "crypto")]
-            registration_ids: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(feature = "crypto")]
             registration_lock: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(feature = "crypto")]
             guest_id_generator: None,

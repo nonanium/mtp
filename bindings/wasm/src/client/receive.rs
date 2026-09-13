@@ -55,8 +55,7 @@ impl WasmClient {
                     return;
                 }
                 let timestamp = if sent_at.is_finite()
-                    && sent_at >= 0.0
-                    && sent_at <= MAX_SAFE_JS_INTEGER
+                    && (0.0..=MAX_SAFE_JS_INTEGER).contains(&sent_at)
                     && sent_at.fract() == 0.0
                 {
                     sent_at as u64

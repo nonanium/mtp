@@ -874,7 +874,7 @@ fn build_encrypted_relay_frame_impl(
     let metadata_recipients = public_key_bundles_from_js(&metadata_recipient_public_key_bundles)?;
 
     let builder = SealedRelayBuilder::new(
-        CommunicationType::from_name(&message_type).ok_or_else(|| {
+        CommunicationType::from_name(message_type).ok_or_else(|| {
             structured_error("invalid-message-type", "unknown communication type")
         })?,
         application_content,

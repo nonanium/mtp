@@ -464,6 +464,7 @@ pub fn protected_claimed_signer_id_with_limits(
 /// intended for stored/forensic messages; message-processing callers should
 /// apply their replay guard in the SDK or use a checked native API.
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn open_protected_with_keyrings_without_replay(
     frame: &[u8],
     keyrings: JsValue,
@@ -487,6 +488,7 @@ pub fn open_protected_with_keyrings_without_replay(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_protected_with_keyrings_impl(
     frame: &[u8],
     keyrings: JsValue,
@@ -541,6 +543,7 @@ fn open_protected_with_keyrings_impl(
 /// boundary cannot accept a native replay-guard trait, so message-processing
 /// callers must use the SDK guard or a native checked API.
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn open_protected_with_keyrings_with_limits_without_replay(
     frame: &[u8],
     keyrings: JsValue,

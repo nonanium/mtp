@@ -72,6 +72,7 @@ pub(crate) async fn verify_host_challenge(
 pub(crate) async fn verify_host_final(
     response: &CommunicationValue,
     host_pk: &mtp_crypto::PublicKeyBundle,
+    description: Option<&str>,
     id: u64,
     client_nonce: u128,
     server_challenge: u128,
@@ -106,7 +107,7 @@ pub(crate) async fn verify_host_final(
         ));
     }
 
-    let payload = auth::host_final_payload(id, client_nonce, server_challenge);
+    let payload = auth::host_final_payload(description, id, client_nonce, server_challenge);
     if pq_sig.is_empty() {
         verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig).map_err(|_| {
             CommunicationError::AuthenticationFailed("Host signature invalid".into())

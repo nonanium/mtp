@@ -70,8 +70,8 @@ pub(crate) fn verify_host_challenge(
 
 pub(crate) fn verify_host_final(
     resp: &CommunicationValue,
-    _tm: &mtp_codec::TypeMap,
     host_pk: &mtp_crypto::PublicKeyBundle,
+    description: Option<&str>,
     id: u64,
     client_nonce: u128,
     server_challenge: u128,
@@ -94,7 +94,8 @@ pub(crate) fn verify_host_final(
         ));
     }
 
-    let payload = mtp_crypto::auth::host_final_payload(id, client_nonce, server_challenge);
+    let payload =
+        mtp_crypto::auth::host_final_payload(description, id, client_nonce, server_challenge);
     mtp_crypto::verify_ed25519(&host_pk.sig_cl_public_key, &payload, &host_sig)
         .map_err(|_| js_error("host signature invalid"))?;
     if !host_pq_sig.is_empty() {

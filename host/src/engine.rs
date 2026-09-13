@@ -867,13 +867,25 @@ impl HandshakeEngine {
 
         let (proof_payload, bundle) = match &flow {
             Flow::Login { id, bundle } => (
-                auth::login_proof_payload(version_str, *id, server_challenge, client_nonce),
+                auth::login_proof_payload(
+                    version_str,
+                    description.as_deref(),
+                    *id,
+                    server_challenge,
+                    client_nonce,
+                ),
                 bundle,
             ),
             Flow::Register {
                 bundle, pk_bytes, ..
             } => (
-                auth::register_proof_payload(version_str, pk_bytes, server_challenge, client_nonce),
+                auth::register_proof_payload(
+                    version_str,
+                    description.as_deref(),
+                    pk_bytes,
+                    server_challenge,
+                    client_nonce,
+                ),
                 bundle,
             ),
         };
@@ -916,23 +928,7 @@ impl HandshakeEngine {
             Flow::Login { id, bundle } => (id, bundle),
             Flow::Register { bundle, .. } => {
                 let _registration_guard = self.config.registration_lock.lock().await;
-                let identity = match bundle.try_as_bytes() {
-                    Ok(identity) => identity,
-                    Err(error) => {
-                        let error = AcceptError::AuthenticationFailed(error.to_string());
-                        reject_error_generic(sender, &error, tm).await;
-                        return Err(error);
-                    }
-                };
-                let cached_id = self
-                    .config
-                    .registration_ids
-                    .lock()
-                    .ok()
-                    .and_then(|registrations| registrations.get(&identity).copied());
-                let new_id = if let Some(id) = cached_id {
-                    id
-                } else if let Some(lookup) = &self.config.find_registered_client {
+                let new_id = if let Some(lookup) = &self.config.find_registered_client {
                     match lookup(bundle.clone(), description.clone()).await {
                         Some(id) => id,
                         None => {
@@ -943,11 +939,6 @@ impl HandshakeEngine {
                 } else {
                     (self.config.complete_register)(bundle.clone(), description.clone()).await
                 };
-                if new_id != 0
-                    && let Ok(mut registrations) = self.config.registration_ids.lock()
-                {
-                    registrations.insert(identity, new_id);
-                }
                 if new_id == 0 {
                     let error = AcceptError::AuthenticationFailed(
                         "registration callback returned reserved client id 0".into(),
@@ -968,6 +959,7 @@ impl HandshakeEngine {
 
         // Sign and send final response
         let (host_sig, host_pq_sig) = match host_sign(auth::host_final_payload(
+            description.as_deref(),
             assigned_id,
             client_nonce,
             server_challenge,

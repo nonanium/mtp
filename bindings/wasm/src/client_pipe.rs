@@ -409,9 +409,7 @@ pub(crate) async fn wasm_create_pipe(
         frame_len = request_bytes.len(),
         "sending pipe request"
     );
-    if let Err(error) = transport.send_frame(&request_bytes).await {
-        return Err(error);
-    }
+    transport.send_frame(&request_bytes).await?;
     if current_generation.get() != generation {
         return Err(js_error("connection attempt superseded"));
     }
@@ -475,9 +473,7 @@ pub(crate) async fn wasm_accept_pipe(
         frame_len = resp_bytes.len(),
         "sending pipe response"
     );
-    if let Err(error) = transport.send_frame(&resp_bytes).await {
-        return Err(error);
-    }
+    transport.send_frame(&resp_bytes).await?;
     if current_generation.get() != generation {
         return Err(js_error("connection attempt superseded"));
     }

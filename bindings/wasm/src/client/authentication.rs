@@ -110,7 +110,7 @@ impl WasmClient {
 
             let negotiated_version = match outcome.get_data(DataType::Version) {
                 Some(DataValue::Str(version)) => mtp_codec::Version::parse(version)
-                    .ok_or_else(|| missing_version())?,
+                    .ok_or_else(missing_version)?,
                 _ => return Err(missing_version()),
             };
             if negotiated_version != PROTOCOL_VERSION {
@@ -132,7 +132,7 @@ impl WasmClient {
             .map_err(|e| js_error(format!("parse negotiated handshake outcome: {e}")))?;
             let tm = codec.type_map();
             let expected = CommunicationType::IdentificationResponse
-                .try_to_id(&tm)
+                .try_to_id(tm)
                 .ok_or_else(|| js_error("IdentificationResponse is absent from the type map"))?;
             if outcome.get_type() != expected
                 || outcome.get_data(DataType::Connected) != Some(&DataValue::BoolTrue)
@@ -282,6 +282,7 @@ impl WasmClient {
 
             let proof_payload = mtp_crypto::auth::login_proof_payload(
                 &version_str,
+                config.description.as_deref(),
                 client_id,
                 server_challenge,
                 client_nonce,
@@ -322,7 +323,7 @@ impl WasmClient {
             let tm = codec.type_map();
             let resp_type = resp_comm.get_type();
             let expected_type = CommunicationType::IdentificationResponse
-                .try_to_id(&tm)
+                .try_to_id(tm)
                 .ok_or_else(|| js_error("IdentificationResponse is absent from the type map"))?;
             if resp_type != expected_type {
                 self.set_state_if_current(generation, ConnectionState::Disconnected);
@@ -346,8 +347,8 @@ impl WasmClient {
 
             if let Err(e) = auth::verify_host_final(
                 &resp_comm,
-                &tm,
                 &host_pk,
+                config.description.as_deref(),
                 client_id,
                 client_nonce,
                 server_challenge,
@@ -490,6 +491,7 @@ impl WasmClient {
 
             let proof_payload = mtp_crypto::auth::register_proof_payload(
                 &version_str,
+                config.description.as_deref(),
                 &pk_bytes,
                 server_challenge,
                 client_nonce,
@@ -530,7 +532,7 @@ impl WasmClient {
             let tm = codec.type_map();
             let resp_type = resp_comm.get_type();
             let expected_type = CommunicationType::RegisterResponse
-                .try_to_id(&tm)
+                .try_to_id(tm)
                 .ok_or_else(|| js_error("RegisterResponse is absent from the type map"))?;
             if resp_type != expected_type {
                 self.set_state_if_current(generation, ConnectionState::Disconnected);
@@ -568,8 +570,8 @@ impl WasmClient {
 
             if let Err(e) = auth::verify_host_final(
                 &resp_comm,
-                &tm,
                 &host_pk,
+                config.description.as_deref(),
                 assigned_id,
                 client_nonce,
                 server_challenge,
@@ -593,6 +595,7 @@ impl WasmClient {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn read_verified_challenge(
         &self,
         transport: &WasmTransport,

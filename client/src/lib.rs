@@ -267,6 +267,7 @@ impl MTPClient {
         let client_nonce: u128 = rand::random();
         let proof_payload = mtp_crypto::auth::login_proof_payload(
             &version_str,
+            config.description.as_deref(),
             config.client_id,
             server_challenge,
             client_nonce,
@@ -314,6 +315,7 @@ impl MTPClient {
         if let Err(e) = crypto::verify_host_final(
             &response,
             host_public_key_bundle,
+            config.description.as_deref(),
             config.client_id,
             client_nonce,
             server_challenge,
@@ -453,6 +455,7 @@ impl MTPClient {
         let client_nonce: u128 = rand::random();
         let proof_payload = mtp_crypto::auth::register_proof_payload(
             &version_str,
+            config.description.as_deref(),
             &pk_bytes,
             server_challenge,
             client_nonce,
@@ -511,6 +514,7 @@ impl MTPClient {
         if let Err(e) = crypto::verify_host_final(
             &response,
             host_public_key_bundle,
+            config.description.as_deref(),
             assigned_id,
             client_nonce,
             server_challenge,
