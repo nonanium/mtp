@@ -37,7 +37,9 @@ fn decode_limit(value: &JsValue, key: &str, default: usize) -> Result<usize, JsV
     let Some(number) = value.as_f64() else {
         return Err(js_error(format!("{key} must be a number")));
     };
-    if !number.is_finite() || number.fract() != 0.0 || !(0.0..=MAX_SAFE_JS_INTEGER).contains(&number)
+    if !number.is_finite()
+        || number.fract() != 0.0
+        || !(0.0..=MAX_SAFE_JS_INTEGER).contains(&number)
     {
         return Err(js_error(format!("{key} must be a non-negative integer")));
     }
