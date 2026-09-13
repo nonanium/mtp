@@ -1,6 +1,9 @@
 use wasm_bindgen::prelude::*;
 
-use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, PROTOCOL_VERSION};
+use mtp_codec::{
+    CommunicationType, CommunicationValue, DataType, DataValue, TypeMap, Version,
+    registry::{Registry, VersionedCodec, bootstrap_type_map},
+};
 
 use crate::auth;
 use crate::client::{ConnectionState, WasmClient};
@@ -16,8 +19,64 @@ fn server_rejection_message(outcome: &CommunicationValue) -> Option<&str> {
     })
 }
 
-fn version_offer() -> DataValue {
-    DataValue::Array(vec![DataValue::Str(PROTOCOL_VERSION.to_string())])
+fn supported_versions() -> Vec<Version> {
+    let mut versions: Vec<_> = Registry::builtin().versions().cloned().collect();
+    versions.sort_by(|left, right| right.cmp(left));
+    versions
+}
+
+fn version_offer(versions: &[Version]) -> DataValue {
+    DataValue::Array(
+        versions
+            .iter()
+            .map(|version| DataValue::Str(version.to_string()))
+            .collect(),
+    )
+}
+
+async fn select_codec(
+    transport: &WasmTransport,
+    bootstrap: &TypeMap,
+    offered: &[Version],
+) -> Result<(Version, VersionedCodec), JsValue> {
+    let bytes = transport.read_one_frame().await?;
+    let selection = CommunicationValue::try_from_bytes_with_type_map_and_limits(
+        &bytes,
+        bootstrap,
+        transport.decode_limits(),
+    )
+    .map_err(|error| js_error(format!("parse version selection: {error}")))?;
+
+    if Some(selection.get_type()) == CommunicationType::ErrorBadVersion.try_to_id(bootstrap) {
+        return Err(js_error(
+            "host does not support an offered protocol version",
+        ));
+    }
+    if let Some(message) = server_rejection_message(&selection) {
+        return Err(js_error(message));
+    }
+    let expected = CommunicationType::IdentificationResponse
+        .try_to_id(bootstrap)
+        .ok_or_else(|| js_error("bootstrap response is unavailable"))?;
+    if selection.get_type() != expected
+        || selection.get_data(DataType::Connected) != Some(&DataValue::BoolTrue)
+    {
+        return Err(js_error("host did not return a version selection"));
+    }
+    let version = match selection.get_data(DataType::Version) {
+        Some(DataValue::Str(version)) => Version::parse(version),
+        _ => None,
+    }
+    .ok_or_else(|| js_error("host returned an invalid negotiated protocol version"))?;
+    if !offered.contains(&version) {
+        return Err(js_error(
+            "host selected a protocol version the client did not offer",
+        ));
+    }
+    let codec = VersionedCodec::for_version(Registry::builtin(), version.clone())
+        .ok_or_else(|| js_error("host returned an unsupported negotiated protocol version"))?;
+    transport.set_type_map(codec.type_map());
+    Ok((version, codec))
 }
 
 #[wasm_bindgen]
@@ -49,17 +108,14 @@ impl WasmClient {
         }
 
         let result = async {
-            let opening_codec = mtp_codec::registry::VersionedCodec::for_version(
-                mtp_codec::registry::Registry::builtin(),
-                PROTOCOL_VERSION,
-            )
-            .ok_or_else(|| js_error("client protocol version is not registered"))?;
-            transport.set_type_map(opening_codec.type_map());
+            let bootstrap = bootstrap_type_map();
+            let offered = supported_versions();
+            transport.set_type_map(&bootstrap);
             let mut ident = CommunicationValue::new_with_type_map(
                 CommunicationType::Identification,
-                opening_codec.type_map(),
+                &bootstrap,
             )
-            .add_typed_default(DataType::Version, version_offer())
+            .add_typed_default(DataType::Version, version_offer(&offered))
             .add_typed_default(
                 DataType::Id,
                 DataValue::UnsignedNumber(config.client_id as u128),
@@ -73,15 +129,17 @@ impl WasmClient {
                 .map_err(|e| js_error(format!("encode failed: {}", e)))?;
             transport.send_frame(&ident_bytes).await?;
 
+            let (negotiated_version, codec) =
+                select_codec(&transport, &bootstrap, &offered).await?;
             let outcome_bytes = transport.read_one_frame().await?;
             let outcome = CommunicationValue::try_from_bytes_with_type_map_and_limits(
                 &outcome_bytes,
-                opening_codec.type_map(),
+                codec.type_map(),
                 transport.decode_limits(),
             )
             .map_err(|e| js_error(format!("parse handshake outcome: {e}")))?;
             if Some(outcome.get_type())
-                == CommunicationType::ErrorBadVersion.try_to_id(opening_codec.type_map())
+                == CommunicationType::ErrorBadVersion.try_to_id(codec.type_map())
             {
                 self.set_state_if_current(generation, ConnectionState::Disconnected);
                 return Err(js_error(
@@ -111,28 +169,16 @@ impl WasmClient {
                 ))
             };
 
-            let negotiated_version = match outcome.get_data(DataType::Version) {
+            let returned_version = match outcome.get_data(DataType::Version) {
                 Some(DataValue::Str(version)) => mtp_codec::Version::parse(version)
                     .ok_or_else(missing_version)?,
                 _ => return Err(missing_version()),
             };
-            if negotiated_version != PROTOCOL_VERSION {
+            if returned_version != negotiated_version {
                 return Err(js_error(
-                    "host selected a protocol version the client did not offer",
+                    "host changed the negotiated protocol version",
                 ));
             }
-            let codec = mtp_codec::registry::VersionedCodec::for_version(
-                mtp_codec::registry::Registry::builtin(),
-                negotiated_version,
-            )
-            .ok_or_else(|| js_error("host returned an unsupported negotiated protocol version"))?;
-            transport.set_type_map(codec.type_map());
-            let outcome = CommunicationValue::try_from_bytes_with_type_map_and_limits(
-                &outcome_bytes,
-                codec.type_map(),
-                transport.decode_limits(),
-            )
-            .map_err(|e| js_error(format!("parse negotiated handshake outcome: {e}")))?;
             let tm = codec.type_map();
             let expected = CommunicationType::IdentificationResponse
                 .try_to_id(tm)
@@ -217,13 +263,8 @@ impl WasmClient {
             }
         };
 
-        let handshake_codec = mtp_codec::registry::VersionedCodec::for_version(
-            mtp_codec::registry::Registry::builtin(),
-            PROTOCOL_VERSION,
-        )
-        .ok_or_else(|| js_error("client protocol version is not registered"))?;
-        let tm = handshake_codec.type_map().clone();
-        let version_str = format!("{}", PROTOCOL_VERSION);
+        let bootstrap = bootstrap_type_map();
+        let offered = supported_versions();
         let public_key_bytes = keyring
             .public_key_bundle()
             .try_as_bytes()
@@ -243,22 +284,24 @@ impl WasmClient {
                 return Err(error);
             }
         };
-        transport.set_type_map(&tm);
+        transport.set_type_map(&bootstrap);
         if !self.install_attempt_transport(&transport, generation) {
             return Err(js_error("connection attempt superseded"));
         }
 
         let result = async {
-            let mut hello =
-                CommunicationValue::new_with_type_map(CommunicationType::Identification, &tm)
-                    .add_typed_default(DataType::Version, version_offer())
-                    .add_typed_default(DataType::Id, DataValue::UnsignedNumber(client_id as u128))
-                    // Mark this as an authentication-capable opening so a
-                    // non-crypto host can reject it explicitly.
-                    .add_typed_default(
-                        DataType::PublicKeys,
-                        DataValue::Bytes(public_key_bytes.clone()),
-                    );
+            let mut hello = CommunicationValue::new_with_type_map(
+                CommunicationType::Identification,
+                &bootstrap,
+            )
+            .add_typed_default(DataType::Version, version_offer(&offered))
+            .add_typed_default(DataType::Id, DataValue::UnsignedNumber(client_id as u128))
+            // Mark this as an authentication-capable opening so a
+            // non-crypto host can reject it explicitly.
+            .add_typed_default(
+                DataType::PublicKeys,
+                DataValue::Bytes(public_key_bytes.clone()),
+            );
             if let Some(desc) = &config.description {
                 hello =
                     hello.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
@@ -268,6 +311,10 @@ impl WasmClient {
                 .map_err(|e| js_error(format!("encode failed: {}", e)))?;
             transport.send_frame(&hello_bytes).await?;
 
+            let (negotiated_version, handshake_codec) =
+                select_codec(&transport, &bootstrap, &offered).await?;
+            let tm = handshake_codec.type_map().clone();
+            let version_str = negotiated_version.to_string();
             let server_challenge = self
                 .read_verified_challenge(
                     &transport,
@@ -301,29 +348,15 @@ impl WasmClient {
                 transport.decode_limits(),
             )
             .map_err(|e| js_error(format!("parse response: {}", e)))?;
-            let negotiated_version = match resp_comm.get_data(DataType::Version) {
+            let returned_version = match resp_comm.get_data(DataType::Version) {
                 Some(DataValue::Str(version)) => mtp_codec::Version::parse(version)
                     .ok_or_else(|| js_error("host returned an invalid negotiated version"))?,
                 _ => return Err(js_error("host omitted the negotiated version")),
             };
-            if negotiated_version != PROTOCOL_VERSION {
-                return Err(js_error(
-                    "host selected a protocol version the client did not offer",
-                ));
+            if returned_version != negotiated_version {
+                return Err(js_error("host changed the negotiated protocol version"));
             }
-            let codec = mtp_codec::registry::VersionedCodec::for_version(
-                mtp_codec::registry::Registry::builtin(),
-                negotiated_version,
-            )
-            .ok_or_else(|| js_error("host returned an unsupported negotiated version"))?;
-            transport.set_type_map(codec.type_map());
-            let resp_comm = CommunicationValue::try_from_bytes_with_type_map_and_limits(
-                &response,
-                codec.type_map(),
-                transport.decode_limits(),
-            )
-            .map_err(|e| js_error(format!("parse negotiated response: {}", e)))?;
-            let tm = codec.type_map();
+            let tm = handshake_codec.type_map();
             let resp_type = resp_comm.get_type();
             let expected_type = CommunicationType::IdentificationResponse
                 .try_to_id(tm)
@@ -433,13 +466,8 @@ impl WasmClient {
             }
         };
 
-        let handshake_codec = mtp_codec::registry::VersionedCodec::for_version(
-            mtp_codec::registry::Registry::builtin(),
-            PROTOCOL_VERSION,
-        )
-        .ok_or_else(|| js_error("client protocol version is not registered"))?;
-        let tm = handshake_codec.type_map().clone();
-        let version_str = format!("{}", PROTOCOL_VERSION);
+        let bootstrap = bootstrap_type_map();
+        let offered = supported_versions();
         let pk_bytes = keyring
             .public_key_bundle()
             .try_as_bytes()
@@ -459,15 +487,16 @@ impl WasmClient {
                 return Err(error);
             }
         };
-        transport.set_type_map(&tm);
+        transport.set_type_map(&bootstrap);
         if !self.install_attempt_transport(&transport, generation) {
             return Err(js_error("connection attempt superseded"));
         }
 
         let result = async {
-            let mut hello = CommunicationValue::new_with_type_map(CommunicationType::Register, &tm)
-                .add_typed_default(DataType::Version, version_offer())
-                .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
+            let mut hello =
+                CommunicationValue::new_with_type_map(CommunicationType::Register, &bootstrap)
+                    .add_typed_default(DataType::Version, version_offer(&offered))
+                    .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
             if let Some(desc) = &config.description {
                 hello =
                     hello.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
@@ -477,6 +506,10 @@ impl WasmClient {
                 .map_err(|e| js_error(format!("encode failed: {}", e)))?;
             transport.send_frame(&hello_bytes).await?;
 
+            let (negotiated_version, handshake_codec) =
+                select_codec(&transport, &bootstrap, &offered).await?;
+            let tm = handshake_codec.type_map().clone();
+            let version_str = negotiated_version.to_string();
             let server_challenge = self
                 .read_verified_challenge(
                     &transport,
@@ -510,29 +543,15 @@ impl WasmClient {
                 transport.decode_limits(),
             )
             .map_err(|e| js_error(format!("parse response: {}", e)))?;
-            let negotiated_version = match resp_comm.get_data(DataType::Version) {
+            let returned_version = match resp_comm.get_data(DataType::Version) {
                 Some(DataValue::Str(version)) => mtp_codec::Version::parse(version)
                     .ok_or_else(|| js_error("host returned an invalid negotiated version"))?,
                 _ => return Err(js_error("host omitted the negotiated version")),
             };
-            if negotiated_version != PROTOCOL_VERSION {
-                return Err(js_error(
-                    "host selected a protocol version the client did not offer",
-                ));
+            if returned_version != negotiated_version {
+                return Err(js_error("host changed the negotiated protocol version"));
             }
-            let codec = mtp_codec::registry::VersionedCodec::for_version(
-                mtp_codec::registry::Registry::builtin(),
-                negotiated_version,
-            )
-            .ok_or_else(|| js_error("host returned an unsupported negotiated version"))?;
-            transport.set_type_map(codec.type_map());
-            let resp_comm = CommunicationValue::try_from_bytes_with_type_map_and_limits(
-                &response,
-                codec.type_map(),
-                transport.decode_limits(),
-            )
-            .map_err(|e| js_error(format!("parse negotiated response: {}", e)))?;
-            let tm = codec.type_map();
+            let tm = handshake_codec.type_map();
             let resp_type = resp_comm.get_type();
             let expected_type = CommunicationType::RegisterResponse
                 .try_to_id(tm)
@@ -666,8 +685,11 @@ impl WasmClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{server_rejection_message, version_offer};
-    use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue};
+    use super::{server_rejection_message, supported_versions, version_offer};
+    use mtp_codec::{
+        CommunicationType, CommunicationValue, DataType, DataValue,
+        registry::{Registry, VersionedCodec},
+    };
 
     #[test]
     fn reports_rejection_reason_without_a_negotiated_version() {
@@ -686,10 +708,28 @@ mod tests {
 
     #[test]
     fn opening_version_is_a_non_empty_offer() {
+        let versions = supported_versions();
+        let codec = VersionedCodec::for_version(
+            Registry::builtin(),
+            versions.first().cloned().expect("version must exist"),
+        )
+        .expect("protocol version must be registered");
+        let bytes = CommunicationValue::new_with_type_map(
+            CommunicationType::Identification,
+            codec.type_map(),
+        )
+        .add_typed_default(DataType::Version, version_offer(&versions))
+        .to_bytes()
+        .expect("opening frame must encode");
+        let decoded = CommunicationValue::try_from_bytes_with(&bytes, codec.type_map())
+            .expect("opening frame must decode");
+
+        let Some(DataValue::Array(versions)) = decoded.get_data(DataType::Version) else {
+            panic!("opening version must be an array");
+        };
         assert!(matches!(
-            version_offer(),
-            DataValue::Array(versions)
-                if matches!(versions.as_slice(), [DataValue::Str(version)] if !version.is_empty())
+            versions.as_slice(),
+            [DataValue::Str(version), ..] if !version.is_empty()
         ));
     }
 }
