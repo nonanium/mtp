@@ -108,7 +108,8 @@ async fn test_explicit_development_tls() -> Result<(), Box<dyn std::error::Error
     let (_host_tx, _host_rx) = h.next().await.ok_or("host did not accept connection")?;
 
     client_tx.close().await;
-    h.shutdown();
+    h.shutdown(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+        .await;
     Ok(())
 }
 
@@ -231,7 +232,8 @@ async fn test_host_shutdown_stops_accepting() -> Result<(), Box<dyn std::error::
     // After shutdown the accept task is aborted and its endpoint is dropped, so
     // new connections no longer succeed. Guard with a timeout so a hung connect
     // still fails the assertion rather than blocking the test.
-    h.shutdown();
+    h.shutdown(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+        .await;
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -319,7 +321,8 @@ async fn test_receiver_backpressure_with_small_queue() -> Result<(), Box<dyn std
 
     client_tx.close().await;
     drop(client_rx);
-    h.shutdown();
+    h.shutdown(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+        .await;
     Ok(())
 }
 
@@ -357,7 +360,8 @@ async fn test_max_frames_per_stream_enforced() -> Result<(), Box<dyn std::error:
     assert!(second.is_err(), "stream should be closed after frame limit");
 
     client_tx.close().await;
-    h.shutdown();
+    h.shutdown(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+        .await;
     Ok(())
 }
 
@@ -408,6 +412,7 @@ async fn test_semaphore_saturation_with_concurrent_streams()
     assert_eq!(received_ids, (0..6).collect());
 
     client_tx.close().await;
-    h.shutdown();
+    h.shutdown(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+        .await;
     Ok(())
 }

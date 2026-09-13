@@ -27,6 +27,7 @@ pub(crate) struct TcpDriverConfig {
     pub drain_timeout: Duration,
     pub max_connections: usize,
     pub metrics: Option<Arc<dyn WebServerMetrics>>,
+    pub request_semaphore: Option<Arc<Semaphore>>,
 }
 
 pub(crate) async fn run_driver(
@@ -53,6 +54,7 @@ pub(crate) async fn run_driver(
                 let timeout = config.request_timeout;
                 let body_limit = config.max_request_body;
                 let handshake_timeout = config.tls_handshake_timeout;
+                let request_semaphore = config.request_semaphore.clone();
                 let connection_shutdown = shutdown_rx.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
@@ -71,7 +73,15 @@ pub(crate) async fn run_driver(
                     if let Some(metrics) = &metrics { metrics.connection_accepted(); }
                     let service_metrics = metrics.clone();
                     let service = service_fn(move |request| {
-                        serve_request(request, remote_addr, router.clone(), body_limit, timeout, service_metrics.clone())
+                        serve_request(
+                            request,
+                            remote_addr,
+                            router.clone(),
+                            body_limit,
+                            timeout,
+                            service_metrics.clone(),
+                            request_semaphore.clone(),
+                        )
                     });
                     let builder = Builder::new(TokioExecutor::new());
                     let connection = builder.serve_connection_with_upgrades(TokioIo::new(tls_stream), service);
@@ -115,9 +125,23 @@ async fn serve_request(
     max_body: usize,
     timeout: Duration,
     metrics: Option<Arc<dyn WebServerMetrics>>,
+    request_semaphore: Option<Arc<Semaphore>>,
 ) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
+    let request_permit = match request_semaphore
+        .as_ref()
+        .map(|semaphore| semaphore.clone().try_acquire_owned())
+        .transpose()
+    {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Ok(into_hyper_response(HttpResponse::new(
+                http::StatusCode::TOO_MANY_REQUESTS,
+            )));
+        }
+    };
     let path = request.uri().path().to_string();
     let response = crate::http::run_request(&path, timeout, metrics.as_ref(), async move {
+        let _request_permit = request_permit;
         let request = read_request(request, remote_addr, max_body).await?;
         Ok(crate::http::dispatch_request(request, &router).await)
     })

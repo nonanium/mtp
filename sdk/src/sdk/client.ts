@@ -3,8 +3,6 @@ import {
   ConnectionConfig,
   ConnectionState,
   WasmClient,
-  WasmPipeHandle,
-  keyring_generate,
 } from "mtp/raw";
 import * as bindings from "mtp/raw";
 import { unixTimeMillis } from "./utils.js";
@@ -62,7 +60,32 @@ import {
 } from "./credentials.js";
 import type { InternalCredentials } from "./credentials.js";
 import { withTimeout } from "./timeout.js";
+import { communicationError } from "./communication-error.js";
+
+async function normalizeCommunicationError<T>(operation: Promise<T>): Promise<T> {
+  try {
+    return await operation;
+  } catch (error) {
+    throw communicationError(error);
+  }
+}
+export {
+  MTPCommunicationError,
+  communicationError,
+} from "./communication-error.js";
+export type {
+  MTPCommunicationErrorCode,
+  MTPTransportPhase,
+} from "./communication-error.js";
 import { initWasmOnce } from "./wasm-init.js";
+import {
+  SubscriptionDispatcher,
+  type MTPSubscriptionOptions,
+} from "./subscription.js";
+export type {
+  MTPSubscriptionOptions,
+  MTPSubscriptionHandler,
+} from "./subscription.js";
 import {
   acceptMTPPipeSession,
   acceptMTPPipeSessionAuto,
@@ -73,6 +96,14 @@ import {
   MTPEncryptedPipeWriter,
   validateApplicationProtectionPurpose,
 } from "./encrypted-pipe.js";
+import {
+  acceptEncryptedPipe as acceptEncryptedPipeWithContext,
+  acceptPipe as acceptPipeWithContext,
+  createEncryptedPipe as createEncryptedPipeWithContext,
+  createPipe as createPipeWithContext,
+  denyPipe as denyPipeWithContext,
+  setOnPipeRequest as setOnPipeRequestWithContext,
+} from "./pipe-client.js";
 import {
   InMemoryReplayGuard,
   MTPReplayError,
@@ -498,6 +529,10 @@ export interface MTPOpenProtectedOptions {
   limits?: MTPReceiveLimits;
 }
 
+/** Options for a protected-message subscription. */
+export interface MTPProtectedSubscriptionOptions
+  extends MTPOpenProtectedOptions, MTPSubscriptionOptions {}
+
 export interface MTPVerifiedProtectedMessage<T = MTPDataValue> {
   type: string;
 
@@ -525,10 +560,14 @@ export type MTPProtectedFrameInput = ParsedFrame | MTPBytesInput;
 
 /** Options shared by the sealed-relay subscription APIs. */
 export interface MTPEncryptedSubscriptionOptions
-  extends MTPOpenRelayContentOptions {
+  extends MTPOpenRelayContentOptions, MTPSubscriptionOptions {
   /** Consume authenticated relay IDs while dispatching the subscription. */
   replayGuard?: MTPReplayGuard;
 }
+
+/** Options for a verified relay-metadata subscription. */
+export interface MTPRelayMetadataSubscriptionOptions
+  extends MTPOpenRelayMetadataOptions, MTPSubscriptionOptions {}
 
 export type MTPProtectionSignatureSuite = "ed25519" | "dual";
 
@@ -657,8 +696,11 @@ function emit(
   logger: MTPClientOptions["logger"] | undefined,
   event: MTPLogEvent,
 ): void {
-  if (typeof logger === "function") {
+  if (typeof logger !== "function") return;
+  try {
     logger(event);
+  } catch {
+    // Logging is diagnostic and must not affect protocol control flow.
   }
 }
 
@@ -730,12 +772,7 @@ function toBigInt(
 }
 
 function generateKeyringBytes() {
-  const checkedGenerator = (
-    bindings as typeof bindings & {
-      keyring_generate_checked?: () => Uint8Array;
-    }
-  ).keyring_generate_checked;
-  return checkedGenerator?.() ?? keyring_generate();
+  return bindings.keyring_generate_checked();
 }
 
 function serializeCredentials(credentials) {
@@ -851,51 +888,6 @@ function resolveSecurityProfile(options: MTPClientOptions): ResolvedSecurityProf
   };
 }
 
-type BoundedBindings = typeof bindings & {
-  protected_claimed_signer_id_with_limits?: (
-    frame: Uint8Array,
-    keyrings: Uint8Array[],
-    encryptionPurpose: number,
-    limits: MTPReceiveLimits,
-  ) => bigint;
-  open_protected_with_keyrings_with_limits_without_replay?: (
-    frame: Uint8Array,
-    keyrings: Uint8Array[],
-    expectedSignerId: bigint,
-    signerPublicKeys: Uint8Array[],
-    expectedReceiverId: bigint | null,
-    signaturePurpose: number,
-    encryptionPurpose: number,
-    signatureSuite: number,
-    limits: MTPReceiveLimits,
-  ) => RawBindings.WasmVerifiedProtectedMessage;
-  relay_metadata_claimed_signer_id_with_limits?: (
-    frame: Uint8Array,
-    keyrings: Uint8Array[],
-    limits: MTPReceiveLimits,
-  ) => bigint;
-  open_relay_metadata_with_keyrings_with_limits_without_replay?: (
-    frame: Uint8Array,
-    keyrings: Uint8Array[],
-    expectedSignerId: bigint,
-    signerPublicKeys: Uint8Array[],
-    signatureSuite: number,
-    limits: MTPReceiveLimits,
-  ) => RawBindings.WasmVerifiedRelayMetadata;
-  open_relay_content_with_keyrings_with_limits_without_replay?: (
-    metadata: RawBindings.WasmVerifiedRelayMetadata,
-    keyrings: Uint8Array[],
-    signerPublicKeys: Uint8Array[],
-    expectedFinalRecipientId: bigint | null,
-    signatureSuite: number,
-    limits: MTPReceiveLimits,
-  ) => RawBindings.WasmVerifiedRelayContent;
-};
-
-function boundedBindings(): BoundedBindings {
-  return bindings as unknown as BoundedBindings;
-}
-
 function deserializeCredentials(credentials) {
   const normalized = normalizeCredentials(credentials);
   if (!normalized) {
@@ -914,6 +906,30 @@ function deserializeCredentials(credentials) {
       normalized.hostPublicKey == null
         ? undefined
         : normalizeBytes(normalized.hostPublicKey, "credentials.hostPublicKey").slice(),
+  };
+}
+
+function pipeWriter(raw: RawBindings.PipeWriter): MTPPipeWriter {
+  return {
+    pipeId: raw.pipe_id(),
+    write: (data) => normalizeCommunicationError(raw.write(data)),
+    close: () => normalizeCommunicationError(raw.close()),
+    abort: () => {
+      try {
+        return raw.abort();
+      } catch (error) {
+        throw communicationError(error);
+      }
+    },
+  };
+}
+
+function pipeReader(raw: RawBindings.PipeReader): MTPPipeReader {
+  return {
+    pipeId: raw.pipe_id(),
+    description: raw.description(),
+    read: async () =>
+      (await normalizeCommunicationError(raw.read())) as Uint8Array | null,
   };
 }
 
@@ -1078,20 +1094,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
         }),
     );
 
-    if (normalizedOptions.receiveLimits) {
-      const rawClient = client as unknown as {
-        set_receive_limits?: (limits: MTPReceiveLimits) => void;
-        setReceiveLimits?: (limits: MTPReceiveLimits) => void;
-      };
-      const setReceiveLimits =
-        rawClient.set_receive_limits ?? rawClient.setReceiveLimits;
-      if (!setReceiveLimits) {
-        throw new Error(
-          "effective receive limits require a rebuilt bounded WASM package",
-        );
-      }
-      setReceiveLimits.call(rawClient, normalizedOptions.receiveLimits);
-    }
+    client.set_receive_limits(normalizedOptions.receiveLimits);
 
     sdk = new MTPClient<Registry>(normalizedOptions, client);
     await sdk.#loadStoredCredentials();
@@ -1195,14 +1198,12 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       // remains safe when the SDK timeout wins the race. Keep using it here so
       // applications that instrument the historical raw API continue to work.
       await withTimeout(
-        this.raw.client.connect(config),
+        normalizeCommunicationError(this.raw.client.connect(config)),
         this.#options.authTimeoutMs,
         "connection timed out",
         () => this.raw.client.disconnect(),
       );
-      const clientId = (
-        this.raw.client as RawBindings.WasmClient & { readonly client_id: bigint }
-      ).client_id;
+      const clientId = this.raw.client.client_id;
       this.#startPings(clientId);
     } finally {
       config.free();
@@ -1238,12 +1239,12 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       // Keep the deprecated raw spelling as the compatibility path. The WASM
       // wrapper takes owned copies before entering its asynchronous handshake.
       const clientId = await withTimeout(
-        this.raw.client.auth_connect(
+        normalizeCommunicationError(this.raw.client.auth_connect(
           config,
           this.#options.hostPublicKey,
           this.#credentials.keyring,
           this.#credentials.clientId,
-        ),
+        )),
         this.#options.authTimeoutMs,
         "authentication timed out",
         () => this.raw.client.disconnect(),
@@ -1272,11 +1273,11 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     const config = this.#connectionConfig();
     try {
       const clientId = await withTimeout(
-        this.raw.client.auth_register(
+        normalizeCommunicationError(this.raw.client.auth_register(
           config,
           this.#options.hostPublicKey,
           this.#credentials.keyring,
-        ),
+        )),
         this.#options.authTimeoutMs,
         "authentication timed out",
         () => this.raw.client.disconnect(),
@@ -1376,20 +1377,12 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     }
     const limits = this.#encodeLimits();
     validateMTPDataValue(data as MTPDataValueInput, limits);
-    const bounded = (
-      this.raw.bindings as typeof bindings & {
-        build_frame_with_limits?: (
-          type: string,
-          data: Record<string, unknown>,
-          options: MTPCodecOptions,
-          limits: MTPEncodeLimits,
-        ) => Uint8Array;
-      }
-    ).build_frame_with_limits;
-    if (!bounded) {
-      throw new Error("bounded WASM frame encoding is unavailable; rebuild mtp-wasm");
-    }
-    const frame = bounded(typeOrFrame, data, options ?? {}, limits);
+    const frame = this.raw.bindings.build_frame_with_limits(
+      typeOrFrame,
+      data,
+      options ?? {},
+      limits,
+    );
     if (frame.length > (limits.maxOutputSize ?? DEFAULT_MAX_MESSAGE_SIZE)) {
       throw new RangeError("MTP frame exceeds maxMessageSize");
     }
@@ -1446,7 +1439,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       });
     }
 
-    await this.raw.client.send(message);
+    await normalizeCommunicationError(this.raw.client.send(message));
   }
 
   /** Re-route an opaque sealed relay payload without opening it. */
@@ -1527,14 +1520,66 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     // The WASM client owns request expiry and its late-response tombstones.
     // Keeping a second Promise timer here can reject the SDK call while the
     // protocol request is still allowed to complete successfully.
-    const response = await this.raw.client.request(
-      frame,
-      options.responseType ?? null,
-      timeoutMs,
-    );
+    let response: ParsedFrame;
+    try {
+      response = await this.raw.client.request(
+        frame,
+        options.responseType ?? null,
+        timeoutMs,
+      );
+    } catch (error) {
+      throw communicationError(error);
+    }
     return typeof typeOrFrame === "string"
       ? await this.#parseResponseData(typeOrFrame, response)
       : response;
+  }
+
+  /**
+   * Subscribe raw frames through the common bounded dispatcher used by every
+   * capability-specific asynchronous subscription.
+   */
+  #subscribeBounded(
+    type: MTPCommunicationType,
+    handler: (frame: ParsedFrame) => void | Promise<void>,
+    options: MTPSubscriptionOptions,
+    errorType = "Subscription",
+    onClose?: () => void,
+  ): Unsubscribe {
+    let closed = false;
+    let id: number | undefined;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      dispatcher.close();
+      if (id !== undefined) this.raw.client.unsubscribe(id);
+      onClose?.();
+    };
+    const reportError = (error: unknown, frame: ParsedFrame) => {
+      if (typeof options.onError === "function") {
+        try {
+          options.onError(error, frame);
+        } catch {
+          // Application error observers must not affect dispatch.
+        }
+        return;
+      }
+      emit(this.#options.logger, {
+        hint: "error",
+        type: errorType,
+        error: String(error),
+        direction: "recv",
+      });
+    };
+    const dispatcher = new SubscriptionDispatcher<ParsedFrame>({
+      handler,
+      concurrency: options.concurrency,
+      queueCapacity: options.queueCapacity,
+      reportError,
+      onOverflow: close,
+    });
+    id = this.raw.client.subscribe(type, (frame) => dispatcher.enqueue(frame, frame));
+    return close;
   }
 
   subscribe<Type extends MTPMessageType<Registry>>(
@@ -1542,14 +1587,17 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     handler: (
       message: MTPResponseFrame<Registry, Type>,
     ) => void | Promise<void>,
+    options?: import("./subscription.js").MTPSubscriptionOptions,
   ): Unsubscribe;
   subscribe(
     type: MTPCommunicationType,
     handler: (message: ParsedFrame) => void | Promise<void>,
+    options?: import("./subscription.js").MTPSubscriptionOptions,
   ): Unsubscribe;
   subscribe(
     type: MTPCommunicationType,
     handler: (message: any) => void | Promise<void>,
+    options: import("./subscription.js").MTPSubscriptionOptions = {},
   ): Unsubscribe {
     if (typeof type !== "string" || !type) {
       throw new TypeError("subscription type must be a non-empty string");
@@ -1557,25 +1605,53 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     if (typeof handler !== "function") {
       throw new TypeError("subscription handler must be a function");
     }
-    let active = true;
-    const id = this.raw.client.subscribe(type, (message) => {
-      if (!this.#protocol || !this.#protocol.schemas[type]) {
-        void handler(message);
+    let closed = false;
+    let id: number | undefined;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      dispatcher.close();
+      if (id !== undefined) this.raw.client.unsubscribe(id);
+    };
+    const reportError = (error: unknown, frame: ParsedFrame) => {
+      if (typeof options.onError === "function") {
+        try {
+          options.onError(error, frame);
+        } catch {
+          // Application error observers must not affect dispatch.
+        }
         return;
       }
-      void this.#parseResponseData(type, message, "subscription").then(
-        (parsed) => {
-          if (active) void handler(parsed);
-        },
-        (error) => {
-          this.#protocol?.reportValidationError(error);
-        },
-      );
-    });
-    return () => {
-      active = false;
-      this.raw.client.unsubscribe(id);
+      emit(this.#options.logger, {
+        hint: "error",
+        type: "Subscription",
+        error: String(error),
+        data: frame.data,
+        direction: "recv",
+      });
     };
+    const dispatcher = new SubscriptionDispatcher<ParsedFrame>({
+      handler: async (message) => {
+        if (!this.#protocol || !this.#protocol.schemas[type]) {
+          await handler(message);
+          return;
+        }
+        let parsed: MTPFrame<unknown>;
+        try {
+          parsed = await this.#parseResponseData(type, message, "subscription");
+        } catch (error) {
+          this.#protocol.reportValidationError(error);
+          return;
+        }
+        await handler(parsed as ParsedFrame);
+      },
+      concurrency: options.concurrency,
+      queueCapacity: options.queueCapacity,
+      reportError,
+      onOverflow: close,
+    });
+    id = this.raw.client.subscribe(type, (message) => dispatcher.enqueue(message, message));
+    return close;
   }
 
   #handleFrame(frame) {
@@ -1629,15 +1705,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     try {
       const bundle = keyring.public_key_bundle();
       try {
-        const fallible = (
-          bundle as typeof bundle & { try_to_bytes?: () => Uint8Array }
-        ).try_to_bytes;
-        if (!fallible) {
-          throw new Error(
-            "fallible public-key serialization is unavailable; rebuild mtp-wasm",
-          );
-        }
-        return fallible.call(bundle);
+        return bundle.try_to_bytes();
       } finally {
         bundle.free();
       }
@@ -1735,27 +1803,13 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     const recipient = this.#resolveDecryptionIdentity(options.recipient);
     let signerId: bigint;
     try {
-      const bounded = boundedBindings();
-      if (bounded.relay_metadata_claimed_signer_id_with_limits) {
-        signerId = BigInt(
-          bounded.relay_metadata_claimed_signer_id_with_limits(
-            frameBytes,
-            recipient.keyrings,
-            receiveLimits ?? {},
-          ),
-        );
-      } else if (receiveLimitsExplicit) {
-        throw new Error(
-          "configured receive limits require a rebuilt bounded WASM package",
-        );
-      } else {
-        signerId = BigInt(
-          bindings.relay_metadata_claimed_signer_id(
-            frameBytes,
-            recipient.keyrings,
-          ),
-        );
-      }
+      signerId = BigInt(
+        bindings.relay_metadata_claimed_signer_id_with_limits(
+          frameBytes,
+          recipient.keyrings,
+          receiveLimits ?? {},
+        ),
+      );
     } catch (error) {
       throw relayOpeningError(error);
     }
@@ -1771,13 +1825,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     let native: RawBindings.WasmVerifiedRelayMetadata | undefined;
     let ownershipTransferred = false;
     try {
-      const bounded = boundedBindings();
-      if (!bounded.open_relay_metadata_with_keyrings_with_limits_without_replay) {
-        throw new Error(
-          "configured receive limits require a rebuilt bounded WASM package",
-        );
-      }
-      native = bounded.open_relay_metadata_with_keyrings_with_limits_without_replay(
+      native = bindings.open_relay_metadata_with_keyrings_with_limits_without_replay(
         frameBytes,
         recipient.keyrings,
         signerId,
@@ -1932,17 +1980,11 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
 
     let nativeContent: RawBindings.WasmVerifiedRelayContent;
     try {
-      const bounded = boundedBindings();
       const nativeExpectedFinalRecipientId =
         expectedFinalRecipientId == null
           ? null
           : BigInt(expectedFinalRecipientId);
-      if (!bounded.open_relay_content_with_keyrings_with_limits_without_replay) {
-        throw new Error(
-          "configured receive limits require a rebuilt bounded WASM package",
-        );
-      }
-      nativeContent = bounded.open_relay_content_with_keyrings_with_limits_without_replay(
+      nativeContent = bindings.open_relay_content_with_keyrings_with_limits_without_replay(
         state.native,
         recipient.keyrings,
         signerBundles,
@@ -2035,29 +2077,14 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
         : inputU64(options.expectedReceiverId, "expectedReceiverId");
     let signerId: bigint;
     try {
-      const bounded = boundedBindings();
-      if (bounded.protected_claimed_signer_id_with_limits) {
-        signerId = BigInt(
-          bounded.protected_claimed_signer_id_with_limits(
-            frameBytes,
-            recipient.keyrings,
-            options.encryptionPurpose,
-            receiveLimits ?? {},
-          ),
-        );
-      } else if (receiveLimitsExplicit) {
-        throw new Error(
-          "configured receive limits require a rebuilt bounded WASM package",
-        );
-      } else {
-        signerId = BigInt(
-          bindings.protected_claimed_signer_id(
-            frameBytes,
-            recipient.keyrings,
-            options.encryptionPurpose,
-          ),
-        );
-      }
+      signerId = BigInt(
+        bindings.protected_claimed_signer_id_with_limits(
+          frameBytes,
+          recipient.keyrings,
+          options.encryptionPurpose,
+          receiveLimits ?? {},
+        ),
+      );
     } catch (error) {
       throw protectedOpeningError(error);
     }
@@ -2069,15 +2096,9 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
 
     let native: RawBindings.WasmVerifiedProtectedMessage;
     try {
-      const bounded = boundedBindings();
       const nativeExpectedReceiverId =
         expectedReceiverId == null ? null : expectedReceiverId;
-      if (!bounded.open_protected_with_keyrings_with_limits_without_replay) {
-        throw new Error(
-          "configured receive limits require a rebuilt bounded WASM package",
-        );
-      }
-      native = bounded.open_protected_with_keyrings_with_limits_without_replay(
+      native = bindings.open_protected_with_keyrings_with_limits_without_replay(
         frameBytes,
         recipient.keyrings,
         signerId,
@@ -2143,7 +2164,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       message: MTPVerifiedProtectedMessage<T>,
       frame: ParsedFrame,
     ) => void | Promise<void>,
-    options: MTPOpenProtectedOptions,
+    options: MTPProtectedSubscriptionOptions,
   ): Unsubscribe {
     if (typeof type !== "string" || !type) {
       throw new TypeError(
@@ -2157,31 +2178,22 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     const replayGuard = options.replayGuard ?? new InMemoryReplayGuard();
     const subscriptionOptions = { ...options, replayGuard };
 
-    const sub = this.raw.client.subscribe(
+    return this.#subscribeBounded(
       applicationType,
       async (frame: ParsedFrame) => {
-        try {
-          const opened = await this.#openProtectedFrame(
-            frame,
-            subscriptionOptions,
-          );
-          if (opened.message.type !== applicationType) return;
-          await handler(
-            opened.message as MTPVerifiedProtectedMessage<T>,
-            opened.frame,
-          );
-        } catch (error) {
-          emit(this.#options.logger, {
-            hint: "error",
-            type: "E2EE",
-            error: String(error),
-            direction: "recv",
-          });
-        }
+        const opened = await this.#openProtectedFrame(
+          frame,
+          subscriptionOptions,
+        );
+        if (opened.message.type !== applicationType) return;
+        await handler(
+          opened.message as MTPVerifiedProtectedMessage<T>,
+          opened.frame,
+        );
       },
+      subscriptionOptions,
+      "E2EE",
     );
-
-    return () => this.raw.client.unsubscribe(sub);
   }
 
   async sendProtected(
@@ -2211,32 +2223,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     const builderLimits = { ...encodeLimits, ...protectedLimits };
     let frame: Uint8Array;
     try {
-      const bounded = (
-        bindings as typeof bindings & {
-          build_protected_frame_with_keyring_with_limits?: (
-            messageType: string,
-            encodedContent: Uint8Array,
-            signerId: bigint,
-            finalRecipientId: bigint,
-            messageId: bigint,
-            createdAt: bigint,
-            signaturePurpose: number,
-            encryptionPurpose: number,
-            keyring: Uint8Array,
-            signatureSuite: number,
-            frameId: number | null,
-            exposeSender: boolean,
-            recipients: Uint8Array[],
-            limits: MTPReceiveLimits & MTPEncodeLimits,
-          ) => Uint8Array;
-        }
-      ).build_protected_frame_with_keyring_with_limits;
-      if (!bounded) {
-        throw new Error(
-          "bounded WASM protected-message encoding is unavailable; rebuild mtp-wasm",
-        );
-      }
-      frame = bounded(
+      frame = bindings.build_protected_frame_with_keyring_with_limits(
         messageType,
         encodedContent,
         identity.signerId,
@@ -2288,23 +2275,10 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     if (!(data.encoded instanceof Uint8Array)) {
       throw new Error("sealed relay frame payload is not encrypted");
     }
-    const bounded = (
-      this.raw.bindings as typeof bindings & {
-        build_frame_with_payload_with_limits?: (
-          type: string,
-          payload: Uint8Array,
-          options: MTPCodecOptions,
-          limits: MTPEncodeLimits,
-        ) => Uint8Array;
-      }
-    ).build_frame_with_payload_with_limits;
-    if (!bounded) {
-      throw new Error("bounded WASM frame encoding is unavailable; rebuild mtp-wasm");
-    }
     const id = this.#nextSealedRelayRequestId;
     this.#nextSealedRelayRequestId =
       id === 0xffff_ffff ? 1 : id + 1;
-    return bounded(
+    return this.raw.bindings.build_frame_with_payload_with_limits(
       "Relay",
       data.encoded,
       {
@@ -2360,31 +2334,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     const builderLimits = { ...encodeLimits, ...protectedLimits };
     const messageId = createMessageId();
     const createdAt = unixTimeMillis();
-    const bounded = (
-      bindings as typeof bindings & {
-        build_encrypted_relay_frame_with_keyring_with_limits?: (
-          messageType: string,
-          data: MTPDataValueInput,
-          signerId: bigint,
-          finalRecipientId: bigint,
-          nextHopId: bigint,
-          messageId: bigint,
-          createdAt: bigint,
-          encodedMetadata: Uint8Array | undefined,
-          keyring: Uint8Array,
-          signatureSuite: number,
-          metadataRecipients: Uint8Array[],
-          contentRecipients: Uint8Array[],
-          limits: MTPReceiveLimits & MTPEncodeLimits,
-        ) => Uint8Array;
-      }
-    ).build_encrypted_relay_frame_with_keyring_with_limits;
-    if (!bounded) {
-      throw new Error(
-        "bounded WASM relay encoding is unavailable; rebuild mtp-wasm",
-      );
-    }
-    const frame = bounded(
+    const frame = bindings.build_encrypted_relay_frame_with_keyring_with_limits(
       messageType,
       data,
       identity.signerId,
@@ -2455,61 +2405,61 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
         : (maybeOptions ?? {});
     const replayGuard = options.replayGuard ?? new InMemoryReplayGuard();
     const subscriptionOptions = { ...options, replayGuard };
-    const sub = this.raw.client.subscribe(
-      "Relay",
-      async (frame: ParsedFrame) => {
-        let metadata: MTPVerifiedRelayMetadata | undefined;
-        try {
-          metadata = await this.openRelayMetadata(frame, subscriptionOptions);
-          const opened = await this.openRelayContent(
-            metadata,
-            subscriptionOptions,
-          );
-          if (
-            !opened ||
-            (expectedInnerType && opened.type !== expectedInnerType)
-          ) {
-            return;
-          }
-          emit(this.#options.logger, {
-            hint: "info",
-            type: opened.type,
-            data: opened.data,
-            direction: "recv",
-            relay: {
-              signerId: opened.signerId,
-              finalRecipientId: opened.finalRecipientId,
-              messageId: opened.messageId,
-              createdAt: opened.createdAt,
-            },
-          });
-          const parsedFrame: ParsedFrame = {
-            ...frame,
-            type: opened.type,
-            data: opened.data as ParsedFrame["data"],
-          };
-          await handler(opened, parsedFrame);
-        } catch (e) {
-          emit(this.#options.logger, {
-            hint: "error",
-            type: "E2EE",
-            error: String(e),
-            direction: "recv",
-          });
-        } finally {
-          metadata?.dispose();
-        }
-      },
-    );
-
-    this.#sealedRelayContentSubscriptions += 1;
     let active = true;
-    return () => {
-      if (!active) return;
-      active = false;
+    this.#sealedRelayContentSubscriptions += 1;
+    let unsubscribe: Unsubscribe;
+    try {
+      unsubscribe = this.#subscribeBounded(
+        "Relay",
+        async (frame: ParsedFrame) => {
+          let metadata: MTPVerifiedRelayMetadata | undefined;
+          try {
+            metadata = await this.openRelayMetadata(frame, subscriptionOptions);
+            const opened = await this.openRelayContent(
+              metadata,
+              subscriptionOptions,
+            );
+            if (
+              !opened ||
+              (expectedInnerType && opened.type !== expectedInnerType)
+            ) {
+              return;
+            }
+            emit(this.#options.logger, {
+              hint: "info",
+              type: opened.type,
+              data: opened.data,
+              direction: "recv",
+              relay: {
+                signerId: opened.signerId,
+                finalRecipientId: opened.finalRecipientId,
+                messageId: opened.messageId,
+                createdAt: opened.createdAt,
+              },
+            });
+            const parsedFrame: ParsedFrame = {
+              ...frame,
+              type: opened.type,
+              data: opened.data as ParsedFrame["data"],
+            };
+            await handler(opened, parsedFrame);
+          } finally {
+            metadata?.dispose();
+          }
+        },
+        subscriptionOptions,
+        "E2EE",
+        () => {
+          if (!active) return;
+          active = false;
+          this.#sealedRelayContentSubscriptions -= 1;
+        },
+      );
+    } catch (error) {
       this.#sealedRelayContentSubscriptions -= 1;
-      this.raw.client.unsubscribe(sub);
-    };
+      throw error;
+    }
+    return unsubscribe;
   }
 
   /**
@@ -2524,33 +2474,27 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       metadata: MTPVerifiedRelayMetadata,
       frame: ParsedFrame,
     ) => void | Promise<void>,
-    options: MTPOpenRelayMetadataOptions = {},
+    options: MTPRelayMetadataSubscriptionOptions = {},
   ): Unsubscribe {
     if (typeof handler !== "function") {
       throw new TypeError("relay metadata handler must be a function");
     }
     const replayGuard = options.replayGuard ?? new InMemoryReplayGuard();
     const subscriptionOptions = { ...options, replayGuard };
-    const sub = this.raw.client.subscribe(
+    return this.#subscribeBounded(
       "Relay",
       async (frame: ParsedFrame) => {
         let metadata: MTPVerifiedRelayMetadata | undefined;
         try {
           metadata = await this.openRelayMetadata(frame, subscriptionOptions);
           await handler(metadata, frame);
-        } catch (e) {
-          emit(this.#options.logger, {
-            hint: "error",
-            type: "E2EE",
-            error: String(e),
-            direction: "recv",
-          });
         } finally {
           metadata?.dispose();
         }
       },
+      subscriptionOptions,
+      "E2EE",
     );
-    return () => this.raw.client.unsubscribe(sub);
   }
 
   /** Explicit alias for callers that want to emphasize encrypted metadata. */
@@ -2559,7 +2503,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       metadata: MTPVerifiedRelayMetadata,
       frame: ParsedFrame,
     ) => void | Promise<void>,
-    options: MTPOpenRelayMetadataOptions = {},
+    options: MTPRelayMetadataSubscriptionOptions = {},
   ): Unsubscribe {
     return this.subscribeRelayMetadata(handler, options);
   }
@@ -2576,57 +2520,27 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     await this.encryptedSecretProvider.delete(id);
   }
 
+  #pipeContext() {
+    return {
+      raw: this.raw.client,
+      credentials: this.#credentials,
+      encryptedPipeSignatureSuite:
+        this.#options.securityProfile.encryptedPipeSignatureSuite,
+      encryptedPipeSignaturePolicy:
+        this.#options.securityProfile.encryptedPipeSignaturePolicy,
+      defaultSignatureVerificationPolicy:
+        this.#options.defaultSignatureVerificationPolicy,
+      report: (event: MTPLogEvent) => emit(this.#options.logger, event),
+      normalizeError: normalizeCommunicationError,
+    };
+  }
+
   setOnPipeRequest(handler: ((request: MTPPipeRequest) => void) | null): void {
-    if (handler == null) {
-      this.raw.client.set_on_pipe_request(null);
-      return;
-    }
-    this.raw.client.set_on_pipe_request(
-      (event: { pipeId: number; description: string }) => {
-        emit(this.#options.logger, {
-          hint: "info",
-          type: "PipeRequest",
-          data: event,
-          direction: "recv",
-        });
-        handler({ pipeId: event.pipeId, description: event.description });
-      },
-    );
+    setOnPipeRequestWithContext(this.#pipeContext(), handler);
   }
 
   async createPipe(description: string): Promise<MTPOutgoingPipeHandle> {
-    if (typeof description !== "string") {
-      throw new TypeError("description must be a string");
-    }
-    const handle: WasmPipeHandle =
-      await this.raw.client.create_pipe(description);
-    const sdk = this;
-    return {
-      pipeId: handle.pipeId,
-      description: handle.description,
-      async wait(): Promise<MTPPipeWriter | null> {
-        const result = await handle.wait();
-        if (result == null) {
-          return null;
-        }
-        emit(sdk.#options.logger, {
-          hint: "info",
-          type: "PipeCreated",
-          data: { pipeId: result.pipeId },
-          direction: "send",
-        });
-        return result as unknown as MTPPipeWriter;
-      },
-      async cancel(): Promise<void> {
-        await handle.cancel();
-        emit(sdk.#options.logger, {
-          hint: "info",
-          type: "PipeCancelled",
-          data: { pipeId: handle.pipeId },
-          direction: "send",
-        });
-      },
-    };
+    return createPipeWithContext(this.#pipeContext(), description);
   }
 
   /**
@@ -2638,75 +2552,11 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   async createEncryptedPipe(
     options: MTPCreateEncryptedPipeOptions,
   ): Promise<MTPEncryptedPipeWriter | null> {
-    const credentials = this.#credentials;
-    if (!credentials || credentials.clientId == null) {
-      throw new Error("Client not registered");
-    }
-    const recipientId = inputU64(options.recipientId, "recipientId");
-    if (
-      options.recipientPublicKey != null &&
-      options.recipientPublicKeys != null
-    ) {
-      throw new Error(
-        "provide recipientPublicKey or recipientPublicKeys, not both",
-      );
-    }
-    const rawRecipients =
-      options.recipientPublicKeys ??
-      (options.recipientPublicKey != null ? [options.recipientPublicKey] : []);
-    if (rawRecipients.length === 0) {
-      throw new Error("at least one recipient public key is required");
-    }
-    const recipients = rawRecipients.map((value, index) =>
-      normalizeBytes(value, `recipientPublicKeys[${index}]`),
-    );
-    recipients.forEach((value) => publicKeyBundleToKeys(value));
-    const purpose = options.purpose ?? 0x40;
-    const direction = options.direction ?? 0;
-    validateApplicationProtectionPurpose(purpose);
-    if (!Number.isInteger(direction) || direction < 0 || direction > 0xff) {
-      throw new RangeError("direction must be a u8");
-    }
-
-    const handle = await this.createPipe(
-      options.description ?? "encrypted pipe",
-    );
-    const writer = await handle.wait();
-    if (!writer) return null;
-    if (writer.pipeId !== handle.pipeId) {
-      throw new Error("created pipe ID does not match the accepted writer");
-    }
-    const sessionId = new Uint8Array(32);
-    globalThis.crypto.getRandomValues(sessionId);
-    return initiateMTPPipeSession(
-      writer,
-      {
-        sessionId,
-        pipeId: writer.pipeId,
-        senderId: credentials.clientId,
-        recipientId,
-        purpose,
-        direction,
-      },
-      credentials.keyring,
-      recipients,
-      options.signatureSuite ??
-        this.#options.securityProfile.encryptedPipeSignatureSuite,
-    );
+    return createEncryptedPipeWithContext(this.#pipeContext(), options);
   }
 
   async acceptPipe(pipeId: number): Promise<MTPPipeReader> {
-    if (typeof pipeId !== "number" || !Number.isFinite(pipeId)) {
-      throw new TypeError("pipeId must be a finite number");
-    }
-    const reader = await this.raw.client.accept_pipe(pipeId);
-    emit(this.#options.logger, {
-      hint: "info",
-      type: "PipeAccepted",
-      data: { pipeId: reader.pipeId, description: reader.description },
-      direction: "send",
-    });
-    return reader as unknown as MTPPipeReader;
+    return acceptPipeWithContext(this.#pipeContext(), pipeId);
   }
 
   /** Accept a pipe and learn its authenticated session ID from the offer. */
@@ -2714,71 +2564,11 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     request: MTPPipeRequest,
     options: MTPAcceptEncryptedPipeOptions,
   ): Promise<MTPEncryptedPipeReader> {
-    const credentials = this.#credentials;
-    if (!credentials || credentials.clientId == null) {
-      throw new Error("Client not registered");
-    }
-    if (!Number.isSafeInteger(request.pipeId) || request.pipeId <= 0) {
-      throw new TypeError("request.pipeId must be a non-zero safe integer");
-    }
-    const senderId = inputU64(options.senderId, "senderId");
-    const purpose = options.purpose ?? 0x40;
-    const direction = options.direction ?? 0;
-    validateApplicationProtectionPurpose(purpose);
-    if (!Number.isInteger(direction) || direction < 0 || direction > 0xff) {
-      throw new RangeError("direction must be a u8");
-    }
-    if (
-      options.senderPublicKeys != null &&
-      options.senderPublicKeys.length === 0
-    ) {
-      throw new Error("senderPublicKeys must contain at least one key");
-    }
-    const singleSenderPublicKey = options.senderPublicKey;
-    if (options.senderPublicKeys == null && singleSenderPublicKey == null) {
-      throw new Error("senderPublicKey or senderPublicKeys is required");
-    }
-    const senderPublicKey =
-      options.senderPublicKeys != null
-        ? options.senderPublicKeys.map((value, index) =>
-            normalizeBytes(value, `senderPublicKeys[${index}]`),
-          )
-        : normalizeBytes(singleSenderPublicKey!, "senderPublicKey");
-    const reader = await this.acceptPipe(request.pipeId);
-    if (reader.pipeId !== request.pipeId) {
-      throw new Error("accepted pipe ID does not match the requested pipe");
-    }
-    const signaturePolicy = resolveSignatureVerificationPolicy(
-      options.signaturePolicy,
-      this.#options.defaultSignatureVerificationPolicy ??
-        this.#options.securityProfile.encryptedPipeSignaturePolicy,
-    );
-    return acceptMTPPipeSessionAuto(
-      reader,
-      {
-        pipeId: reader.pipeId,
-        senderId,
-        recipientId: credentials.clientId,
-        purpose,
-        direction,
-      },
-      credentials.keyring,
-      senderPublicKey,
-      signaturePolicy,
-    );
+    return acceptEncryptedPipeWithContext(this.#pipeContext(), request, options);
   }
 
   async denyPipe(pipeId: number): Promise<void> {
-    if (typeof pipeId !== "number" || !Number.isFinite(pipeId)) {
-      throw new TypeError("pipeId must be a finite number");
-    }
-    await this.raw.client.deny_pipe(pipeId);
-    emit(this.#options.logger, {
-      hint: "info",
-      type: "PipeDenied",
-      data: { pipeId },
-      direction: "send",
-    });
+    return denyPipeWithContext(this.#pipeContext(), pipeId);
   }
 
   disconnect(): void {

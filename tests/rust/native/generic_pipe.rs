@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use mtp_codec::CommunicationValue;
-use mtp_common::{CommunicationError, PipeId};
+use mtp_common::{CommunicationError, PipeId, TransportPhase};
 use mtp_core::{
     GenericReceiver, GenericSender, Policy, SendMode, TransportConnection, TransportEvent,
     TransportRecvStream, TransportSendStream,
@@ -45,14 +45,18 @@ impl TransportSendStream for MockSendStream {
     async fn write_all(&mut self, buf: &[u8]) -> Result<(), CommunicationError> {
         AsyncWriteExt::write_all(&mut self.inner, buf)
             .await
-            .map_err(|_| CommunicationError::StreamError)
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::WriteFrame,
+            })
     }
 
     async fn finish(&mut self) -> Result<(), CommunicationError> {
         self.inner
             .shutdown()
             .await
-            .map_err(|_| CommunicationError::StreamError)
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::FinishStream,
+            })
     }
 
     fn reset(&mut self, _code: u32) -> Result<(), CommunicationError> {
@@ -80,7 +84,7 @@ impl TransportRecvStream for MockRecvStream {
         AsyncReadExt::read_exact(&mut self.inner, buf)
             .await
             .map(|_| ())
-            .map_err(|_| CommunicationError::StreamError)
+            .map_err(|_| CommunicationError::ClosedByPeer)
     }
 
     async fn read_chunk(&mut self, max: usize) -> Result<Option<Vec<u8>>, CommunicationError> {
@@ -91,7 +95,7 @@ impl TransportRecvStream for MockRecvStream {
                 buf.truncate(n);
                 Ok(Some(buf))
             }
-            Err(_) => Err(CommunicationError::StreamError),
+            Err(_) => Err(CommunicationError::ClosedByPeer),
         }
     }
 
@@ -142,10 +146,9 @@ impl TransportConnection for MockTransportConnection {
             gate.1.notified().await;
         }
         let (local, remote) = duplex(65536);
-        self.pair_tx
-            .send(remote)
-            .await
-            .map_err(|_| CommunicationError::StreamError)?;
+        self.pair_tx.send(remote).await.map_err(|_| {
+            CommunicationError::transport(TransportPhase::OpenStream, "mock stream open failed")
+        })?;
         Ok(MockSendStream { inner: local })
     }
 
@@ -156,7 +159,7 @@ impl TransportConnection for MockTransportConnection {
             .await
             .recv()
             .await
-            .ok_or(CommunicationError::StreamClosed)?;
+            .ok_or(CommunicationError::ClosedByPeer)?;
         Ok(MockRecvStream { inner: remote })
     }
 
@@ -232,7 +235,9 @@ async fn test_pipe_large_payload() -> Result<(), Box<dyn std::error::Error>> {
     let write_handle = tokio::spawn(async move {
         AsyncWriteExt::write_all(&mut pipe_writer, &data_clone)
             .await
-            .map_err(|_| CommunicationError::StreamError)?;
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::WriteFrame,
+            })?;
         pipe_writer.finish_async().await
     });
 

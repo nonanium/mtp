@@ -6,6 +6,7 @@ pub use mtp_native::Policy;
 pub enum ClientTlsConfig {
     SystemRoots,
     PinnedPem(Vec<u8>),
+    PinnedSpkiSha256([u8; 32]),
 }
 
 pub struct ClientConfig {
@@ -52,6 +53,10 @@ impl ClientConfig {
 
     pub fn with_pinned_pem(self, cert_pem: Vec<u8>) -> Self {
         self.with_tls(ClientTlsConfig::PinnedPem(cert_pem))
+    }
+
+    pub fn with_pinned_spki_sha256(self, hash: [u8; 32]) -> Self {
+        self.with_tls(ClientTlsConfig::PinnedSpkiSha256(hash))
     }
 
     pub fn with_client_id(mut self, client_id: u64) -> Self {
@@ -104,12 +109,5 @@ impl ClientConfig {
     pub fn with_require_pq(mut self, require_pq: bool) -> Self {
         self.require_pq = require_pq;
         self
-    }
-
-    pub(crate) fn server_cert(&self) -> Option<Vec<u8>> {
-        match &self.tls {
-            ClientTlsConfig::SystemRoots => None,
-            ClientTlsConfig::PinnedPem(cert) => Some(cert.clone()),
-        }
     }
 }

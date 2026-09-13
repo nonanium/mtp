@@ -363,6 +363,17 @@ export function build_frame_with_payload(message_type: string, serialized_payloa
 export function build_frame_with_payload_with_limits(message_type: string, serialized_payload: Uint8Array, options: any, limits: any): Uint8Array;
 
 /**
+ * Merge the clear payload of `source` into `destination` using MTP's shallow,
+ * left-biased payload merge rules.
+ */
+export function merge_frame_payload_from(destination: Uint8Array, source: Uint8Array): Uint8Array;
+
+export function merge_frame_payload_from_detailed(destination: Uint8Array, source: Uint8Array, options: any): any;
+export function merge_frame_payload_from_detailed_with_limits(destination: Uint8Array, source: Uint8Array, options: any, decode_limits: any, encode_limits: any): any;
+export function merge_data_value_containers(destination: Uint8Array, source: Uint8Array): Uint8Array;
+export function merge_data_value_containers_detailed_with_limits(destination: Uint8Array, source: Uint8Array, options: any, decode_limits: any, encode_limits: any): any;
+
+/**
  * Build a protocol-level Ping frame with description, timestamp, and optional data.
  */
 export function build_ping_frame(client_id: bigint, description: string, timestamp: bigint, data: Uint8Array): Uint8Array;
@@ -722,6 +733,11 @@ export interface InitOutput {
     readonly build_frame_with_limits: (a: number, b: number, c: any, d: any, e: any) => [number, number, number, number];
     readonly build_frame_with_payload: (a: number, b: number, c: number, d: number, e: any) => [number, number, number, number];
     readonly build_frame_with_payload_with_limits: (a: number, b: number, c: number, d: number, e: any, f: any) => [number, number, number, number];
+    readonly merge_frame_payload_from: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly merge_frame_payload_from_detailed: (a: number, b: number, c: number, d: number, e: any) => [number, number, number];
+    readonly merge_frame_payload_from_detailed_with_limits: (a: number, b: number, c: number, d: number, e: any, f: any, g: any) => [number, number, number];
+    readonly merge_data_value_containers: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly merge_data_value_containers_detailed_with_limits: (a: number, b: number, c: number, d: number, e: any, f: any, g: any) => [number, number, number];
     readonly build_ping_frame: (a: bigint, b: number, c: number, d: bigint, e: number, f: number) => [number, number, number, number];
     readonly encode_data_value: (a: any) => [number, number, number, number];
     readonly encode_data_value_with_limits: (a: any, b: any) => [number, number, number, number];

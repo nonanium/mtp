@@ -4,6 +4,10 @@ import type {
   MTPOpenRelayMetadataOptions,
   MTPOpenRelayContentOptions,
   MTPClient,
+  MTPMergeOptions,
+  MTPMergePath,
+  MTPMergeReport,
+  MTPMergeResult,
   MTPRelayTarget,
   MTPSendProtectedOptions,
   MTPSendSealedRelayOptions,
@@ -91,6 +95,20 @@ void relayOptions;
 void metadataValues;
 void relayReceiveOptions;
 void contentReceiveOptions;
+
+const mergePath: MTPMergePath = [1, 2];
+const mergeReport: MTPMergeReport = {
+  inserted: [mergePath],
+  preserved: [],
+  replaced: [],
+  matched: [],
+  recursed: [[1]],
+};
+const mergeOptions: MTPMergeOptions = { recursiveContainers: true };
+declare const mergeResult: MTPMergeResult;
+void mergeReport;
+void mergeOptions;
+void mergeResult;
 void clientOptions;
 void relayTarget;
 void legacyRelayTarget;

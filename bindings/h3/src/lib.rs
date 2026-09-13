@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use mtp_common::CommunicationError;
+use mtp_common::{CommunicationError, TransportPhase};
 use mtp_core::{TransportConnection, TransportRecvStream, TransportSendStream};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,6 +26,19 @@ pub struct H3TransportReceiver {
     read_exact_calls: u64,
 }
 
+fn connection_error(error: quinn::ConnectionError) -> CommunicationError {
+    match error {
+        quinn::ConnectionError::ConnectionClosed(_)
+        | quinn::ConnectionError::ApplicationClosed(_) => CommunicationError::ClosedByPeer,
+        quinn::ConnectionError::LocallyClosed => CommunicationError::ClosedLocally,
+        quinn::ConnectionError::VersionMismatch
+        | quinn::ConnectionError::TransportError(_)
+        | quinn::ConnectionError::Reset
+        | quinn::ConnectionError::TimedOut
+        | quinn::ConnectionError::CidsExhausted => CommunicationError::ConnectionLost,
+    }
+}
+
 impl H3TransportConnection {
     pub fn new(session: Arc<Session>, quinn: quinn::Connection) -> Self {
         Self { session, quinn }
@@ -47,21 +60,27 @@ impl TransportSendStream for H3TransportSender {
         self.stream
             .write_all(buf)
             .await
-            .map_err(|_| CommunicationError::DeliveryUnknown)?;
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::WriteFrame,
+            })?;
         // Control/authentication frames use a persistent stream. h3 keeps
         // those writes buffered until flushed; without this the peer can wait
         // for the challenge while the server waits for its proof.
         self.stream
             .flush()
             .await
-            .map_err(|_| CommunicationError::DeliveryUnknown)
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::WriteFrame,
+            })
     }
 
     async fn finish(&mut self) -> Result<(), CommunicationError> {
         self.stream
             .shutdown()
             .await
-            .map_err(|_| CommunicationError::StreamError)
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::FinishStream,
+            })
     }
 
     fn reset(&mut self, code: u32) -> Result<(), CommunicationError> {
@@ -97,7 +116,11 @@ impl TransportRecvStream for H3TransportReceiver {
                      * is a normal stream-closure path. Do not turn it into a
                      * frame-header failure and close the connection again.
                      */
-                    return CommunicationError::StreamClosed;
+                    return if let Some(error) = self.quinn.close_reason() {
+                        connection_error(error)
+                    } else {
+                        CommunicationError::ClosedByPeer
+                    };
                 }
                 error!(
                     "[mtp-webserver] receive stream read_exact failed ({} bytes): {error}",
@@ -110,7 +133,7 @@ impl TransportRecvStream for H3TransportReceiver {
                     %error,
                     "WebTransport receive stream read_exact failed"
                 );
-                CommunicationError::StreamError
+                CommunicationError::transport(TransportPhase::ReadFrame, error.to_string())
             })
     }
 
@@ -124,14 +147,19 @@ impl TransportRecvStream for H3TransportReceiver {
             }
             Err(error) => {
                 if self.quinn.close_reason().is_some() {
-                    return Err(CommunicationError::StreamClosed);
+                    return Err(connection_error(
+                        self.quinn.close_reason().expect("checked above"),
+                    ));
                 }
                 error!(
                     "[mtp-webserver] receive stream read failed (max {} bytes): {error}",
                     max
                 );
                 tracing::warn!(max, %error, "WebTransport receive stream read failed");
-                Err(CommunicationError::StreamError)
+                Err(CommunicationError::transport(
+                    TransportPhase::ReadFrame,
+                    error.to_string(),
+                ))
             }
         }
     }
@@ -186,7 +214,9 @@ impl TransportConnection for H3TransportConnection {
             .open_uni(self.session.session_id())
             .await
             .map(|stream| H3TransportSender { stream })
-            .map_err(|_| CommunicationError::StreamError)
+            .map_err(|error| {
+                CommunicationError::transport(TransportPhase::OpenStream, error.to_string())
+            })
     }
 
     async fn accept_uni(&self) -> Result<Self::RecvStream, CommunicationError> {
@@ -220,7 +250,7 @@ impl TransportConnection for H3TransportConnection {
                     );
                     continue;
                 }
-                Ok(None) => return Err(CommunicationError::StreamClosed),
+                Ok(None) => return Err(CommunicationError::ClosedByPeer),
                 Err(error) => {
                     // A browser can reset an individual pipe stream while it
                     // is stopping MediaRecorder. h3-webtransport reports that
@@ -228,7 +258,9 @@ impl TransportConnection for H3TransportConnection {
                     // still healthy. Do not turn that stream-local failure
                     // into a connection-wide MTP failure.
                     if self.quinn.close_reason().is_some() {
-                        return Err(CommunicationError::StreamClosed);
+                        return Err(connection_error(
+                            self.quinn.close_reason().expect("checked above"),
+                        ));
                     }
 
                     consecutive_errors += 1;
@@ -238,7 +270,10 @@ impl TransportConnection for H3TransportConnection {
                             consecutive_errors,
                             "WebTransport receive-stream accept repeatedly failed"
                         );
-                        return Err(CommunicationError::StreamError);
+                        return Err(CommunicationError::transport(
+                            TransportPhase::ReadFrame,
+                            error.to_string(),
+                        ));
                     }
 
                     let multiplier = 1_u32 << consecutive_errors.saturating_sub(1).min(5);
@@ -256,9 +291,7 @@ impl TransportConnection for H3TransportConnection {
     }
 
     fn close_reason(&self) -> Option<CommunicationError> {
-        self.quinn
-            .close_reason()
-            .map(|_| CommunicationError::StreamClosed)
+        self.quinn.close_reason().map(connection_error)
     }
 
     fn close(&self, code: u32, reason: &[u8]) {

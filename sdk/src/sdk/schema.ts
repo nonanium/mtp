@@ -1,4 +1,6 @@
 import type { MTPRequestOptions, ParsedFrame, Unsubscribe } from "./client.js";
+import { SubscriptionDispatcher } from "./subscription.js";
+import type { MTPSubscriptionOptions } from "./subscription.js";
 import type { MTPCommunicationType } from "../type-map/index.js";
 
 export interface MTPSchema<Input = unknown, Output = Input> {
@@ -57,6 +59,7 @@ export type MTPSubscriptionFunction<Registry extends MTPSchemaRegistry> = <
 >(
   type: Type,
   handler: (message: MTPResponseFrame<Registry, Type>) => void | Promise<void>,
+  options?: MTPSubscriptionOptions,
 ) => Unsubscribe;
 
 export class MTPValidationError extends Error {
@@ -214,21 +217,49 @@ export class MTPProxyConnection<Registry extends MTPSchemaRegistry> {
     handler: (
       message: MTPResponseFrame<Registry, Type>,
     ) => void | Promise<void>,
+    options: MTPSubscriptionOptions = {},
   ): Unsubscribe {
-    let active = true;
-    const unsubscribe = this.#adapter.subscribe(type, (message) => {
-      void this.#protocol.parseResponse(type, message, "subscription").then(
-        (parsed) => {
-          if (active) void handler(parsed);
-        },
-        (error) => {
-          this.#protocol.reportValidationError(error);
-        },
-      );
-    });
-    return () => {
-      active = false;
-      unsubscribe();
+    let closed = false;
+    let unsubscribe: Unsubscribe | undefined;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      dispatcher.close();
+      unsubscribe?.();
     };
+    const dispatcher = new SubscriptionDispatcher<MTPFrame>({
+      handler: async (message) => {
+        let parsed: MTPResponseFrame<Registry, Type>;
+        try {
+          parsed = await this.#protocol.parseResponse(type, message, "subscription");
+        } catch (error) {
+          this.#protocol.reportValidationError(error);
+          return;
+        }
+        await handler(parsed);
+      },
+      concurrency: options.concurrency,
+      queueCapacity: options.queueCapacity,
+      reportError: (error, frame) => {
+        try {
+          options.onError?.(error, {
+            ...frame,
+            // Adapter frames may omit their original bytes. Subscription
+            // errors still expose the public ParsedFrame shape consistently.
+            raw: frame.raw ?? new Uint8Array(),
+          });
+        } catch {
+          // Application error observers must not affect dispatch.
+        }
+      },
+      onOverflow: close,
+    });
+    unsubscribe = this.#adapter.subscribe(type, (message) =>
+      dispatcher.enqueue(message, {
+        ...message,
+        raw: message.raw ?? new Uint8Array(),
+      }),
+    );
+    return close;
   }
 }

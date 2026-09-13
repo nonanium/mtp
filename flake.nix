@@ -39,11 +39,18 @@
           targets = [ "wasm32-unknown-unknown" ];
         };
 
+        # Cargo build scripts are native executables.  Keeping their artifacts
+        # separate from builds made with another Nix toolchain prevents Cargo
+        # from trying to execute a script whose dynamic linker was garbage
+        # collected after a nixpkgs update.
+        cargoTargetDir = ".cargo-target/${builtins.baseNameOf (toString rustToolchain)}-${builtins.baseNameOf (toString pkgs.stdenv.cc)}";
+
         clippyCheck = pkgs.writeShellApplication {
           name = "mtp-clippy";
           runtimeInputs = [ rustToolchain ];
           text = ''
             export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/tests/fixtures/example/type-maps.yaml}"
+            export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$PWD/${cargoTargetDir}}"
             cargo clippy --workspace --exclude mtp-wasm --exclude client --exclude server --exclude keygen --all-targets --all-features -- -D warnings -W unreachable-pub
           '';
         };
@@ -64,15 +71,19 @@
             pkgs.wasm-pack
             pkgs.pnpm
             pkgs.coreutils
+            pkgs.stdenv.cc
+            pkgs.pkg-config
+            pkgs.openssl
             clippyCheck
             macheteCheck
           ];
           text = ''
             export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/tests/fixtures/example/type-maps.yaml}"
+            export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$PWD/${cargoTargetDir}}"
 
             timeout 60s pnpm install --frozen-lockfile
             cargo fmt --all --check
-            cargo b
+            cargo build
             cargo test --workspace --exclude mtp-wasm --all-features
             cargo check -p client -p server -p keygen --all-targets --all-features
             mtp-clippy
@@ -121,6 +132,7 @@
 
             shellHook = ''
               repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+              export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$repo_root/${cargoTargetDir}}"
               cert_dir="$repo_root/tests/fixtures/example/dev-cert"
               public_dir="$repo_root/tests/fixtures/example/web-client/public"
               cert_key="$cert_dir/key.pem"

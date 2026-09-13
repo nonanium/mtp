@@ -19,6 +19,10 @@ pub(crate) struct DriverConfig {
     pub(crate) host_config: Arc<HostConfig>,
     pub(crate) metrics: Option<Arc<dyn WebServerMetrics>>,
     pub(crate) auth_semaphore: Arc<Semaphore>,
+    pub(crate) max_concurrent_requests_per_connection: usize,
+    pub(crate) max_concurrent_webtransport_requests_per_session: usize,
+    pub(crate) max_webtransport_sessions: usize,
+    pub(crate) request_semaphore: Option<Arc<Semaphore>>,
 }
 
 pub(crate) async fn run_driver(
@@ -39,6 +43,10 @@ pub(crate) async fn run_driver(
         host_config,
         metrics,
         auth_semaphore,
+        max_concurrent_requests_per_connection,
+        max_concurrent_webtransport_requests_per_session,
+        max_webtransport_sessions,
+        request_semaphore,
     } = config;
     let mut connection_tasks = tokio::task::JoinSet::new();
     loop {
@@ -46,6 +54,11 @@ pub(crate) async fn run_driver(
             biased;
             _ = shutdown_rx.changed() => {
                 break;
+            }
+            result = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+                if let Some(Err(error)) = result {
+                    tracing::warn!(%error, "HTTP/3 connection task panicked");
+                }
             }
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else {
@@ -66,6 +79,7 @@ pub(crate) async fn run_driver(
                 let metrics = metrics.clone();
                 let host_config = host_config.clone();
                 let auth_semaphore = auth_semaphore.clone();
+                let request_semaphore = request_semaphore.clone();
                 connection_tasks.spawn(async move {
                     // The permit normally lives for this HTTP/3 connection.
                     // For an MTP session it is moved into the resulting
@@ -83,7 +97,7 @@ pub(crate) async fn run_driver(
                     builder.enable_extended_connect(true);
                     builder.enable_webtransport(true);
                     builder.enable_datagram(true);
-                    builder.max_webtransport_sessions(16);
+                    builder.max_webtransport_sessions(max_webtransport_sessions as u64);
                     let mut h3 = match builder
                         .build(h3_quinn::Connection::new(connection.clone()))
                         .await
@@ -101,7 +115,13 @@ pub(crate) async fn run_driver(
                     let remote_addr = connection.remote_address();
 
                     let mut tasks = tokio::task::JoinSet::new();
+                    let request_permits = Arc::new(Semaphore::new(max_concurrent_requests_per_connection));
                     loop {
+                        while let Some(result) = tasks.try_join_next() {
+                            if let Err(error) = result {
+                                tracing::warn!(%error, "HTTP/3 request task panicked");
+                            }
+                        }
                         let resolver = match h3.accept().await {
                             Ok(Some(resolver)) => resolver,
                             Ok(None) => break,
@@ -148,13 +168,15 @@ pub(crate) async fn run_driver(
                                 session_id = ?session.session_id(),
                                 "accepted WebTransport MTP session"
                             );
-                            tokio::spawn(run_session_requests(
+                            let session_task = tokio::spawn(run_session_requests(
                                 session.clone(),
                                 router.clone(),
                                 max_request_body,
                                 request_timeout,
                                 metrics.clone(),
                                 remote_addr,
+                                Arc::new(Semaphore::new(max_concurrent_webtransport_requests_per_session)),
+                                request_semaphore.clone(),
                             ));
                             let mtp_tx = mtp_tx.clone();
                             let mtp_queue_permit = match mtp_tx.clone().try_reserve_owned() {
@@ -167,6 +189,7 @@ pub(crate) async fn run_driver(
                                         quinn::VarInt::from_u32(0),
                                         b"mtp application queue is full",
                                     );
+                                    session_task.abort();
                                     return;
                                 }
                             };
@@ -175,8 +198,7 @@ pub(crate) async fn run_driver(
                             let connection_guard = connection_permit.take();
                             let connection = connection.clone();
                             let close_connection = connection.clone();
-                            tokio::spawn(async move {
-                                let result = accept_web_connection(
+                            let result = accept_web_connection(
                                     session,
                                     mtp_path,
                                     connection,
@@ -185,19 +207,34 @@ pub(crate) async fn run_driver(
                                     host_config,
                                     auth_semaphore,
                                     connection_guard,
+                                    session_task,
                                 )
                                 .await;
-                                if result.is_err() {
-                                    close_connection
-                                        .close(quinn::VarInt::from_u32(0), b"mtp handshake failed");
-                                }
-                                mtp_queue_permit.send(result);
-                            });
+                            if result.is_err() {
+                                close_connection.close(quinn::VarInt::from_u32(0), b"mtp handshake failed");
+                            }
+                            mtp_queue_permit.send(result);
                             return;
                         }
+                        let request_permit = match request_permits.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                let _ = write_response(&mut stream, HttpResponse::new(StatusCode::TOO_MANY_REQUESTS)).await;
+                                continue;
+                            }
+                        };
+                        let global_request_permit = match request_semaphore.as_ref().map(|semaphore| semaphore.clone().try_acquire_owned()).transpose() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                let _ = write_response(&mut stream, HttpResponse::new(StatusCode::TOO_MANY_REQUESTS)).await;
+                                continue;
+                            }
+                        };
                         let router = router.clone();
                         let metrics = metrics.clone();
                         tasks.spawn(async move {
+                            let _request_permit = request_permit;
+                            let _global_request_permit = global_request_permit;
                             let path = request.uri().path().to_string();
                             let response = crate::http::run_request(
                                 &path,
@@ -265,6 +302,7 @@ where
     Ok(crate::http::dispatch_request(request, router).await)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session_requests(
     session: Arc<h3_webtransport::server::WebTransportSession<h3_quinn::Connection, Bytes>>,
     router: Router,
@@ -272,13 +310,49 @@ async fn run_session_requests(
     request_timeout: Duration,
     metrics: Option<Arc<dyn WebServerMetrics>>,
     remote_addr: SocketAddr,
+    request_permits: Arc<Semaphore>,
+    global_request_permits: Option<Arc<Semaphore>>,
 ) {
+    let mut tasks = tokio::task::JoinSet::new();
     loop {
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result {
+                tracing::warn!(%error, "WebTransport request task panicked");
+            }
+        }
         match session.accept_bi().await {
             Ok(Some(h3_webtransport::server::AcceptedBi::Request(request, mut stream))) => {
+                let request_permit = match request_permits.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let _ = write_response(
+                            &mut stream,
+                            HttpResponse::new(StatusCode::TOO_MANY_REQUESTS),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let global_request_permit = match global_request_permits
+                    .as_ref()
+                    .map(|semaphore| semaphore.clone().try_acquire_owned())
+                    .transpose()
+                {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let _ = write_response(
+                            &mut stream,
+                            HttpResponse::new(StatusCode::TOO_MANY_REQUESTS),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
                 let router = router.clone();
                 let metrics = metrics.clone();
-                tokio::spawn(async move {
+                tasks.spawn(async move {
+                    let _request_permit = request_permit;
+                    let _global_request_permit = global_request_permit;
                     let path = request.uri().path().to_string();
                     let response = crate::http::run_request(
                         &path,
@@ -306,6 +380,7 @@ async fn run_session_requests(
             Ok(None) | Err(_) => break,
         }
     }
+    tasks.shutdown().await;
 }
 
 async fn read_request<S>(

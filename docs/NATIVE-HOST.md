@@ -74,6 +74,13 @@ while let Some(conn) = host.accept().await? {
 }
 ```
 
+### Shutdown and Pending Connections
+
+The transport host stops new admission during shutdown. Connections already
+waiting for application handoff are closed and discarded; connections already
+returned by `accept()` remain application-owned and are not terminated by host
+shutdown.
+
 ### MTPConnection
 
 `accept()` returns the shared connection shape in [MTP Connections](CONNECTIONS.md)

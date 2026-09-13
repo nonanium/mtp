@@ -2,7 +2,6 @@ mod adapter;
 pub mod client;
 pub mod connection;
 pub mod connection_handle;
-mod framing;
 pub mod pinning;
 
 #[cfg(feature = "pipes")]

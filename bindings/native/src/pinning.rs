@@ -1,6 +1,9 @@
 use rustls::{
     ClientConfig as RustlsClientConfig, DigitallySignedStruct, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::{
+        CryptoProvider, WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
+    },
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use sha2::{Digest, Sha256};
@@ -17,11 +20,19 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct PinnedCertVerifier {
     expected_hash: [u8; 32],
+    algorithms: WebPkiSupportedAlgorithms,
 }
 
 impl PinnedCertVerifier {
-    pub fn new(expected_hash: [u8; 32]) -> Self {
-        Self { expected_hash }
+    pub fn new(expected_hash: [u8; 32]) -> Result<Self, rustls::Error> {
+        let provider = CryptoProvider::get_default().ok_or_else(|| {
+            rustls::Error::General("rustls crypto provider is not installed".into())
+        })?;
+
+        Ok(Self {
+            expected_hash,
+            algorithms: provider.signature_verification_algorithms,
+        })
     }
 }
 
@@ -36,11 +47,9 @@ impl ServerCertVerifier for PinnedCertVerifier {
     ) -> Result<ServerCertVerified, rustls::Error> {
         let der = end_entity.as_ref();
 
-        let spki = extract_spki(der).map_err(|_| {
-            rustls::Error::General("failed to extract SPKI from certificate".into())
-        })?;
+        let spki = extract_spki_der(der)?;
 
-        let computed = Sha256::digest(&spki);
+        let computed = Sha256::digest(spki);
 
         if computed.as_slice() != self.expected_hash.as_slice() {
             return Err(rustls::Error::General(format!(
@@ -54,100 +63,40 @@ impl ServerCertVerifier for PinnedCertVerifier {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_tls12_signature(message, cert, dss, &self.algorithms)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_tls13_signature(message, cert, dss, &self.algorithms)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::ED25519,
-        ]
+        self.algorithms.supported_schemes()
     }
 }
 
-/// Extract the Subject Public Key Info (SPKI) field from a DER-encoded X.509
-/// certificate. Returns the raw bytes of the SPKI sequence.
-fn extract_spki(der: &[u8]) -> Result<Vec<u8>, ()> {
-    let (_, outer) = parse_der_sequence(der).map_err(|_| ())?;
+/// Extract the complete DER-encoded SubjectPublicKeyInfo sequence from an
+/// X.509 certificate. The sequence tag and length are part of an SPKI pin.
+fn extract_spki_der(der: &[u8]) -> Result<&[u8], rustls::Error> {
+    let (remaining, cert) = x509_parser::parse_x509_certificate(der)
+        .map_err(|_| rustls::Error::General("failed to parse X.509 certificate".into()))?;
 
-    let (_, tbs) = parse_der_sequence(outer).map_err(|_| ())?;
-
-    // Skip version (context [0]), serial number, signature algorithm, issuer,
-    // validity, subject to reach subjectPublicKeyInfo (index 6).
-    let mut offset = 0;
-    let mut element_index = 0;
-
-    while offset < tbs.len() && element_index < 6 {
-        let (len, _) = parse_der_element(&tbs[offset..]).map_err(|_| ())?;
-        offset += len;
-        element_index += 1;
+    if !remaining.is_empty() {
+        return Err(rustls::Error::General(
+            "trailing data after X.509 certificate".into(),
+        ));
     }
 
-    if element_index != 6 {
-        return Err(());
-    }
-
-    let (spki_len, spki) = parse_der_element(&tbs[offset..]).map_err(|_| ())?;
-    if spki_len == 0 {
-        return Err(());
-    }
-
-    Ok(spki.to_vec())
-}
-
-fn parse_der_element(data: &[u8]) -> Result<(usize, &[u8]), ()> {
-    if data.len() < 2 {
-        return Err(());
-    }
-
-    let mut offset = 1;
-
-    let len_byte = data[offset];
-    offset += 1;
-
-    let content_len = if len_byte & 0x80 == 0 {
-        len_byte as usize
-    } else {
-        let num_bytes = (len_byte & 0x7F) as usize;
-        if offset + num_bytes > data.len() {
-            return Err(());
-        }
-        let mut len = 0usize;
-        for i in 0..num_bytes {
-            len = (len << 8) | data[offset + i] as usize;
-        }
-        offset += num_bytes;
-        len
-    };
-
-    if offset + content_len > data.len() {
-        return Err(());
-    }
-
-    let total_len = offset + content_len;
-    Ok((total_len, &data[offset..offset + content_len]))
-}
-
-fn parse_der_sequence(data: &[u8]) -> Result<(usize, &[u8]), ()> {
-    if data.is_empty() || data[0] != 0x30 {
-        return Err(());
-    }
-    parse_der_element(data)
+    Ok(cert.tbs_certificate.subject_pki.raw)
 }
 
 /// Build a [`WTransportClientConfig`] that verifies the server certificate
@@ -156,7 +105,10 @@ pub fn configure_client_pinned_hash(
     expected_hash: [u8; 32],
     policy: &Policy,
 ) -> Result<WTransportClientConfig, CommunicationError> {
-    let verifier = PinnedCertVerifier::new(expected_hash);
+    mtp_crypto::ensure_crypto_provider();
+    let verifier = PinnedCertVerifier::new(expected_hash).map_err(|e| {
+        CommunicationError::Other(format!("failed to configure certificate pinning: {e}"))
+    })?;
 
     let mut tls_config = RustlsClientConfig::builder()
         .dangerous()

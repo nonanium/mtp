@@ -1,6 +1,5 @@
-use crate::{Policy, TransportSendStream};
 use mtp_codec::{CommunicationValue, DecodeError, EncodeLimits};
-use mtp_common::CommunicationError;
+use mtp_common::{CommunicationError, CommunicationErrorCode, TransportPhase};
 
 pub(crate) struct RetryClassifier;
 
@@ -8,15 +7,6 @@ impl RetryClassifier {
     pub(crate) fn retry_persistent_stream(error: &CommunicationError) -> bool {
         classify_retry(error) == RetryDisposition::SafeToRetry
     }
-}
-
-pub(crate) async fn write_frame<S: TransportSendStream>(
-    stream: &mut S,
-    value: &CommunicationValue,
-    policy: &Policy,
-) -> Result<(), CommunicationError> {
-    let bytes = encode_frame(value, policy.max_message_size, policy.close_frame_len)?;
-    stream.write_all(&bytes).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,11 +36,16 @@ pub enum RetryDisposition {
 }
 
 pub fn classify_retry(error: &CommunicationError) -> RetryDisposition {
-    match error {
-        CommunicationError::StreamError | CommunicationError::StreamClosed => {
-            RetryDisposition::SafeToRetry
-        }
-        CommunicationError::DeliveryUnknown => RetryDisposition::DeliveryUnknown,
+    match (error.code(), error.phase()) {
+        (CommunicationErrorCode::DeliveryUnknown, _) => RetryDisposition::DeliveryUnknown,
+        (
+            CommunicationErrorCode::Timeout,
+            Some(TransportPhase::Connect | TransportPhase::Handshake | TransportPhase::OpenStream),
+        )
+        | (
+            CommunicationErrorCode::Transport,
+            Some(TransportPhase::Connect | TransportPhase::Handshake | TransportPhase::OpenStream),
+        ) => RetryDisposition::SafeToRetry,
         _ => RetryDisposition::Permanent,
     }
 }
@@ -76,7 +71,7 @@ pub fn decode_frame_length(
 ) -> Result<usize, CommunicationError> {
     let body_len = u32::from_be_bytes(prefix);
     if body_len == close_frame_len {
-        return Err(CommunicationError::StreamClosed);
+        return Err(CommunicationError::ClosedByPeer);
     }
     let frame_len = body_len as u64 + 4;
     if frame_len > max_message_size {

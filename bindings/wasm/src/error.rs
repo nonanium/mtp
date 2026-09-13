@@ -9,7 +9,20 @@ pub fn from_codec_error(e: mtp_common::CodecError) -> JsValue {
 }
 
 pub fn from_communication_error(e: mtp_common::CommunicationError) -> JsValue {
-    js_error(e.to_string())
+    let error = js_sys::Error::new(&e.to_string());
+    let _ = js_sys::Reflect::set(
+        error.as_ref(),
+        &JsValue::from_str("code"),
+        &JsValue::from_str(e.code().as_str()),
+    );
+    if let Some(phase) = e.phase() {
+        let _ = js_sys::Reflect::set(
+            error.as_ref(),
+            &JsValue::from_str("phase"),
+            &JsValue::from_str(phase.as_str()),
+        );
+    }
+    error.into()
 }
 
 pub fn from_crypto_error(e: mtp_crypto::CryptoError) -> JsValue {

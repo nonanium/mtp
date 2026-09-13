@@ -5,15 +5,18 @@ pub mod protected;
 #[cfg(feature = "crypto")]
 pub mod relay;
 
-pub use communication_value::CommunicationValue;
+pub use communication_value::{CommunicationValue, MergeError};
 #[cfg(feature = "crypto")]
 pub use data_value::{
     ApplicationProtectionPurpose, EncryptedValue, MtpProtectionPurpose, ProtectionError,
     ProtectionPolicy, ProtectionPurpose, ProtectionPurposeError, SignaturePolicy, SignedValue,
 };
 pub use data_value::{
-    DEFAULT_TRANSPORT_ALLOCATION_FACTOR, DataKind, DataValue, DecodeError, DecodeLimits,
-    EncodeLimits,
+    ContainerMergeError, DEFAULT_TRANSPORT_ALLOCATION_FACTOR, DataKind, DataValue, DecodeError,
+    DecodeLimits, EncodeLimits, MergeConflictPolicy, MergeOptions, MergePath, MergeReport,
+    merge_container_from_with, merge_container_from_with_limits, merge_container_left_biased,
+    merge_containers_owned, merge_containers_owned_with_limits, validate_container,
+    validate_container_entries, validate_container_with_limits,
 };
 pub use mtp_common::{CodecError, TimeError, unix_time_millis};
 #[cfg(feature = "crypto")]

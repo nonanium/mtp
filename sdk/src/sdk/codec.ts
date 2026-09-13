@@ -21,15 +21,8 @@ import type {
   ParsedFrame,
 } from "./client.js";
 
-const checkedKeyringGenerator = (
-  bindings as typeof bindings & {
-    keyring_generate_checked?: () => Uint8Array;
-  }
-).keyring_generate_checked;
-
 export const crypto: MTPCrypto = {
-  generateKeyring: () =>
-    checkedKeyringGenerator?.() ?? bindings.keyring_generate(),
+  generateKeyring: () => bindings.keyring_generate_checked(),
   generateEd25519: () => bindings.ed25519_generate(),
   keyringFromEd25519: (secretKey, publicKey) =>
     bindings.keyring_from_ed25519(secretKey, publicKey),
@@ -106,20 +99,7 @@ export function encode(
   };
   const maxOutputSize = limits.maxOutputSize ?? 16 * 1024 * 1024;
   validateMTPDataValue(data as MTPDataValueInput, limits);
-  const bounded = (
-    bindings as typeof bindings & {
-      build_frame_with_limits?: (
-        type: string,
-        data: Record<string, unknown>,
-        options: MTPCodecOptions,
-        limits: MTPEncodeLimits,
-      ) => Uint8Array;
-    }
-  ).build_frame_with_limits;
-  if (!bounded) {
-    throw new Error("bounded WASM frame encoding is unavailable; rebuild mtp-wasm");
-  }
-  const frame = bounded(type, data, options ?? {}, limits);
+  const frame = bindings.build_frame_with_limits(type, data, options ?? {}, limits);
   if (frame.length > maxOutputSize) {
     throw new RangeError("MTP frame encoded output limit exceeded");
   }
@@ -130,44 +110,91 @@ export function decode(frame: MTPBytesInput): ParsedFrame {
   return bindings.parse_frame(bytesFrom(frame, "frame"));
 }
 
+export interface MTPMergeOptions {
+  conflicts?: "keep-left" | "keep-right" | "require-equal" | "reject";
+  recursiveContainers?: boolean;
+  receiveLimits?: MTPReceiveLimits;
+  encodeLimits?: MTPEncodeLimits;
+}
+
+export type MTPMergePath = number[];
+
+export interface MTPMergeReport {
+  inserted: MTPMergePath[];
+  preserved: MTPMergePath[];
+  replaced: MTPMergePath[];
+  matched: MTPMergePath[];
+  recursed: MTPMergePath[];
+}
+
+export interface MTPMergeResult {
+  frame: Uint8Array;
+  report: MTPMergeReport;
+}
+
+/**
+ * Merge clear payload fields from `source` into `destination`.
+ *
+ * Existing destination fields win. Source-only fields are appended in source
+ * order, and frame identity/routing stays with the destination.
+ */
+export function mergePayloadFrom(
+  destination: MTPBytesInput,
+  source: MTPBytesInput,
+): Uint8Array {
+  return mergePayloadFromDetailed(destination, source).frame;
+}
+
+export function mergePayloadFromDetailed(
+  destination: MTPBytesInput,
+  source: MTPBytesInput,
+  options: MTPMergeOptions = {},
+): MTPMergeResult {
+  return bindings.merge_frame_payload_from_detailed_with_limits(
+    bytesFrom(destination, "destination"),
+    bytesFrom(source, "source"),
+    options,
+    options.receiveLimits ?? {},
+    options.encodeLimits ?? {},
+  );
+}
+
+/** Merge serialized clear `DataValue::Container` content before protection. */
+export function mergeDataValues(
+  destination: MTPBytesInput,
+  source: MTPBytesInput,
+  options: MTPMergeOptions = {},
+): Uint8Array {
+  return mergeDataValuesDetailed(destination, source, options).frame;
+}
+
+/** Merge serialized clear `DataValue::Container` content with diagnostics. */
+export function mergeDataValuesDetailed(
+  destination: MTPBytesInput,
+  source: MTPBytesInput,
+  options: MTPMergeOptions = {},
+): MTPMergeResult {
+  return bindings.merge_data_value_containers_detailed_with_limits(
+    bytesFrom(destination, "destination data value"),
+    bytesFrom(source, "source data value"),
+    options,
+    options.receiveLimits ?? {},
+    options.encodeLimits ?? {},
+  );
+}
+
 export function decodeWithLimits(
   frame: MTPBytesInput,
   limits: MTPReceiveLimits,
 ): ParsedFrame {
-  const parse = (
-    bindings as typeof bindings & {
-      parse_frame_with_limits?: (
-        frame: Uint8Array,
-        limits: MTPReceiveLimits,
-      ) => ParsedFrame;
-    }
-  ).parse_frame_with_limits;
-  if (!parse) {
-    throw new Error(
-      "configured receive limits require a rebuilt bounded WASM package",
-    );
-  }
-  return parse(bytesFrom(frame, "frame"), limits);
+  return bindings.parse_frame_with_limits(bytesFrom(frame, "frame"), limits);
 }
 
 export function decodeDataValueWithLimits(
   value: MTPBytesInput,
   limits: MTPReceiveLimits,
 ): MTPDataValue {
-  const parse = (
-    bindings as typeof bindings & {
-      parse_data_value_with_limits?: (
-        value: Uint8Array,
-        limits: MTPReceiveLimits,
-      ) => MTPDataValue;
-    }
-  ).parse_data_value_with_limits;
-  if (!parse) {
-    throw new Error(
-      "configured receive limits require a rebuilt bounded WASM package",
-    );
-  }
-  return parse(bytesFrom(value, "data value"), limits);
+  return bindings.parse_data_value_with_limits(bytesFrom(value, "data value"), limits);
 }
 
 export function format(frame: MTPBytesInput): string {
@@ -360,14 +387,8 @@ function utf8Decode(bytes: Uint8Array): string {
 }
 
 function requiredSecretKeyLength(): number {
-  const lengthBinding = (
-    bindings as typeof bindings & {
-      mtp_symmetric_key_length?: () => number;
-    }
-  ).mtp_symmetric_key_length;
-  if (!lengthBinding) return 32;
   try {
-    return lengthBinding();
+    return bindings.mtp_symmetric_key_length();
   } catch {
     // The generated WASM wrapper is callable only after initialization. Keep
     // the historical size as a pre-initialization validation fallback.
@@ -476,19 +497,7 @@ function deriveKeyFromPassphraseSyncImpl(
   parameters: PasswordKdfParameters,
 ): Uint8Array {
   const validated = validatePasswordKdfInput(passphrase, salt, parameters);
-  const kdf = (bindings as unknown as {
-    wasm_argon2id?: (
-      passphrase: Uint8Array,
-      salt: Uint8Array,
-      memoryKiB: number,
-      iterations: number,
-      lanes: number,
-    ) => Uint8Array;
-  }).wasm_argon2id;
-  if (!kdf) {
-    throw new Error("Argon2id password derivation is unavailable in this WASM build");
-  }
-  return kdf(
+  return bindings.wasm_argon2id(
     utf8Encode(validated.passphrase),
     validated.salt,
     validated.parameters.memoryKiB,
@@ -796,20 +805,12 @@ export function protectedFrameBytes(
     ...(frame.sender == null ? {} : { sender: frame.sender }),
     ...(frame.receiver == null ? {} : { receiver: frame.receiver }),
   };
-  const bounded = (
-    bindings as typeof bindings & {
-      build_frame_with_payload_with_limits?: (
-        type: string,
-        payload: Uint8Array,
-        options: MTPCodecOptions,
-        limits: MTPReceiveLimits,
-      ) => Uint8Array;
-    }
-  ).build_frame_with_payload_with_limits;
-  if (!bounded) {
-    throw new Error("bounded WASM frame encoding is unavailable; rebuild mtp-wasm");
-  }
-  return bounded(frame.type, encoded, options, limits ?? {});
+  return bindings.build_frame_with_payload_with_limits(
+    frame.type,
+    encoded,
+    options,
+    limits ?? {},
+  );
 }
 
 export function assertApplicationCommunicationType(type: string): string {
@@ -912,18 +913,7 @@ export function encodeMTPDataValue(
 ): Uint8Array {
   const effective = normalizedEncodeLimits(limits);
   validateMTPDataValue(value, effective);
-  const bounded = (
-    bindings as typeof bindings & {
-      encode_data_value_with_limits?: (
-        value: MTPDataValueInput,
-        limits: MTPEncodeLimits,
-      ) => Uint8Array;
-    }
-  ).encode_data_value_with_limits;
-  if (!bounded) {
-    throw new Error("bounded WASM DataValue encoding is unavailable; rebuild mtp-wasm");
-  }
-  const encoded = bounded(value, effective);
+  const encoded = bindings.encode_data_value_with_limits(value, effective);
   if (encoded.length > effective.maxOutputSize) {
     throw new RangeError("MTP DataValue encoded output limit exceeded");
   }

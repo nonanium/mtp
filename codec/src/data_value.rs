@@ -552,6 +552,79 @@ pub enum DataValue {
     Null,
 }
 
+/// How a container merge handles a field present in both inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MergeConflictPolicy {
+    /// Preserve the destination value.
+    #[default]
+    KeepLeft,
+    /// Replace the destination value with the source value.
+    KeepRight,
+    /// Preserve the value only when both values are equal.
+    ///
+    /// When recursive container merging is enabled, overlapping containers are
+    /// merged first and overlapping descendant values must be equal.
+    RequireEqual,
+    /// Reject overlapping non-container values.
+    ///
+    /// When recursive container merging is enabled, overlapping containers are
+    /// merged first and overlaps reached inside those containers are rejected.
+    Reject,
+}
+
+/// Options shared by frame and standalone container merging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MergeOptions {
+    pub conflicts: MergeConflictPolicy,
+    /// Merge child fields when both conflicting values are containers before
+    /// applying the conflict policy to non-container overlaps.
+    pub recursive_containers: bool,
+}
+
+/// A field location in a container merge report or conflict error.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MergePath {
+    segments: Vec<DataTypeId>,
+}
+
+impl MergePath {
+    pub fn new(segments: Vec<DataTypeId>) -> Self {
+        Self { segments }
+    }
+
+    pub fn as_slice(&self) -> &[DataTypeId] {
+        &self.segments
+    }
+
+    pub fn into_vec(self) -> Vec<DataTypeId> {
+        self.segments
+    }
+}
+
+/// Fields affected by a successful ordered container merge.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MergeReport {
+    pub inserted: Vec<MergePath>,
+    pub preserved: Vec<MergePath>,
+    pub replaced: Vec<MergePath>,
+    pub matched: Vec<MergePath>,
+    /// Container overlaps for which recursive merging was entered.
+    pub recursed: Vec<MergePath>,
+}
+
+/// Failure returned by a standalone container merge.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ContainerMergeError {
+    #[error("destination container contains duplicate field {0:?}")]
+    DestinationDuplicateField(DataTypeId),
+    #[error("source container contains duplicate field {0:?}")]
+    SourceDuplicateField(DataTypeId),
+    #[error("container contains structurally invalid data: {0}")]
+    InvalidStructure(CodecError),
+    #[error("conflicting field at {0:?}")]
+    Conflict(MergePath),
+}
+
 impl DataValue {
     const KIND_BOOL_TRUE: u8 = 0x01;
     const KIND_BOOL_FALSE: u8 = 0x02;
@@ -567,6 +640,19 @@ impl DataValue {
     #[cfg(feature = "crypto")]
     const KIND_SIGNED: u8 = 0x0B;
     const KIND_NULL: u8 = 0xFF;
+
+    /// Validate every structural invariant without allocating an encoded byte
+    /// vector. This traverses arrays, containers, and signed inner values.
+    pub fn validate_structure(&self) -> Result<(), CodecError> {
+        self.validate_with_limits(EncodeLimits::default())
+    }
+
+    /// Validate structure and encoding resource limits without serializing.
+    pub fn validate_with_limits(&self, limits: EncodeLimits) -> Result<(), CodecError> {
+        let mut context = EncodeContext::new(limits);
+        let size = self.encoded_len_with_context(&mut context)?;
+        context.check_output(0, size)
+    }
 
     pub fn container_from_map(map: &BTreeMap<DataTypeId, DataValue>) -> Self {
         Self::Container(map.iter().map(|(id, value)| (*id, value.clone())).collect())
@@ -1088,20 +1174,7 @@ impl DataValue {
                 context.leave();
                 size
             }
-            Self::Container(entries) => {
-                ensure_unique_container_fields(entries)?;
-                context.enter()?;
-                let _ = checked_count(entries.len())?;
-                let mut size = 1 + 2;
-                for (_, value) in entries {
-                    size = checked_add(
-                        checked_add(size, 2)?,
-                        value.encoded_len_with_context(context)?,
-                    )?;
-                }
-                context.leave();
-                size
-            }
+            Self::Container(entries) => encoded_container_len_after_value(entries, context)?,
             #[cfg(feature = "crypto")]
             Self::Signed(value) => {
                 context.enter()?;
@@ -1738,13 +1811,262 @@ fn append_bytes(
     Ok(())
 }
 
-fn ensure_unique_container_fields(entries: &[(DataTypeId, DataValue)]) -> Result<(), CodecError> {
+/// Check that a container has at most one value for each field ID.
+///
+/// Containers retain insertion order on the wire, but field IDs are still
+/// unique.  This is shared by encoding and higher-level container operations
+/// so malformed in-memory values are not accepted by one path and rejected by
+/// another.
+pub fn validate_container_entries(entries: &[(DataTypeId, DataValue)]) -> Result<(), DataTypeId> {
     let mut seen = BTreeSet::new();
-    if entries.iter().all(|(id, _)| seen.insert(*id)) {
-        Ok(())
-    } else {
-        Err(CodecError::InvalidEncoding)
+    for (id, _) in entries {
+        if !seen.insert(*id) {
+            return Err(*id);
+        }
     }
+    Ok(())
+}
+
+/// Validate a borrowed container with the same rules used to encode a
+/// `DataValue::Container`, without cloning its complete value tree.
+pub fn validate_container_with_limits(
+    entries: &[(DataTypeId, DataValue)],
+    limits: EncodeLimits,
+) -> Result<(), CodecError> {
+    let mut context = EncodeContext::new(limits);
+    context.value()?;
+    let size = encoded_container_len_after_value(entries, &mut context)?;
+    context.check_output(0, size)
+}
+
+/// Validate a borrowed container using the default encoding limits.
+pub fn validate_container(entries: &[(DataTypeId, DataValue)]) -> Result<(), CodecError> {
+    validate_container_with_limits(entries, EncodeLimits::default())
+}
+
+fn encoded_container_len_after_value(
+    entries: &[(DataTypeId, DataValue)],
+    context: &mut EncodeContext,
+) -> Result<usize, CodecError> {
+    ensure_unique_container_fields(entries)?;
+    context.enter()?;
+    let result = (|| {
+        let _ = checked_count(entries.len())?;
+        let mut size = 1 + 2;
+        for (_, value) in entries {
+            size = checked_add(
+                checked_add(size, 2)?,
+                value.encoded_len_with_context(context)?,
+            )?;
+        }
+        Ok(size)
+    })();
+    context.leave();
+    result
+}
+
+/// Merge ordered container fields into `destination` according to `options`.
+///
+/// The operation validates both complete value trees and updates the
+/// destination only after a complete merged copy has been constructed.
+pub fn merge_container_from_with(
+    destination: &mut Vec<(DataTypeId, DataValue)>,
+    source: &[(DataTypeId, DataValue)],
+    options: MergeOptions,
+) -> Result<MergeReport, ContainerMergeError> {
+    merge_container_from_with_limits(destination, source, options, EncodeLimits::default())
+}
+
+/// Merge ordered container fields while enforcing structural and encoding
+/// limits on both complete input trees.
+pub fn merge_container_from_with_limits(
+    destination: &mut Vec<(DataTypeId, DataValue)>,
+    source: &[(DataTypeId, DataValue)],
+    options: MergeOptions,
+    limits: EncodeLimits,
+) -> Result<MergeReport, ContainerMergeError> {
+    validate_container_entries(destination)
+        .map_err(ContainerMergeError::DestinationDuplicateField)?;
+    validate_container_entries(source).map_err(ContainerMergeError::SourceDuplicateField)?;
+    validate_container_with_limits(destination, limits)
+        .map_err(ContainerMergeError::InvalidStructure)?;
+    validate_container_with_limits(source, limits)
+        .map_err(ContainerMergeError::InvalidStructure)?;
+
+    let mut merged = destination.clone();
+    let mut report = MergeReport::default();
+    merge_container_into_borrowed(&mut merged, source, options, &[], &mut report)?;
+    validate_container_with_limits(&merged, limits)
+        .map_err(ContainerMergeError::InvalidStructure)?;
+    *destination = merged;
+    Ok(report)
+}
+
+/// Merge ordered container fields with the default shallow left-biased policy.
+pub fn merge_container_left_biased(
+    destination: &mut Vec<(DataTypeId, DataValue)>,
+    source: &[(DataTypeId, DataValue)],
+) -> Result<MergeReport, ContainerMergeError> {
+    merge_container_from_with(destination, source, MergeOptions::default())
+}
+
+/// Merge two owned containers. On error both consumed inputs are dropped,
+/// allowing source-only values and replacements to be moved without rollback.
+pub fn merge_containers_owned(
+    destination: Vec<(DataTypeId, DataValue)>,
+    source: Vec<(DataTypeId, DataValue)>,
+    options: MergeOptions,
+) -> Result<(Vec<(DataTypeId, DataValue)>, MergeReport), ContainerMergeError> {
+    merge_containers_owned_with_limits(destination, source, options, EncodeLimits::default())
+}
+
+/// Merge two owned containers while enforcing structure and encoding limits.
+pub fn merge_containers_owned_with_limits(
+    mut destination: Vec<(DataTypeId, DataValue)>,
+    source: Vec<(DataTypeId, DataValue)>,
+    options: MergeOptions,
+    limits: EncodeLimits,
+) -> Result<(Vec<(DataTypeId, DataValue)>, MergeReport), ContainerMergeError> {
+    validate_container_entries(&destination)
+        .map_err(ContainerMergeError::DestinationDuplicateField)?;
+    validate_container_entries(&source).map_err(ContainerMergeError::SourceDuplicateField)?;
+    validate_container_with_limits(&destination, limits)
+        .map_err(ContainerMergeError::InvalidStructure)?;
+    validate_container_with_limits(&source, limits)
+        .map_err(ContainerMergeError::InvalidStructure)?;
+
+    let mut report = MergeReport::default();
+    merge_container_into_owned(&mut destination, source, options, &[], &mut report)?;
+    validate_container_with_limits(&destination, limits)
+        .map_err(ContainerMergeError::InvalidStructure)?;
+    Ok((destination, report))
+}
+
+fn merge_path(prefix: &[DataTypeId], field: DataTypeId) -> MergePath {
+    let mut segments = Vec::with_capacity(prefix.len() + 1);
+    segments.extend_from_slice(prefix);
+    segments.push(field);
+    MergePath::new(segments)
+}
+
+fn merge_container_into_borrowed(
+    destination: &mut Vec<(DataTypeId, DataValue)>,
+    source: &[(DataTypeId, DataValue)],
+    options: MergeOptions,
+    prefix: &[DataTypeId],
+    report: &mut MergeReport,
+) -> Result<(), ContainerMergeError> {
+    let mut indexes = destination
+        .iter()
+        .enumerate()
+        .map(|(index, (id, _))| (*id, index))
+        .collect::<BTreeMap<_, _>>();
+
+    for (id, source_value) in source {
+        let Some(index) = indexes.get(id).copied() else {
+            indexes.insert(*id, destination.len());
+            destination.push((*id, source_value.clone()));
+            report.inserted.push(merge_path(prefix, *id));
+            continue;
+        };
+
+        let destination_value = &mut destination[index].1;
+        if options.recursive_containers
+            && let DataValue::Container(left) = destination_value
+            && let DataValue::Container(right) = source_value
+        {
+            let path = merge_path(prefix, *id);
+            report.recursed.push(path.clone());
+            merge_container_into_borrowed(left, right, options, path.as_slice(), report)?;
+            continue;
+        }
+
+        match options.conflicts {
+            MergeConflictPolicy::KeepLeft => report.preserved.push(merge_path(prefix, *id)),
+            MergeConflictPolicy::KeepRight => {
+                *destination_value = source_value.clone();
+                report.replaced.push(merge_path(prefix, *id));
+            }
+            MergeConflictPolicy::RequireEqual if *destination_value == *source_value => {
+                report.matched.push(merge_path(prefix, *id));
+            }
+            MergeConflictPolicy::RequireEqual | MergeConflictPolicy::Reject => {
+                return Err(ContainerMergeError::Conflict(merge_path(prefix, *id)));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_container_into_owned(
+    destination: &mut Vec<(DataTypeId, DataValue)>,
+    source: Vec<(DataTypeId, DataValue)>,
+    options: MergeOptions,
+    prefix: &[DataTypeId],
+    report: &mut MergeReport,
+) -> Result<(), ContainerMergeError> {
+    let mut indexes = destination
+        .iter()
+        .enumerate()
+        .map(|(index, (id, _))| (*id, index))
+        .collect::<BTreeMap<_, _>>();
+
+    for (id, source_value) in source {
+        let Some(index) = indexes.get(&id).copied() else {
+            indexes.insert(id, destination.len());
+            destination.push((id, source_value));
+            report.inserted.push(merge_path(prefix, id));
+            continue;
+        };
+        let destination_value = &mut destination[index].1;
+        match (destination_value, source_value) {
+            (DataValue::Container(left), DataValue::Container(right))
+                if options.recursive_containers =>
+            {
+                let path = merge_path(prefix, id);
+                report.recursed.push(path.clone());
+                merge_container_into_owned(left, right, options, path.as_slice(), report)?;
+            }
+            (destination_value, source_value) => {
+                apply_owned_conflict(
+                    destination_value,
+                    source_value,
+                    id,
+                    prefix,
+                    options.conflicts,
+                    report,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_owned_conflict(
+    destination: &mut DataValue,
+    source: DataValue,
+    id: DataTypeId,
+    prefix: &[DataTypeId],
+    policy: MergeConflictPolicy,
+    report: &mut MergeReport,
+) -> Result<(), ContainerMergeError> {
+    let path = merge_path(prefix, id);
+    match policy {
+        MergeConflictPolicy::KeepLeft => report.preserved.push(path),
+        MergeConflictPolicy::KeepRight => {
+            *destination = source;
+            report.replaced.push(path);
+        }
+        MergeConflictPolicy::RequireEqual if *destination == source => report.matched.push(path),
+        MergeConflictPolicy::RequireEqual | MergeConflictPolicy::Reject => {
+            return Err(ContainerMergeError::Conflict(path));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_unique_container_fields(entries: &[(DataTypeId, DataValue)]) -> Result<(), CodecError> {
+    validate_container_entries(entries).map_err(|_| CodecError::InvalidEncoding)
 }
 
 fn write_blob_with_context(
@@ -2294,6 +2616,163 @@ mod tests {
         assert_eq!(
             value.to_bytes_with_limits(limits),
             Err(CodecError::TooManyEntries)
+        );
+    }
+
+    #[test]
+    fn borrowed_merge_validates_the_final_candidate_transactionally() {
+        let mut destination = vec![(DataTypeId(1), DataValue::BoolTrue)];
+        let source = vec![(DataTypeId(2), DataValue::BoolFalse)];
+        let before = destination.clone();
+
+        let value_limits = EncodeLimits {
+            max_values: 2,
+            ..EncodeLimits::default()
+        };
+        assert!(validate_container_with_limits(&destination, value_limits).is_ok());
+        assert!(validate_container_with_limits(&source, value_limits).is_ok());
+        assert_eq!(
+            merge_container_from_with_limits(
+                &mut destination,
+                &source,
+                MergeOptions::default(),
+                value_limits,
+            ),
+            Err(ContainerMergeError::InvalidStructure(
+                CodecError::TooManyEntries
+            ))
+        );
+        assert_eq!(destination, before);
+
+        let output_limits = EncodeLimits {
+            max_output_size: 6,
+            ..EncodeLimits::default()
+        };
+        assert!(validate_container_with_limits(&destination, output_limits).is_ok());
+        assert!(validate_container_with_limits(&source, output_limits).is_ok());
+        assert_eq!(
+            merge_container_from_with_limits(
+                &mut destination,
+                &source,
+                MergeOptions::default(),
+                output_limits,
+            ),
+            Err(ContainerMergeError::InvalidStructure(
+                CodecError::TooManyEntries
+            ))
+        );
+        assert_eq!(destination, before);
+    }
+
+    #[test]
+    fn owned_and_borrowed_merges_have_identical_reports_and_values() {
+        let left = vec![
+            (DataTypeId(1), DataValue::Bytes(vec![1, 2, 3])),
+            (
+                DataTypeId(2),
+                DataValue::Container(vec![(DataTypeId(3), DataValue::BoolTrue)]),
+            ),
+        ];
+        let right = vec![
+            (DataTypeId(1), DataValue::Bytes(vec![4, 5, 6])),
+            (
+                DataTypeId(2),
+                DataValue::Container(vec![
+                    (DataTypeId(3), DataValue::BoolFalse),
+                    (DataTypeId(4), DataValue::Bytes(vec![7, 8, 9])),
+                ]),
+            ),
+            (DataTypeId(5), DataValue::Bytes(vec![10; 128])),
+        ];
+
+        for conflicts in [
+            MergeConflictPolicy::KeepLeft,
+            MergeConflictPolicy::KeepRight,
+        ] {
+            let options = MergeOptions {
+                conflicts,
+                recursive_containers: true,
+            };
+            let mut borrowed = left.clone();
+            let borrowed_report =
+                merge_container_from_with(&mut borrowed, &right, options).unwrap();
+            let (owned, owned_report) =
+                merge_containers_owned(left.clone(), right.clone(), options).unwrap();
+            assert_eq!(owned, borrowed);
+            assert_eq!(owned_report, borrowed_report);
+        }
+
+        let options = MergeOptions {
+            conflicts: MergeConflictPolicy::RequireEqual,
+            recursive_containers: true,
+        };
+        let mut borrowed = left.clone();
+        assert_eq!(
+            merge_container_from_with(&mut borrowed, &right, options),
+            merge_containers_owned(left.clone(), right.clone(), options).map(|(_, report)| report),
+        );
+
+        let options = MergeOptions {
+            conflicts: MergeConflictPolicy::Reject,
+            recursive_containers: true,
+        };
+        let mut borrowed = left.clone();
+        assert_eq!(
+            merge_container_from_with(&mut borrowed, &right, options),
+            merge_containers_owned(left, right, options).map(|(_, report)| report),
+        );
+    }
+
+    #[test]
+    fn recursive_merging_reports_full_paths_and_applies_leaf_policies() {
+        let parent = DataTypeId(10);
+        let equal = DataTypeId(11);
+        let added = DataTypeId(12);
+        let mut destination = vec![(
+            parent,
+            DataValue::Container(vec![(equal, DataValue::UnsignedNumber(1))]),
+        )];
+        let source = vec![(
+            parent,
+            DataValue::Container(vec![
+                (equal, DataValue::UnsignedNumber(1)),
+                (added, DataValue::UnsignedNumber(2)),
+            ]),
+        )];
+        let report = merge_container_from_with(
+            &mut destination,
+            &source,
+            MergeOptions {
+                conflicts: MergeConflictPolicy::RequireEqual,
+                recursive_containers: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.recursed, vec![MergePath::new(vec![parent])]);
+        assert_eq!(report.matched, vec![MergePath::new(vec![parent, equal])]);
+        assert_eq!(report.inserted, vec![MergePath::new(vec![parent, added])]);
+        assert!(report.preserved.is_empty());
+
+        let mut conflicting = vec![(
+            parent,
+            DataValue::Container(vec![(equal, DataValue::UnsignedNumber(1))]),
+        )];
+        let conflict_source = vec![(
+            parent,
+            DataValue::Container(vec![(equal, DataValue::UnsignedNumber(2))]),
+        )];
+        assert_eq!(
+            merge_container_from_with(
+                &mut conflicting,
+                &conflict_source,
+                MergeOptions {
+                    conflicts: MergeConflictPolicy::Reject,
+                    recursive_containers: true,
+                },
+            ),
+            Err(ContainerMergeError::Conflict(MergePath::new(vec![
+                parent, equal
+            ])))
         );
     }
 

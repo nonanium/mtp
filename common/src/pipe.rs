@@ -28,8 +28,8 @@ impl std::error::Error for PipeError {}
 impl From<CommunicationError> for PipeError {
     fn from(error: CommunicationError) -> Self {
         match error {
-            CommunicationError::StreamClosed => Self::StreamClosed,
-            CommunicationError::ConnectionLost | CommunicationError::ClosedByPeer => {
+            CommunicationError::ClosedByPeer => Self::StreamClosed,
+            CommunicationError::ConnectionLost | CommunicationError::ClosedLocally => {
                 Self::ConnectionClosed
             }
             other => Self::IoError(other.to_string()),

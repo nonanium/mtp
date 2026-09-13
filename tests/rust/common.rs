@@ -29,10 +29,9 @@ fn communication_error_public_behavior() {
         "Use after Closed"
     );
     assert_eq!(
-        CommunicationError::StreamClosed.to_string(),
-        "Stream Closed"
+        CommunicationError::ClosedByPeer.to_string(),
+        "Connection closed by peer"
     );
-    assert_eq!(CommunicationError::StreamError.to_string(), "Stream Error");
     assert_eq!(
         CommunicationError::UseAfterClosed.clone(),
         CommunicationError::UseAfterClosed
@@ -48,7 +47,7 @@ fn communication_error_public_behavior() {
             .contains("custom error")
     );
     assert!(
-        CommunicationError::ConnectingError("refused".into())
+        CommunicationError::transport(mtp_common::TransportPhase::Connect, "refused")
             .to_string()
             .contains("refused")
     );
@@ -75,7 +74,7 @@ fn pipe_error_public_behavior() {
         "pipe I/O error: boom"
     );
     assert_eq!(
-        PipeError::from(CommunicationError::StreamClosed),
+        PipeError::from(CommunicationError::ClosedByPeer),
         PipeError::StreamClosed
     );
     assert_eq!(
@@ -83,8 +82,11 @@ fn pipe_error_public_behavior() {
         PipeError::ConnectionClosed
     );
     assert_eq!(
-        PipeError::from(CommunicationError::StreamError),
-        PipeError::IoError("Stream Error".into())
+        PipeError::from(CommunicationError::transport(
+            mtp_common::TransportPhase::ReadFrame,
+            "read failed",
+        )),
+        PipeError::IoError("Transport failure during ReadFrame: read failed".into())
     );
 }
 

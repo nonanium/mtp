@@ -7,10 +7,10 @@ use crate::PipeId;
 use crate::RuntimePolicy;
 use crate::{
     Policy, TransportConnection, TransportRecvStream, TransportSendStream, classify_decode_error,
-    framing::{RetryClassifier, write_frame},
+    framing::{RetryClassifier, encode_frame},
 };
 use mtp_codec::{CommunicationValue, DataType, DecodeLimits, TypeMap};
-use mtp_common::CommunicationError;
+use mtp_common::{CommunicationError, TransportPhase};
 #[cfg(feature = "pipes")]
 use mtp_common::{FirstFrameDisposition, classify_first_frame};
 #[cfg(feature = "pipes")]
@@ -110,7 +110,10 @@ impl<C: TransportConnection> GenericSender<C> {
     async fn open(&self) -> Result<C::SendStream, CommunicationError> {
         timeout(self.policy.open_stream_timeout, self.connection.open_uni())
             .await
-            .map_err(|_| CommunicationError::StreamError)?
+            .map_err(|_| CommunicationError::timeout(TransportPhase::OpenStream))?
+            .map_err(|error| {
+                CommunicationError::transport(TransportPhase::OpenStream, error.to_string())
+            })
     }
 
     pub async fn send(&self, value: &CommunicationValue) -> Result<(), CommunicationError> {
@@ -129,8 +132,8 @@ impl<C: TransportConnection> GenericSender<C> {
     }
 
     async fn send_locked(&self, value: &CommunicationValue) -> Result<(), CommunicationError> {
-        if self.connection.close_reason().is_some() {
-            return Err(CommunicationError::StreamClosed);
+        if let Some(error) = self.connection.close_reason() {
+            return Err(error);
         }
         if let Some(version) = value.get_str(DataType::Version) {
             tracing::debug!(
@@ -141,57 +144,69 @@ impl<C: TransportConnection> GenericSender<C> {
                 "sending MTP handshake response frame"
             );
         }
+        // Encoding cannot transmit anything, so complete it before taking ownership
+        // of a reusable stream. This lets encoding failures leave that stream usable.
+        let frame = encode_frame(
+            value,
+            self.policy.max_message_size,
+            self.policy.close_frame_len,
+        )?;
         match self.policy.send_mode {
             crate::SendMode::SingleStreamPerMessage => {
                 let mut stream = self.open().await?;
-                timeout(
-                    self.policy.write_timeout,
-                    write_frame(&mut stream, value, &self.policy),
-                )
-                .await
-                .map_err(|_| CommunicationError::StreamError)??;
+                timeout(self.policy.write_timeout, stream.write_all(&frame))
+                    .await
+                    .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                        phase: TransportPhase::WriteFrame,
+                    })?
+                    .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                        phase: TransportPhase::WriteFrame,
+                    })?;
                 match timeout(self.policy.write_timeout, stream.finish()).await {
                     Ok(Ok(())) => Ok(()),
-                    Ok(Err(_)) | Err(_) => Err(CommunicationError::DeliveryUnknown),
+                    Ok(Err(_)) | Err(_) => Err(CommunicationError::DeliveryUnknownAt {
+                        phase: TransportPhase::FinishStream,
+                    }),
                 }
             }
             crate::SendMode::PersistentStream => {
-                let mut stream = self.persistent.lock().await;
+                // Remove the reusable stream before any cancellable operation. If this
+                // future is cancelled while writing, the local stream is dropped and the
+                // shared slot remains empty.
+                let mut stream = { self.persistent.lock().await.take() };
                 let mut attempts = 0;
-                loop {
-                    if stream.is_none() {
-                        *stream = Some(self.open().await?);
+                while stream.is_none() {
+                    match self.open().await {
+                        Ok(opened) => stream = Some(opened),
+                        Err(error) if RetryClassifier::retry_persistent_stream(&error) => {
+                            attempts += 1;
+                            if attempts > self.policy.persistent_stream_max_retries {
+                                return Err(error);
+                            }
+                            tokio::time::sleep(
+                                self.policy.persistent_stream_retry_backoff * attempts as u32,
+                            )
+                            .await;
+                        }
+                        Err(error) => return Err(error),
                     }
-                    let result = match stream.as_mut() {
-                        Some(stream) => timeout(
-                            self.policy.write_timeout,
-                            write_frame(stream, value, &self.policy),
-                        )
-                        .await
-                        .map_err(|_| CommunicationError::StreamError)
-                        .and_then(|result| result),
-                        None => Err(CommunicationError::StreamError),
-                    };
-                    if result.is_ok() {
-                        return Ok(());
-                    }
-                    let error = match result {
-                        Ok(()) => return Ok(()),
-                        Err(error) => error,
-                    };
-                    if !RetryClassifier::retry_persistent_stream(&error) {
-                        return Err(error);
-                    }
-                    *stream = None;
-                    attempts += 1;
-                    if attempts > self.policy.persistent_stream_max_retries {
-                        return Err(error);
-                    }
-                    tokio::time::sleep(
-                        self.policy.persistent_stream_retry_backoff * attempts as u32,
-                    )
-                    .await;
                 }
+
+                let mut stream = stream.ok_or(CommunicationError::ConnectionLost)?;
+                // A failed or timed-out write may have emitted a prefix or part of a
+                // frame. Drop this stream and report delivery as ambiguous; do not retry.
+                timeout(self.policy.write_timeout, stream.write_all(&frame))
+                    .await
+                    .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                        phase: TransportPhase::WriteFrame,
+                    })?
+                    .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                        phase: TransportPhase::WriteFrame,
+                    })?;
+
+                let mut slot = self.persistent.lock().await;
+                *slot = Some(stream);
+                Ok(())
             }
         }
     }
@@ -217,11 +232,9 @@ impl<C: TransportConnection> GenericSender<C> {
         pipe_id: PipeId,
         description: &str,
     ) -> Result<PipeWriter<C::SendStream>, CommunicationError> {
-        if self.connection.close_reason().is_some() {
-            return Err(CommunicationError::StreamClosed);
+        if let Some(error) = self.connection.close_reason() {
+            return Err(error);
         }
-
-        let mut stream = self.open().await?;
 
         let type_map = self.type_map.read().await.clone();
         let request = CommunicationValue::new_with_type_map(
@@ -233,13 +246,21 @@ impl<C: TransportConnection> GenericSender<C> {
             mtp_codec::DataType::Description,
             mtp_codec::DataValue::Str(description.to_string()),
         );
+        let frame = encode_frame(
+            &request,
+            self.policy.max_message_size,
+            self.policy.close_frame_len,
+        )?;
+        let mut stream = self.open().await?;
 
-        timeout(
-            self.policy.write_timeout,
-            write_frame(&mut stream, &request, &self.policy),
-        )
-        .await
-        .map_err(|_| CommunicationError::StreamError)??;
+        timeout(self.policy.write_timeout, stream.write_all(&frame))
+            .await
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::WriteFrame,
+            })?
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::WriteFrame,
+            })?;
 
         Ok(PipeWriter { stream })
     }
@@ -273,7 +294,12 @@ impl<C: TransportConnection> GenericSender<C> {
         };
         timeout(self.policy.write_timeout, stream.finish())
             .await
-            .map_err(|_| CommunicationError::StreamError)?
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::FinishStream,
+            })?
+            .map_err(|_| CommunicationError::DeliveryUnknownAt {
+                phase: TransportPhase::FinishStream,
+            })
     }
     pub fn is_closed(&self) -> bool {
         self.connection.close_reason().is_some()
@@ -292,6 +318,8 @@ pub struct GenericReceiver<C: TransportConnection> {
     pipes: Arc<Mutex<mpsc::Receiver<PipeReader<C::RecvStream>>>>,
     connection: C,
     ping_sender: Arc<RwLock<Option<GenericSender<C>>>>,
+    pong_observer: Arc<RwLock<Option<mpsc::Sender<CommunicationValue>>>>,
+    expected_pong_id: Arc<RwLock<Option<mtp_common::PingId>>>,
     max_message_size: Arc<AtomicU64>,
     type_map: Arc<RwLock<TypeMap>>,
     queue_notify: Arc<Notify>,
@@ -309,6 +337,8 @@ impl<C: TransportConnection> Clone for GenericReceiver<C> {
             pipes: self.pipes.clone(),
             connection: self.connection.clone(),
             ping_sender: self.ping_sender.clone(),
+            pong_observer: self.pong_observer.clone(),
+            expected_pong_id: self.expected_pong_id.clone(),
             max_message_size: self.max_message_size.clone(),
             type_map: self.type_map.clone(),
             queue_notify: self.queue_notify.clone(),
@@ -335,12 +365,17 @@ impl<C: TransportConnection> GenericReceiver<C> {
         #[cfg(feature = "pipes")]
         let (pipe_tx, pipe_rx) = mpsc::channel(policy.receiver_queue_capacity);
         let ping_sender: Arc<RwLock<Option<GenericSender<C>>>> = Arc::new(RwLock::new(None));
+        let pong_observer: Arc<RwLock<Option<mpsc::Sender<CommunicationValue>>>> =
+            Arc::new(RwLock::new(None));
+        let expected_pong_id: Arc<RwLock<Option<mtp_common::PingId>>> = Arc::new(RwLock::new(None));
         let max_message_size = Arc::new(AtomicU64::new(
             policy
                 .handshake_max_message_size
                 .min(policy.max_message_size),
         ));
         let task_ping_sender = ping_sender.clone();
+        let task_pong_observer = pong_observer.clone();
+        let task_expected_pong_id = expected_pong_id.clone();
         let task_connection = connection.clone();
         let task_policy = policy.clone();
         let task_max_message_size = max_message_size.clone();
@@ -361,7 +396,9 @@ impl<C: TransportConnection> GenericReceiver<C> {
             let limit = Arc::new(Semaphore::new(
                 task_policy.max_concurrent_stream_tasks.max(1),
             ));
+            let mut stream_tasks = tokio::task::JoinSet::new();
             loop {
+                while stream_tasks.try_join_next().is_some() {}
                 // Backpressure: stop accepting new streams if the output queue is full.
                 #[cfg(feature = "pipes")]
                 let cap_full =
@@ -390,7 +427,9 @@ impl<C: TransportConnection> GenericReceiver<C> {
                     Err(_) => {
                         if task_connection.close_reason().is_some() {
                             let _ = task_accept_task_tx
-                                .send(Err(CommunicationError::StreamClosed))
+                                .send(Err(task_connection
+                                    .close_reason()
+                                    .unwrap_or(CommunicationError::ConnectionLost)))
                                 .await;
                             break;
                         } else {
@@ -409,12 +448,14 @@ impl<C: TransportConnection> GenericReceiver<C> {
                 let policy = task_policy.clone();
                 let max_message_size = task_max_message_size.clone();
                 let ping_sender = task_ping_sender.clone();
+                let pong_observer = task_pong_observer.clone();
+                let expected_pong_id = task_expected_pong_id.clone();
                 let connection = task_connection.clone();
                 let type_map = task_type_map.clone();
                 let decode_rejections = task_decode_rejections.clone();
                 #[cfg(feature = "pipes")]
                 let expected_pipes = task_expected_pipes.clone();
-                tokio::spawn(async move {
+                stream_tasks.spawn(async move {
                     let _permit = permit;
                     let mut stream = stream;
                     let mut frames = 0usize;
@@ -423,7 +464,9 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             .max_frames_per_stream
                             .is_some_and(|max| frames >= max)
                         {
-                            let close_error = CommunicationError::StreamError;
+                            let close_error = CommunicationError::ProtocolViolation(
+                                "maximum frames per stream exceeded".into(),
+                            );
                             let _ = tx.send(Err(close_error.clone())).await;
                             connection.close(policy.application_close_code, b"max frames exceeded");
                             break;
@@ -433,10 +476,13 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             .await
                         {
                             Ok(Ok(())) => {}
-                            Ok(Err(CommunicationError::StreamClosed)) => break,
+                            Ok(Err(CommunicationError::ClosedByPeer)) => break,
                             Ok(Err(error)) => {
                                 tracing::warn!(%error, "MTP receive stream failed while reading frame header");
-                                let _ = tx.send(Err(error)).await;
+                                let _ = tx.send(Err(CommunicationError::transport(
+                                    TransportPhase::ReadFrame,
+                                    error.to_string(),
+                                ))).await;
                                 connection.close(
                                     policy.application_close_code,
                                     b"frame header read error",
@@ -456,6 +502,9 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                         "MTP receive stream idle timeout"
                                     );
                                 }
+                                let _ = tx.send(Err(CommunicationError::timeout(
+                                    TransportPhase::ReadFrame,
+                                ))).await;
                                 break;
                             }
                         }
@@ -499,7 +548,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             )
                             .await;
                             if !matches!(&body_read, Ok(Ok(()))) {
-                                if matches!(&body_read, Ok(Err(CommunicationError::StreamClosed))) {
+                                if matches!(&body_read, Ok(Err(CommunicationError::ClosedByPeer))) {
                                     break 'stream;
                                 }
                                 tracing::warn!(
@@ -507,7 +556,15 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                     ?body_read,
                                     "MTP receive stream failed while reading frame body"
                                 );
-                                let _ = tx.send(Err(CommunicationError::StreamError)).await;
+                                let error = match body_read {
+                                    Err(_) => CommunicationError::timeout(TransportPhase::ReadFrame),
+                                    Ok(Err(error)) => CommunicationError::transport(
+                                        TransportPhase::ReadFrame,
+                                        error.to_string(),
+                                    ),
+                                    Ok(Ok(())) => unreachable!(),
+                                };
+                                let _ = tx.send(Err(error)).await;
                                 connection
                                     .close(policy.application_close_code, b"frame body read error");
                                 break 'stream;
@@ -619,12 +676,31 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             let _ = sender.send(&pong).await;
                             continue;
                         }
+                        if message.is_type(mtp_codec::CommunicationType::Pong)
+                            && let Some(id) = message.id().and_then(mtp_common::PingId::new)
+                            && {
+                                let mut expected = expected_pong_id.write().await;
+                                if *expected == Some(id) {
+                                    *expected = None;
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                        {
+                            if let Some(observer) = pong_observer.read().await.as_ref() {
+                                let _ = observer.try_send(message);
+                            }
+                            continue;
+                        }
                         if tx.send(Ok(message)).await.is_err() {
                             break;
                         }
                     }
                 });
             }
+            stream_tasks.abort_all();
+            while stream_tasks.join_next().await.is_some() {}
         });
         Self {
             incoming: Arc::new(Mutex::new(rx)),
@@ -632,6 +708,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
             pipes: Arc::new(Mutex::new(pipe_rx)),
             connection,
             ping_sender,
+            pong_observer,
+            expected_pong_id,
             max_message_size,
             type_map,
             queue_notify,
@@ -643,6 +721,21 @@ impl<C: TransportConnection> GenericReceiver<C> {
     }
     pub async fn respond_to_pings(&self, sender: GenericSender<C>) {
         *self.ping_sender.write().await = Some(sender);
+    }
+
+    pub fn respond_to_pings_now(&self, sender: GenericSender<C>) {
+        if let Ok(mut ping_sender) = self.ping_sender.try_write() {
+            *ping_sender = Some(sender);
+        }
+    }
+
+    /// Route only the currently expected Pong to a bounded observer.
+    pub async fn observe_pongs_bounded(&self, observer: mpsc::Sender<CommunicationValue>) {
+        *self.pong_observer.write().await = Some(observer);
+    }
+
+    pub async fn set_expected_pong_id_value(&self, expected_pong_id: Option<mtp_common::PingId>) {
+        *self.expected_pong_id.write().await = expected_pong_id;
     }
 
     #[cfg(feature = "pipes")]
@@ -693,17 +786,14 @@ impl<C: TransportConnection> GenericReceiver<C> {
         self.decode_rejections.snapshot()
     }
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
-        let result = self
-            .incoming
-            .lock()
-            .await
-            .recv()
-            .await
-            .unwrap_or(Err(CommunicationError::StreamClosed));
-        if result.is_ok() {
+        let result = self.incoming.lock().await.recv().await;
+        if result.is_some() {
             self.queue_notify.notify_one();
         }
-        result
+        result.unwrap_or(Err(self
+            .connection
+            .close_reason()
+            .unwrap_or(CommunicationError::ConnectionLost)))
     }
 
     #[cfg(feature = "pipes")]
@@ -715,15 +805,14 @@ impl<C: TransportConnection> GenericReceiver<C> {
         tokio::select! {
             msg = incoming.recv() => {
                 match msg {
-                    Some(Ok(val)) => {
+                    Some(result) => {
                         self.queue_notify.notify_one();
-                        Ok(crate::TransportEvent::Message(val))
+                        result.map(crate::TransportEvent::Message)
                     }
-                    Some(Err(e)) => Err(e),
                     None => Err(self
                         .connection
                         .close_reason()
-                        .unwrap_or(CommunicationError::StreamClosed)),
+                        .unwrap_or(CommunicationError::ConnectionLost)),
                 }
             }
             pipe = pipes.recv() => {
@@ -735,7 +824,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                     None => Err(self
                         .connection
                         .close_reason()
-                        .unwrap_or(CommunicationError::StreamClosed)),
+                        .unwrap_or(CommunicationError::ConnectionLost)),
                 }
             }
         }
@@ -743,13 +832,11 @@ impl<C: TransportConnection> GenericReceiver<C> {
 
     #[cfg(feature = "pipes")]
     pub async fn receive_pipe(&self) -> Result<PipeReader<C::RecvStream>, CommunicationError> {
-        let result = self
-            .pipes
-            .lock()
-            .await
-            .recv()
-            .await
-            .ok_or(CommunicationError::StreamClosed);
+        let result = self.pipes.lock().await.recv().await.ok_or_else(|| {
+            self.connection
+                .close_reason()
+                .unwrap_or(CommunicationError::ConnectionLost)
+        });
         if result.is_ok() {
             self.queue_notify.notify_one();
         }
@@ -767,9 +854,10 @@ impl<C: TransportConnection> GenericReceiver<C> {
                     Ok(Some(reader))
                 }
                 Err(mpsc::error::TryRecvError::Empty) => Ok(None),
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    Err(CommunicationError::StreamClosed)
-                }
+                Err(mpsc::error::TryRecvError::Disconnected) => Err(self
+                    .connection
+                    .close_reason()
+                    .unwrap_or(CommunicationError::ConnectionLost)),
             },
             Err(_) => Ok(None),
         }

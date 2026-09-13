@@ -32,12 +32,24 @@ mod error {
 }
 
 use mtp_codec::{
-    CommunicationValue, DataType, DataValue, PROTOCOL_VERSION, Version,
-    registry::{Registry, VersionedCodec},
+    CommunicationValue, DataType, DataValue, TypeMap, Version,
+    registry::{Registry, VersionedCodec, bootstrap_type_map},
 };
 use mtp_common::{CommunicationError, HandshakeOutcome, RejectionReason};
 
 use connection::connection_from_parts;
+
+fn native_client_config(config: &ClientConfig) -> mtp_native::ClientConfig {
+    match &config.tls {
+        ClientTlsConfig::SystemRoots => mtp_native::ClientConfig::new(config.policy),
+        ClientTlsConfig::PinnedPem(cert_pem) => {
+            mtp_native::ClientConfig::new(config.policy).with_server_certificate(cert_pem.clone())
+        }
+        ClientTlsConfig::PinnedSpkiSha256(hash) => {
+            mtp_native::ClientConfig::new(config.policy).with_pinned_certificate_hash(*hash)
+        }
+    }
+}
 
 fn parse_handshake_response(
     response: &CommunicationValue,
@@ -46,7 +58,13 @@ fn parse_handshake_response(
     let bad_version = mtp_codec::CommunicationType::ErrorBadVersion.try_to_id(type_map);
     if Some(response.get_type()) == bad_version {
         let supported_versions = match response.get_data(DataType::Version) {
-            Some(DataValue::Str(v)) if !v.is_empty() => v.split(',').map(String::from).collect(),
+            Some(DataValue::Array(values)) => values
+                .iter()
+                .filter_map(|value| match value {
+                    DataValue::Str(version) => Some(version.clone()),
+                    _ => None,
+                })
+                .collect(),
             _ => vec![],
         };
         return Ok(HandshakeOutcome::Rejected {
@@ -115,22 +133,94 @@ fn codec_for_version(version: &Version) -> Result<VersionedCodec, CommunicationE
     })
 }
 
+fn supported_versions() -> Vec<Version> {
+    let mut versions: Vec<_> = Registry::builtin().versions().cloned().collect();
+    versions.sort_by(|left, right| right.cmp(left));
+    versions
+}
+
+fn version_offer(versions: &[Version]) -> DataValue {
+    DataValue::Array(
+        versions
+            .iter()
+            .map(|version| DataValue::Str(version.to_string()))
+            .collect(),
+    )
+}
+
+async fn select_codec(
+    sender: &mtp_native::Sender,
+    receiver: &mtp_native::Receiver,
+    bootstrap: &TypeMap,
+    offered: &[Version],
+) -> Result<(Version, VersionedCodec), CommunicationError> {
+    let selection = receiver.receive().await?;
+    let bad_version = mtp_codec::CommunicationType::ErrorBadVersion.try_to_id(bootstrap);
+    if Some(selection.get_type()) == bad_version {
+        let host_versions = match selection.get_data(DataType::Version) {
+            Some(DataValue::Array(versions)) => versions
+                .iter()
+                .map(|version| match version {
+                    DataValue::Str(version) => Ok(version.clone()),
+                    _ => Err(CommunicationError::ProtocolViolation(
+                        "host returned a malformed supported-version collection".into(),
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => {
+                return Err(CommunicationError::ProtocolViolation(
+                    "host omitted the supported-version collection".into(),
+                ));
+            }
+        };
+        return Err(CommunicationError::ProtocolVersionNegotiation {
+            client_versions: offered.iter().map(ToString::to_string).collect(),
+            host_versions,
+        });
+    }
+    let expected = mtp_codec::CommunicationType::IdentificationResponse
+        .try_to_id(bootstrap)
+        .ok_or_else(|| CommunicationError::Other("bootstrap response is unavailable".into()))?;
+    if selection.get_type() != expected
+        || selection.get_data(DataType::Connected) != Some(&DataValue::BoolTrue)
+    {
+        return Err(CommunicationError::Other(
+            "host did not return a version selection".into(),
+        ));
+    }
+    let version = match selection.get_data(DataType::Version) {
+        Some(DataValue::Str(version)) => Version::parse(version),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        CommunicationError::Other("host returned an invalid negotiated version".into())
+    })?;
+    if !offered.contains(&version) {
+        return Err(CommunicationError::Other(
+            "host selected a protocol version the client did not offer".into(),
+        ));
+    }
+    let codec = codec_for_version(&version)?;
+    sender.set_type_map(codec.type_map()).await;
+    receiver.set_type_map(codec.type_map()).await;
+    Ok((version, codec))
+}
+
 pub struct MTPClient;
 
 impl MTPClient {
     pub async fn connect(config: ClientConfig) -> Result<MTPConnection, CommunicationError> {
         let (sender, receiver) =
-            mtp_native::connect(&config.url, config.server_cert(), config.policy).await?;
-        let opening_codec = codec_for_version(&PROTOCOL_VERSION)?;
-        sender.set_type_map(opening_codec.type_map()).await;
-        receiver.set_type_map(opening_codec.type_map()).await;
-
-        let version_str = format!("{}", PROTOCOL_VERSION);
+            mtp_native::connect_with_config(&config.url, native_client_config(&config)).await?;
+        let bootstrap = bootstrap_type_map();
+        let offered = supported_versions();
+        sender.set_type_map(&bootstrap).await;
+        receiver.set_type_map(&bootstrap).await;
         let mut ident = CommunicationValue::new_with_type_map(
             mtp_codec::CommunicationType::Identification,
-            opening_codec.type_map(),
+            &bootstrap,
         )
-        .add_typed_default(DataType::Version, DataValue::Str(version_str))
+        .add_typed_default(DataType::Version, version_offer(&offered))
         .add_typed_default(
             DataType::Id,
             DataValue::UnsignedNumber(config.client_id.into()),
@@ -141,9 +231,11 @@ impl MTPClient {
 
         sender.send(&ident).await?;
 
+        let (negotiated, codec) = select_codec(&sender, &receiver, &bootstrap, &offered).await?;
+
         let response = receiver.receive().await?;
-        let outcome = parse_handshake_response(&response, opening_codec.type_map())?;
-        let (negotiated, assigned_id) = match outcome {
+        let outcome = parse_handshake_response(&response, codec.type_map())?;
+        let (returned_version, assigned_id) = match outcome {
             mtp_common::HandshakeOutcome::Accepted {
                 version,
                 assigned_id,
@@ -160,13 +252,12 @@ impl MTPClient {
         };
         #[cfg(not(feature = "crypto"))]
         let _ = assigned_id;
-        if negotiated != PROTOCOL_VERSION {
+        if returned_version != negotiated {
             sender.close().await;
             return Err(CommunicationError::Other(
-                "host selected a protocol version the client did not offer".into(),
+                "host changed the negotiated protocol version".into(),
             ));
         }
-        let codec = codec_for_version(&negotiated)?;
 
         #[cfg(feature = "crypto")]
         let client_id = assigned_id;
@@ -215,21 +306,20 @@ impl MTPClient {
         use mtp_codec::CommunicationType;
 
         let (sender, receiver) =
-            mtp_native::connect(&config.url, config.server_cert(), config.policy).await?;
+            mtp_native::connect_with_config(&config.url, native_client_config(&config)).await?;
 
-        let handshake_codec = codec_for_version(&PROTOCOL_VERSION)?;
-        let tm = handshake_codec.type_map().clone();
-        sender.set_type_map(&tm).await;
-        receiver.set_type_map(&tm).await;
-        let version_str = format!("{}", PROTOCOL_VERSION);
+        let bootstrap = bootstrap_type_map();
+        let offered = supported_versions();
+        sender.set_type_map(&bootstrap).await;
+        receiver.set_type_map(&bootstrap).await;
         let public_key_bytes = keys
             .public_key_bundle()
             .try_as_bytes()
             .map_err(|error| CommunicationError::ParseError(error.to_string()))?;
 
         let mut ident =
-            CommunicationValue::new_with_type_map(CommunicationType::Identification, &tm)
-                .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
+            CommunicationValue::new_with_type_map(CommunicationType::Identification, &bootstrap)
+                .add_typed_default(DataType::Version, version_offer(&offered))
                 .add_typed_default(
                     DataType::Id,
                     DataValue::UnsignedNumber(config.client_id as u128),
@@ -245,6 +335,11 @@ impl MTPClient {
             sender.close().await;
             return Err(e);
         }
+
+        let (negotiated, handshake_codec) =
+            select_codec(&sender, &receiver, &bootstrap, &offered).await?;
+        let tm = handshake_codec.type_map().clone();
+        let version_str = negotiated.to_string();
 
         let server_challenge = match crypto::receive_verified_challenge(
             &receiver,
@@ -347,14 +442,14 @@ impl MTPClient {
             ));
         }
 
-        let negotiated = crypto::negotiated_version(&response)?;
-        if negotiated != PROTOCOL_VERSION {
+        let returned_version = crypto::negotiated_version(&response)?;
+        if returned_version != negotiated {
             sender.close().await;
             return Err(CommunicationError::AuthenticationFailed(
-                "host selected a protocol version the client did not offer".into(),
+                "host changed the negotiated protocol version".into(),
             ));
         }
-        let codec = codec_for_version(&negotiated)?;
+        let codec = handshake_codec;
         let client_id = config.client_id;
         Ok(connection_from_parts(
             config,
@@ -410,21 +505,21 @@ impl MTPClient {
         use mtp_codec::CommunicationType;
 
         let (sender, receiver) =
-            mtp_native::connect(&config.url, config.server_cert(), config.policy).await?;
+            mtp_native::connect_with_config(&config.url, native_client_config(&config)).await?;
 
-        let handshake_codec = codec_for_version(&PROTOCOL_VERSION)?;
-        let tm = handshake_codec.type_map().clone();
-        sender.set_type_map(&tm).await;
-        receiver.set_type_map(&tm).await;
-        let version_str = format!("{}", PROTOCOL_VERSION);
+        let bootstrap = bootstrap_type_map();
+        let offered = supported_versions();
+        sender.set_type_map(&bootstrap).await;
+        receiver.set_type_map(&bootstrap).await;
         let pk_bundle = keys.public_key_bundle();
         let pk_bytes = pk_bundle
             .try_as_bytes()
             .map_err(|error| CommunicationError::ParseError(error.to_string()))?;
 
-        let mut register = CommunicationValue::new_with_type_map(CommunicationType::Register, &tm)
-            .add_typed_default(DataType::Version, DataValue::Str(version_str.clone()))
-            .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
+        let mut register =
+            CommunicationValue::new_with_type_map(CommunicationType::Register, &bootstrap)
+                .add_typed_default(DataType::Version, version_offer(&offered))
+                .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
         if let Some(desc) = &config.description {
             register =
                 register.add_typed_default(DataType::Description, DataValue::Str(desc.clone()));
@@ -433,6 +528,11 @@ impl MTPClient {
             sender.close().await;
             return Err(e);
         }
+
+        let (negotiated, handshake_codec) =
+            select_codec(&sender, &receiver, &bootstrap, &offered).await?;
+        let tm = handshake_codec.type_map().clone();
+        let version_str = negotiated.to_string();
 
         let server_challenge = match crypto::receive_verified_challenge(
             &receiver,
@@ -526,14 +626,14 @@ impl MTPClient {
             return Err(e);
         }
 
-        let negotiated = crypto::negotiated_version(&response)?;
-        if negotiated != PROTOCOL_VERSION {
+        let returned_version = crypto::negotiated_version(&response)?;
+        if returned_version != negotiated {
             sender.close().await;
             return Err(CommunicationError::AuthenticationFailed(
-                "host selected a protocol version the client did not offer".into(),
+                "host changed the negotiated protocol version".into(),
             ));
         }
-        let codec = codec_for_version(&negotiated)?;
+        let codec = handshake_codec;
         Ok(connection_from_parts(
             config,
             sender,

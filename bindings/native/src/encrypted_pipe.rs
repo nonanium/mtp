@@ -1075,6 +1075,7 @@ pub struct EncryptedPipeWriter<S> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PipeStreamState {
     Open,
+    InProgress,
     Finalized,
     Failed,
 }
@@ -1094,8 +1095,17 @@ impl<S> EncryptedPipeWriter<S> {
         self.sequence
     }
 
-    pub fn into_inner(self) -> S {
-        self.stream
+    /// Recover the underlying stream only at a confirmed record boundary.
+    ///
+    /// An in-progress or failed writer may have emitted a partial record, so
+    /// its stream is discarded rather than returned for unsafe reuse.
+    pub fn try_into_inner(self) -> Result<S, EncryptedPipeError> {
+        match self.state {
+            PipeStreamState::Open | PipeStreamState::Finalized => Ok(self.stream),
+            PipeStreamState::InProgress | PipeStreamState::Failed => {
+                Err(EncryptedPipeError::InvalidState)
+            }
+        }
     }
 }
 
@@ -1103,14 +1113,28 @@ impl<S: AsyncWrite + Unpin> EncryptedPipeWriter<S> {
     /// Encrypt and append one record. Record boundaries are preserved by the
     /// four-byte length prefix and are authenticated as associated data.
     pub async fn write_record(&mut self, plaintext: &[u8]) -> Result<(), EncryptedPipeError> {
-        if self.state != PipeStreamState::Open {
-            return Err(EncryptedPipeError::InvalidState);
+        match self.state {
+            PipeStreamState::Open => {}
+            PipeStreamState::InProgress => {
+                self.poison();
+                return Err(EncryptedPipeError::InvalidState);
+            }
+            PipeStreamState::Finalized | PipeStreamState::Failed => {
+                return Err(EncryptedPipeError::InvalidState);
+            }
         }
-        let result = self.write_record_inner(plaintext, RECORD_TYPE_DATA).await;
-        if result.is_err() {
-            self.poison();
+
+        self.state = PipeStreamState::InProgress;
+        match self.write_record_inner(plaintext, RECORD_TYPE_DATA).await {
+            Ok(()) => {
+                self.state = PipeStreamState::Open;
+                Ok(())
+            }
+            Err(error) => {
+                self.poison();
+                Err(error)
+            }
         }
-        result
     }
 
     async fn write_record_inner(
@@ -1157,6 +1181,7 @@ impl<S: AsyncWrite + Unpin> EncryptedPipeWriter<S> {
         if self.state != PipeStreamState::Open {
             return Err(EncryptedPipeError::InvalidState);
         }
+        self.state = PipeStreamState::InProgress;
         if let Err(error) = self.write_record_inner(&[], RECORD_TYPE_FINAL).await {
             self.poison();
             return Err(error);
@@ -1194,8 +1219,17 @@ impl<R> EncryptedPipeReader<R> {
         self.sequence
     }
 
-    pub fn into_inner(self) -> R {
-        self.stream
+    /// Recover the underlying stream only at a confirmed record boundary.
+    ///
+    /// An in-progress or failed reader may have consumed part of a record, so
+    /// its stream is discarded rather than returned for unsafe reuse.
+    pub fn try_into_inner(self) -> Result<R, EncryptedPipeError> {
+        match self.state {
+            PipeStreamState::Open | PipeStreamState::Finalized => Ok(self.stream),
+            PipeStreamState::InProgress | PipeStreamState::Failed => {
+                Err(EncryptedPipeError::InvalidState)
+            }
+        }
     }
 }
 
@@ -1203,17 +1237,29 @@ impl<R: AsyncRead + Unpin> EncryptedPipeReader<R> {
     /// Read and authenticate the next record. `None` is returned only after a
     /// valid authenticated final record; transport EOF alone is truncation.
     pub async fn read_record(&mut self) -> Result<Option<Vec<u8>>, EncryptedPipeError> {
-        if self.state == PipeStreamState::Finalized {
-            return Ok(None);
+        match self.state {
+            PipeStreamState::Open => {}
+            PipeStreamState::Finalized => return Ok(None),
+            PipeStreamState::InProgress => {
+                self.poison();
+                return Err(EncryptedPipeError::InvalidState);
+            }
+            PipeStreamState::Failed => return Err(EncryptedPipeError::InvalidState),
         }
-        if self.state == PipeStreamState::Failed {
-            return Err(EncryptedPipeError::InvalidState);
+
+        self.state = PipeStreamState::InProgress;
+        match self.read_record_inner().await {
+            Ok(record) => {
+                if self.state == PipeStreamState::InProgress {
+                    self.state = PipeStreamState::Open;
+                }
+                Ok(record)
+            }
+            Err(error) => {
+                self.poison();
+                Err(error)
+            }
         }
-        let result = self.read_record_inner().await;
-        if result.is_err() {
-            self.poison();
-        }
-        result
     }
 
     async fn read_record_inner(&mut self) -> Result<Option<Vec<u8>>, EncryptedPipeError> {
@@ -1353,7 +1399,7 @@ mod tests {
         let context = PipeProtectionContext::new(b"session", 0x40, 0).expect("context");
         let mut writer = EncryptedPipeWriter::new(left, [3u8; 32], context.clone());
         writer.write_record(b"not finished").await.expect("record");
-        let stream = writer.into_inner();
+        let stream = writer.try_into_inner().expect("aligned stream");
         drop(stream);
 
         let mut reader = EncryptedPipeReader::new(right, [3u8; 32], context);

@@ -6,3 +6,16 @@
  */
 export * from "./client.js";
 export * from "./schema.js";
+export * from "./subscription.js";
+export {
+  mergeDataValues,
+  mergeDataValuesDetailed,
+  mergePayloadFrom,
+  mergePayloadFromDetailed,
+} from "./codec.js";
+export type {
+  MTPMergeOptions,
+  MTPMergePath,
+  MTPMergeReport,
+  MTPMergeResult,
+} from "./codec.js";
