@@ -34,6 +34,7 @@ interface SubscriptionDispatcherOptions<T> {
 interface QueuedMessage<T> {
   message: T;
   frame: ParsedFrame;
+  settle: () => void;
 }
 
 const DEFAULT_CONCURRENCY = 1;
@@ -82,21 +83,27 @@ export class SubscriptionDispatcher<T> {
     this.#onOverflow = options.onOverflow;
   }
 
-  enqueue(message: T, frame: ParsedFrame): void {
-    if (!this.#active) return;
-    if (this.#queue.length >= this.#queueCapacity) {
-      this.#active = false;
-      this.#queue.length = 0;
-      this.#reportError(new MTPSubscriptionError(this.#queueCapacity), frame);
-      this.#onOverflow();
-      return;
-    }
-    this.#queue.push({ message, frame });
-    this.#drain();
+  enqueue(message: T, frame: ParsedFrame): Promise<void> {
+    return new Promise((settle) => {
+      if (!this.#active) {
+        settle();
+        return;
+      }
+      if (this.#queue.length >= this.#queueCapacity) {
+        this.#active = false;
+        this.#reportError(new MTPSubscriptionError(this.#queueCapacity), frame);
+        this.#onOverflow();
+        settle();
+        return;
+      }
+      this.#queue.push({ message, frame, settle });
+      this.#drain();
+    });
   }
 
   close(): void {
     this.#active = false;
+    for (const queued of this.#queue) queued.settle();
     this.#queue.length = 0;
   }
 
@@ -116,6 +123,7 @@ export class SubscriptionDispatcher<T> {
       this.#reportError(error, next.frame);
     } finally {
       this.#running -= 1;
+      next.settle();
       this.#drain();
     }
   }

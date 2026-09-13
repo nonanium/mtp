@@ -70,6 +70,7 @@
             pkgs.cargo-deny
             pkgs.wasm-pack
             pkgs.pnpm
+            pkgs.nodejs
             pkgs.coreutils
             pkgs.stdenv.cc
             pkgs.pkg-config

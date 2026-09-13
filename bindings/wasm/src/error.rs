@@ -37,6 +37,7 @@ pub fn from_protection_error(e: mtp_codec::ProtectionError) -> JsValue {
 #[cfg(target_arch = "wasm32")]
 mod tests {
     use super::*;
+    use wasm_bindgen::JsCast;
     use wasm_bindgen_test::*;
 
     #[wasm_bindgen_test]
@@ -69,7 +70,11 @@ mod tests {
     fn from_communication_error_renders() {
         use mtp_common::CommunicationError;
         let err = from_communication_error(CommunicationError::ConnectionLost);
-        let msg = err.as_string().unwrap_or_default();
+        let msg = err
+            .unchecked_into::<js_sys::Error>()
+            .message()
+            .as_string()
+            .unwrap_or_default();
         assert!(msg.contains("Connection terminated"));
     }
 
