@@ -203,6 +203,7 @@ pub(crate) async fn connection_from_parts(
     #[cfg(feature = "pipes")]
     let type_map = codec.type_map().clone();
     receiver.set_type_map(codec.type_map()).await;
+    receiver.set_max_message_size(config.policy.max_message_size);
     let remote_addr = sender.handle().remote_addr();
     #[cfg(feature = "crypto")]
     let ping_client_id = client_id;
