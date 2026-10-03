@@ -60,11 +60,6 @@ jobs:
           echo "prerelease=$PRERELEASE" >> "$FORGEJO_OUTPUT"
           echo "package=$PACKAGE" >> "$FORGEJO_OUTPUT"
 
-      - name: Stage native plugin
-        run: |
-          node plugins/tauri/stage-release.mjs "$RUNNER_TEMP/mtp-release"
-          tar -czf mtp-native.tar.gz -C "$RUNNER_TEMP/mtp-release" mtp-native
-
       - name: Create release and upload package
         env:
           TOKEN: ${{ forgejo.token }}
@@ -110,7 +105,3 @@ jobs:
           curl -fsS -X POST "$API/repos/$REPO/releases/$RELEASE_ID/assets?name=$PACKAGE_NAME" \
             -H "Authorization: token $TOKEN" \
             -F "attachment=@$PACKAGE"
-
-          curl -fsS -X POST "$API/repos/$REPO/releases/$RELEASE_ID/assets?name=mtp-native.tar.gz" \
-            -H "Authorization: token $TOKEN" \
-            -F "attachment=@mtp-native.tar.gz"
