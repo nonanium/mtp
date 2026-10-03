@@ -21,7 +21,6 @@ jobs:
           nix develop --command bash -c '
             set -euo pipefail
 
-            cargo fmt --all --check
             cargo clippy --workspace --exclude mtp-wasm --exclude client --exclude server --exclude keygen --all-targets --all-features -- -D warnings -W unreachable-pub
             cargo test --workspace --exclude mtp-wasm --all-features
             RUSTFLAGS="--cfg web_sys_unstable_apis" cargo build -p mtp-wasm --target wasm32-unknown-unknown

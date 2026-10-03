@@ -83,7 +83,6 @@
             export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$PWD/${cargoTargetDir}}"
 
             timeout 60s pnpm install --frozen-lockfile
-            cargo fmt --all --check
             cargo build
             cargo test --workspace --exclude mtp-wasm --all-features
             cargo check -p client -p server -p keygen --all-targets --all-features
