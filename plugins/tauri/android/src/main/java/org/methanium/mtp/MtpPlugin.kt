@@ -17,7 +17,7 @@ class MtpPlugin(private val activity: Activity) : Plugin(activity) {
     override fun load(webView: android.webkit.WebView) {
         MtpService.attach(activity)
     }
-    override fun onResume(activity: androidx.appcompat.app.AppCompatActivity) {
+    override fun onResume() {
         MtpService.attach(activity)
     }
 
