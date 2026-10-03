@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-connect"
+description = "Enables the mtp_connect command without any pre-configured scope."
+commands.allow = ["mtp_connect"]
+
+[[permission]]
+identifier = "deny-mtp-connect"
+description = "Denies the mtp_connect command without any pre-configured scope."
+commands.deny = ["mtp_connect"]

@@ -4,18 +4,20 @@ members = [
     "codec",
     "common",
     "core",
+    "pipes",
     "crypto",
     "type-map",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 [workspace.dependencies]
-mtp-codec = { version = "0.3.0", path = "codec" }
-mtp-common = { version = "0.3.0", path = "common" }
-mtp-core = { version = "0.3.0", path = "core" }
-mtp-crypto = { version = "0.3.0", path = "crypto" }
-mtp-type-map = { version = "0.3.0", path = "type-map" }
+mtp-codec = { version = "0.4.0", path = "codec" }
+mtp-common = { version = "0.4.0", path = "common" }
+mtp-core = { version = "0.4.0", path = "core" }
+mtp-pipes = { version = "0.4.0", path = "pipes" }
+mtp-crypto = { version = "0.4.0", path = "crypto" }
+mtp-type-map = { version = "0.4.0", path = "type-map" }

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-request"
+description = "Enables the mtp_request command without any pre-configured scope."
+commands.allow = ["mtp_request"]
+
+[[permission]]
+identifier = "deny-mtp-request"
+description = "Denies the mtp_request command without any pre-configured scope."
+commands.deny = ["mtp_request"]

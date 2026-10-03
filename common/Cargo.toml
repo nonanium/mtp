@@ -7,6 +7,9 @@ edition.workspace = true
 thiserror = "2.0.18"
 rand = { version = "0.10.1", features = ["std", "std_rng"] }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+
 [features]
 pipes = []
 test-helpers = []

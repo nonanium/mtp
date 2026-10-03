@@ -18,9 +18,9 @@ use crate::connection::MTPConnection;
 use crate::engine::HandshakeEngine;
 use crate::error::AcceptError;
 #[cfg(feature = "pipes")]
-use crate::pipe::PipeDispatcher;
+use mtp_pipes::PipeDispatcher;
 #[cfg(feature = "pipes")]
-use crate::pipe::run_dispatcher;
+use mtp_pipes::run_dispatcher;
 
 pub struct MTPHost {
     pub(crate) transport: mtp_native::Host,

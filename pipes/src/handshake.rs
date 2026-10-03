@@ -1,40 +1,28 @@
-//! Endpoint-to-endpoint authenticated encryption for MTP pipes.
+//! Authenticated session offers and forward-secure pipe handshakes.
 //!
 //! Pipe negotiation and QUIC/WebTransport remain transport primitives. This
 //! module adds the application-facing record layer that callers can place on
-//! top of an accepted [`PipeWriter`] or [`PipeReader`], plus an explicit
+//! top of any async byte stream, plus an explicit
 //! signed/KEM session-offer helper. The raw stream adapter does not infer
 //! application identities or derive keys from clear pipe metadata.
 
+use crate::policy::{pipe_signature_policy, pipe_signer_for_keyring};
+use crate::{EncryptedPipeError, EncryptedPipeReader, EncryptedPipeWriter};
 use mtp_codec::{
     DataValue, DecodeLimits, MtpProtectionPurpose, ProtectionError, ProtectionPolicy,
     ProtectionPurpose,
 };
 use mtp_common::PipeId;
 use mtp_crypto::{
-    AeadDecrypt, AeadEncrypt, DualSigner, Ed25519Signer, KemPublicKey, Keyring, PublicKeyBundle,
-    SignatureScheme, XChaCha20Poly1305,
+    DualSigner, Ed25519Signer, KemPublicKey, Keyring, PublicKeyBundle, SignatureScheme,
 };
 use rand::RngExt;
 use std::fmt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-const PIPE_E2EE_DOMAIN: &[u8] = b"MTP-PIPE-E2EE-1";
-const PIPE_RECORD_KDF_DOMAIN: &[u8] = b"MTP-PIPE-E2EE-1/KEY";
 const PIPE_TRANSCRIPT_DOMAIN: &[u8] = b"MTP-PIPE-TRANSCRIPT-1";
-const PIPE_RECORD_MESSAGE_LABEL: &[u8] = b"/message";
-const PIPE_RECORD_NEXT_LABEL: &[u8] = b"/next";
 const SESSION_ID_MAX_LEN: usize = 1024;
-const RECORD_LENGTH_BYTES: usize = 4;
-const RECORD_TYPE_BYTES: usize = 1;
-const RECORD_TYPE_DATA: u8 = 0;
-const RECORD_TYPE_FINAL: u8 = 1;
-const XCHACHA_OVERHEAD: usize =
-    mtp_crypto::aead::XCHACHA20POLY1305_NONCE_LEN + mtp_crypto::aead::AUTH_TAG_LEN;
-
-/// Maximum encoded ciphertext size of one encrypted pipe record.
-pub const MAX_ENCRYPTED_PIPE_RECORD: usize = 16 * 1024 * 1024;
 
 /// Purpose authenticated by the signed session-key offer.
 pub const PIPE_SESSION_SIGNATURE_PURPOSE: u8 = MtpProtectionPurpose::PipeSessionSignature.value();
@@ -119,6 +107,11 @@ impl PipeProtectionContext {
     pub fn transcript_hash(&self) -> &[u8; 32] {
         &self.transcript_hash
     }
+
+    pub fn with_transcript_hash(mut self, transcript_hash: [u8; 32]) -> Self {
+        self.transcript_hash = transcript_hash;
+        self
+    }
 }
 
 /// Endpoint and stream metadata that a pipe-session key must bind.
@@ -154,38 +147,12 @@ impl PipeSessionParameters {
         })
     }
 
-    #[deprecated(note = "use new_id with PipeId")]
-    pub fn new(
-        session_id: impl AsRef<[u8]>,
-        pipe_id: u32,
-        sender_id: u64,
-        recipient_id: u64,
-        purpose: u8,
-        direction: u8,
-    ) -> Result<Self, PipeSessionError> {
-        let pipe_id = PipeId::try_from(pipe_id)
-            .map_err(|_| PipeSessionError::InvalidParameters("pipe id must be non-zero"))?;
-        Self::new_id(
-            session_id,
-            pipe_id,
-            sender_id,
-            recipient_id,
-            purpose,
-            direction,
-        )
-    }
-
     pub fn session_id(&self) -> &[u8] {
         &self.session_id
     }
 
     pub fn pipe_id_value(&self) -> PipeId {
         self.pipe_id
-    }
-
-    #[deprecated(note = "use pipe_id_value")]
-    pub fn pipe_id(&self) -> u32 {
-        self.pipe_id.get()
     }
 
     pub fn sender_id(&self) -> u64 {
@@ -403,72 +370,6 @@ fn forward_secure_context(
     }
 }
 
-enum PipeSigner {
-    Ed25519(Ed25519Signer),
-    Dual(DualSigner),
-}
-
-impl SignatureScheme for PipeSigner {
-    fn algorithm(&self) -> u8 {
-        match self {
-            Self::Ed25519(signer) => signer.algorithm(),
-            Self::Dual(signer) => signer.algorithm(),
-        }
-    }
-
-    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, mtp_crypto::CryptoError> {
-        match self {
-            Self::Ed25519(signer) => signer.sign(message),
-            Self::Dual(signer) => signer.sign(message),
-        }
-    }
-
-    fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), mtp_crypto::CryptoError> {
-        match self {
-            Self::Ed25519(signer) => signer.verify(message, signature),
-            Self::Dual(signer) => signer.verify(message, signature),
-        }
-    }
-}
-
-fn pipe_signer_for_keyring(sender_keyring: &Keyring) -> Result<PipeSigner, PipeSessionError> {
-    match (
-        sender_keyring.sig_pq_secret_key.as_bytes().is_empty(),
-        sender_keyring.sig_pq_public_key.as_bytes().is_empty(),
-    ) {
-        (true, true) => {
-            sender_keyring.validate_ed25519_signing()?;
-            Ok(PipeSigner::Ed25519(Ed25519Signer::new(
-                &sender_keyring.sig_cl_secret_key,
-            )?))
-        }
-        (false, false) => {
-            sender_keyring.validate_dual_signing()?;
-            Ok(PipeSigner::Dual(DualSigner::new(
-                &sender_keyring.sig_cl_secret_key,
-                &sender_keyring.sig_pq_secret_key,
-                &sender_keyring.sig_pq_public_key,
-            )?))
-        }
-        _ => Err(PipeSessionError::InvalidParameters(
-            "incomplete ML-DSA key pair",
-        )),
-    }
-}
-
-fn pipe_signature_policy(keyring: &Keyring) -> Result<ProtectionPolicy, PipeSessionError> {
-    match (
-        keyring.sig_pq_secret_key.as_bytes().is_empty(),
-        keyring.sig_pq_public_key.as_bytes().is_empty(),
-    ) {
-        (true, true) => Ok(ProtectionPolicy::from(mtp_codec::SignaturePolicy::Ed25519)),
-        (false, false) => Ok(ProtectionPolicy::from(mtp_codec::SignaturePolicy::Dual)),
-        _ => Err(PipeSessionError::InvalidParameters(
-            "incomplete ML-DSA key pair",
-        )),
-    }
-}
-
 fn build_session_offer(
     params: &PipeSessionParameters,
     sender_keyring: &Keyring,
@@ -643,6 +544,50 @@ pub async fn initiate_group_pipe_session<S: AsyncWrite + Unpin>(
     Ok(EncryptedPipeWriter::new(stream, key, params.context()))
 }
 
+pub async fn initiate_group_pipe_session_with_suite<S: AsyncWrite + Unpin>(
+    mut stream: S,
+    params: PipeSessionParameters,
+    keys: &Keyring,
+    recipients: &[PublicKeyBundle],
+    dual: bool,
+) -> Result<EncryptedPipeWriter<S>, PipeSessionError> {
+    if recipients.is_empty() {
+        return Err(PipeSessionError::InvalidParameters(
+            "at least one recipient required",
+        ));
+    }
+    for recipient in recipients {
+        recipient.validate()?;
+    }
+    let signer: Box<dyn SignatureScheme + Send> = if dual {
+        Box::new(DualSigner::new(
+            &keys.sig_cl_secret_key,
+            &keys.sig_pq_secret_key,
+            &keys.sig_pq_public_key,
+        )?)
+    } else {
+        Box::new(Ed25519Signer::new(&keys.sig_cl_secret_key)?)
+    };
+    let mut key = Zeroizing::new([0u8; 32]);
+    rand::rng().fill(&mut *key);
+    let offer = session_offer_value(&params, *key)
+        .sign(
+            params.sender_id,
+            ProtectionPurpose::from(PIPE_SESSION_SIGNATURE_PURPOSE),
+            signer.as_ref(),
+        )?
+        .encrypt_for(
+            recipients,
+            ProtectionPurpose::from(PIPE_SESSION_ENCRYPTION_PURPOSE),
+        )?
+        .to_bytes()?;
+    if offer.len() > MAX_PIPE_SESSION_OFFER {
+        return Err(PipeSessionError::OfferTooLarge(offer.len()));
+    }
+    write_session_offer(&mut stream, &offer).await?;
+    Ok(EncryptedPipeWriter::new(stream, *key, params.context()))
+}
+
 /// Accept and authenticate a signed, recipient-encrypted session-key offer,
 /// then return the record layer for subsequent bytes.
 pub async fn accept_pipe_session<R: AsyncRead + Unpin>(
@@ -715,6 +660,55 @@ pub async fn accept_pipe_session_with_key_history<R: AsyncRead + Unpin>(
         ProtectionPurpose::from(PIPE_SESSION_ENCRYPTION_PURPOSE),
     )?;
     let key = validate_session_offer_with_keys(signed, expected, sender_public_keys, policy)?;
+    Ok(EncryptedPipeReader::new(stream, key, expected.context()))
+}
+
+/// Accept a legacy/group offer whose fresh session ID is selected by the
+/// sender. The ID is only trusted after the complete signed transcript passes.
+#[allow(clippy::too_many_arguments)]
+pub async fn accept_pipe_session_auto<R: AsyncRead + Unpin>(
+    mut stream: R,
+    pipe_id: PipeId,
+    sender_id: u64,
+    recipient_id: u64,
+    purpose: u8,
+    direction: u8,
+    recipient_keyring: &Keyring,
+    sender_public_keys: &[PublicKeyBundle],
+    policy: ProtectionPolicy,
+) -> Result<EncryptedPipeReader<R>, PipeSessionError> {
+    let offer = read_session_offer(&mut stream).await?;
+    let encrypted = DataValue::from_bytes_with_limits(
+        &offer,
+        DecodeLimits {
+            max_blob_size: MAX_PIPE_SESSION_OFFER,
+            ..DecodeLimits::default()
+        },
+    )
+    .ok_or(PipeSessionError::InvalidOffer)?;
+    let signed = encrypted.decrypt(
+        recipient_keyring,
+        ProtectionPurpose::from(PIPE_SESSION_ENCRYPTION_PURPOSE),
+    )?;
+    let fields = signed
+        .as_signed()
+        .ok_or(PipeSessionError::InvalidOffer)?
+        .value
+        .as_array_slice()
+        .ok_or(PipeSessionError::InvalidOffer)?;
+    let session_id = fields
+        .get(1)
+        .and_then(DataValue::as_bytes_slice)
+        .ok_or(PipeSessionError::InvalidOffer)?;
+    let expected = PipeSessionParameters::new_id(
+        session_id,
+        pipe_id,
+        sender_id,
+        recipient_id,
+        purpose,
+        direction,
+    )?;
+    let key = validate_session_offer_with_keys(signed, &expected, sender_public_keys, policy)?;
     Ok(EncryptedPipeReader::new(stream, key, expected.context()))
 }
 
@@ -885,6 +879,67 @@ pub async fn accept_forward_secure_pipe_session_with_key_history<
     policy: ProtectionPolicy,
 ) -> Result<EncryptedPipeReader<S>, PipeSessionError> {
     let init_bytes = read_session_offer(&mut stream).await?;
+    accept_forward_secure_pipe_session_after_init(
+        stream,
+        init_bytes,
+        expected,
+        recipient_keyring,
+        sender_public_keys,
+        policy,
+    )
+    .await
+}
+
+/// Learn the sender's session ID only after authenticating the init message.
+#[allow(clippy::too_many_arguments)]
+pub async fn accept_forward_secure_pipe_session_auto<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    pipe_id: PipeId,
+    sender_id: u64,
+    recipient_id: u64,
+    purpose: u8,
+    direction: u8,
+    recipient_keyring: &Keyring,
+    sender_public_keys: &[PublicKeyBundle],
+    policy: ProtectionPolicy,
+) -> Result<EncryptedPipeReader<S>, PipeSessionError> {
+    let init_bytes = read_session_offer(&mut stream).await?;
+    let init =
+        verify_forward_secure_value_with_keys(&init_bytes, sender_id, sender_public_keys, policy)?;
+    let fields = init
+        .as_array_slice()
+        .ok_or(PipeSessionError::InvalidOffer)?;
+    let session_id = fields
+        .get(1)
+        .and_then(DataValue::as_bytes_slice)
+        .ok_or(PipeSessionError::InvalidOffer)?;
+    let expected = PipeSessionParameters::new_id(
+        session_id,
+        pipe_id,
+        sender_id,
+        recipient_id,
+        purpose,
+        direction,
+    )?;
+    accept_forward_secure_pipe_session_after_init(
+        stream,
+        init_bytes,
+        &expected,
+        recipient_keyring,
+        sender_public_keys,
+        policy,
+    )
+    .await
+}
+
+async fn accept_forward_secure_pipe_session_after_init<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    init_bytes: Vec<u8>,
+    expected: &PipeSessionParameters,
+    recipient_keyring: &Keyring,
+    sender_public_keys: &[PublicKeyBundle],
+    policy: ProtectionPolicy,
+) -> Result<EncryptedPipeReader<S>, PipeSessionError> {
     let init = verify_forward_secure_value_with_keys(
         &init_bytes,
         expected.sender_id,
@@ -942,400 +997,55 @@ pub async fn accept_forward_secure_pipe_session_with_key_history<
     ))
 }
 
-/// Errors produced by the encrypted pipe record layer.
-#[derive(Debug)]
-pub enum EncryptedPipeError {
-    InvalidContext,
-    InvalidRecordLength(usize),
-    InvalidRecordType(u8),
-    InvalidState,
-    SequenceExhausted,
-    FinalRecordRequired,
-    UnexpectedEof,
-    Io(std::io::Error),
-    Crypto(mtp_crypto::CryptoError),
-}
-
-impl fmt::Display for EncryptedPipeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidContext => write!(f, "invalid encrypted pipe context"),
-            Self::InvalidRecordLength(length) => {
-                write!(f, "invalid encrypted pipe record length: {length}")
-            }
-            Self::InvalidRecordType(record_type) => {
-                write!(f, "invalid encrypted pipe record type: {record_type}")
-            }
-            Self::InvalidState => f.write_str("encrypted pipe is no longer usable"),
-            Self::SequenceExhausted => write!(f, "encrypted pipe sequence exhausted"),
-            Self::FinalRecordRequired => f.write_str("encrypted pipe ended without a final record"),
-            Self::UnexpectedEof => write!(f, "truncated encrypted pipe record"),
-            Self::Io(error) => write!(f, "encrypted pipe I/O error: {error}"),
-            Self::Crypto(error) => write!(f, "encrypted pipe authentication failed: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for EncryptedPipeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(error) => Some(error),
-            Self::Crypto(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for EncryptedPipeError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-impl From<mtp_crypto::CryptoError> for EncryptedPipeError {
-    fn from(error: mtp_crypto::CryptoError) -> Self {
-        Self::Crypto(error)
-    }
-}
-
-fn checked_record_length(plaintext_len: usize) -> Result<usize, EncryptedPipeError> {
-    let length = plaintext_len
-        .checked_add(XCHACHA_OVERHEAD)
-        .ok_or(EncryptedPipeError::InvalidRecordLength(usize::MAX))?;
-    if length > MAX_ENCRYPTED_PIPE_RECORD || length > u32::MAX as usize {
-        return Err(EncryptedPipeError::InvalidRecordLength(length));
-    }
-    Ok(length)
-}
-
-fn record_aad(
-    context: &PipeProtectionContext,
-    sequence: u64,
-    record_len: usize,
-    record_type: u8,
-) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(PIPE_E2EE_DOMAIN.len() + 2 + 32 + 8 + 4);
-    aad.extend_from_slice(PIPE_E2EE_DOMAIN);
-    aad.push(context.purpose);
-    aad.push(context.direction);
-    aad.extend_from_slice(context.transcript_hash());
-    aad.extend_from_slice(&sequence.to_be_bytes());
-    aad.extend_from_slice(&(record_len as u32).to_be_bytes());
-    aad.push(record_type);
-    aad
-}
-
-fn record_key_info(context: &PipeProtectionContext, sequence: u64, label: &[u8]) -> Vec<u8> {
-    let mut info = Vec::with_capacity(PIPE_RECORD_KDF_DOMAIN.len() + 2 + 32 + 8 + label.len());
-    info.extend_from_slice(PIPE_RECORD_KDF_DOMAIN);
-    info.push(context.purpose);
-    info.push(context.direction);
-    info.extend_from_slice(context.transcript_hash());
-    info.extend_from_slice(&sequence.to_be_bytes());
-    info.extend_from_slice(label);
-    info
-}
-
-fn derive_record_keys(
-    chain_key: &[u8; 32],
-    context: &PipeProtectionContext,
-    sequence: u64,
-) -> Result<([u8; 32], [u8; 32]), EncryptedPipeError> {
-    let message_key = mtp_crypto::hkdf_expand(
-        chain_key,
-        context.transcript_hash(),
-        &record_key_info(context, sequence, PIPE_RECORD_MESSAGE_LABEL),
-        32,
-    )?;
-    let next_chain_key = mtp_crypto::hkdf_expand(
-        chain_key,
-        context.transcript_hash(),
-        &record_key_info(context, sequence, PIPE_RECORD_NEXT_LABEL),
-        32,
-    )?;
-    Ok((
-        message_key
-            .try_into()
-            .map_err(|_| EncryptedPipeError::InvalidContext)?,
-        next_chain_key
-            .try_into()
-            .map_err(|_| EncryptedPipeError::InvalidContext)?,
-    ))
-}
-
-/// Writer for ordered, authenticated encrypted pipe records.
-pub struct EncryptedPipeWriter<S> {
-    stream: S,
-    chain_key: Zeroizing<[u8; 32]>,
-    context: PipeProtectionContext,
-    sequence: u64,
-    state: PipeStreamState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PipeStreamState {
-    Open,
-    InProgress,
-    Finalized,
-    Failed,
-}
-
-impl<S> EncryptedPipeWriter<S> {
-    pub fn new(stream: S, key: [u8; 32], context: PipeProtectionContext) -> Self {
-        Self {
-            stream,
-            chain_key: Zeroizing::new(key),
-            context,
-            sequence: 0,
-            state: PipeStreamState::Open,
-        }
-    }
-
-    pub fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    /// Recover the underlying stream only at a confirmed record boundary.
-    ///
-    /// An in-progress or failed writer may have emitted a partial record, so
-    /// its stream is discarded rather than returned for unsafe reuse.
-    pub fn try_into_inner(self) -> Result<S, EncryptedPipeError> {
-        match self.state {
-            PipeStreamState::Open | PipeStreamState::Finalized => Ok(self.stream),
-            PipeStreamState::InProgress | PipeStreamState::Failed => {
-                Err(EncryptedPipeError::InvalidState)
-            }
-        }
-    }
-}
-
-impl<S: AsyncWrite + Unpin> EncryptedPipeWriter<S> {
-    /// Encrypt and append one record. Record boundaries are preserved by the
-    /// four-byte length prefix and are authenticated as associated data.
-    pub async fn write_record(&mut self, plaintext: &[u8]) -> Result<(), EncryptedPipeError> {
-        match self.state {
-            PipeStreamState::Open => {}
-            PipeStreamState::InProgress => {
-                self.poison();
-                return Err(EncryptedPipeError::InvalidState);
-            }
-            PipeStreamState::Finalized | PipeStreamState::Failed => {
-                return Err(EncryptedPipeError::InvalidState);
-            }
-        }
-
-        self.state = PipeStreamState::InProgress;
-        match self.write_record_inner(plaintext, RECORD_TYPE_DATA).await {
-            Ok(()) => {
-                self.state = PipeStreamState::Open;
-                Ok(())
-            }
-            Err(error) => {
-                self.poison();
-                Err(error)
-            }
-        }
-    }
-
-    async fn write_record_inner(
-        &mut self,
-        plaintext: &[u8],
-        record_type: u8,
-    ) -> Result<(), EncryptedPipeError> {
-        let sequence = self.sequence;
-        if sequence == u64::MAX {
-            return Err(EncryptedPipeError::SequenceExhausted);
-        }
-        let record_len = checked_record_length(plaintext.len())?;
-        let aad = record_aad(&self.context, sequence, record_len, record_type);
-        let (message_key, next_chain_key) =
-            derive_record_keys(&self.chain_key, &self.context, sequence)?;
-        let next_chain_key = Zeroizing::new(next_chain_key);
-        let cipher = XChaCha20Poly1305::new(message_key);
-        let ciphertext = cipher.encrypt(plaintext, &aad)?;
-        if ciphertext.len() != record_len {
-            return Err(EncryptedPipeError::InvalidRecordLength(ciphertext.len()));
-        }
-
-        self.stream
-            .write_all(&(record_len as u32).to_be_bytes())
-            .await?;
-        self.stream.write_all(&[record_type]).await?;
-        self.stream.write_all(&ciphertext).await?;
-        self.stream.flush().await?;
-        self.chain_key = next_chain_key;
-        self.sequence = sequence
-            .checked_add(1)
-            .ok_or(EncryptedPipeError::SequenceExhausted)?;
-        Ok(())
-    }
-
-    fn poison(&mut self) {
-        self.chain_key.zeroize();
-        self.state = PipeStreamState::Failed;
-    }
-
-    /// Authenticate stream completion with a final empty record before
-    /// closing the underlying transport.
-    pub async fn finish(mut self) -> Result<(), EncryptedPipeError> {
-        if self.state != PipeStreamState::Open {
-            return Err(EncryptedPipeError::InvalidState);
-        }
-        self.state = PipeStreamState::InProgress;
-        if let Err(error) = self.write_record_inner(&[], RECORD_TYPE_FINAL).await {
-            self.poison();
-            return Err(error);
-        }
-        self.state = PipeStreamState::Finalized;
-        if let Err(error) = self.stream.shutdown().await {
-            self.poison();
-            return Err(error.into());
-        }
-        Ok(())
-    }
-}
-
-/// Reader for ordered, authenticated encrypted pipe records.
-pub struct EncryptedPipeReader<R> {
-    stream: R,
-    chain_key: Zeroizing<[u8; 32]>,
-    context: PipeProtectionContext,
-    sequence: u64,
-    state: PipeStreamState,
-}
-
-impl<R> EncryptedPipeReader<R> {
-    pub fn new(stream: R, key: [u8; 32], context: PipeProtectionContext) -> Self {
-        Self {
-            stream,
-            chain_key: Zeroizing::new(key),
-            context,
-            sequence: 0,
-            state: PipeStreamState::Open,
-        }
-    }
-
-    pub fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    /// Recover the underlying stream only at a confirmed record boundary.
-    ///
-    /// An in-progress or failed reader may have consumed part of a record, so
-    /// its stream is discarded rather than returned for unsafe reuse.
-    pub fn try_into_inner(self) -> Result<R, EncryptedPipeError> {
-        match self.state {
-            PipeStreamState::Open | PipeStreamState::Finalized => Ok(self.stream),
-            PipeStreamState::InProgress | PipeStreamState::Failed => {
-                Err(EncryptedPipeError::InvalidState)
-            }
-        }
-    }
-}
-
-impl<R: AsyncRead + Unpin> EncryptedPipeReader<R> {
-    /// Read and authenticate the next record. `None` is returned only after a
-    /// valid authenticated final record; transport EOF alone is truncation.
-    pub async fn read_record(&mut self) -> Result<Option<Vec<u8>>, EncryptedPipeError> {
-        match self.state {
-            PipeStreamState::Open => {}
-            PipeStreamState::Finalized => return Ok(None),
-            PipeStreamState::InProgress => {
-                self.poison();
-                return Err(EncryptedPipeError::InvalidState);
-            }
-            PipeStreamState::Failed => return Err(EncryptedPipeError::InvalidState),
-        }
-
-        self.state = PipeStreamState::InProgress;
-        match self.read_record_inner().await {
-            Ok(record) => {
-                if self.state == PipeStreamState::InProgress {
-                    self.state = PipeStreamState::Open;
-                }
-                Ok(record)
-            }
-            Err(error) => {
-                self.poison();
-                Err(error)
-            }
-        }
-    }
-
-    async fn read_record_inner(&mut self) -> Result<Option<Vec<u8>>, EncryptedPipeError> {
-        if self.sequence == u64::MAX {
-            return Err(EncryptedPipeError::SequenceExhausted);
-        }
-        let mut prefix = [0u8; RECORD_LENGTH_BYTES];
-        self.stream.read_exact(&mut prefix).await.map_err(|error| {
-            if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                EncryptedPipeError::FinalRecordRequired
-            } else {
-                EncryptedPipeError::Io(error)
-            }
-        })?;
-
-        let record_len = u32::from_be_bytes(prefix) as usize;
-        if !(XCHACHA_OVERHEAD..=MAX_ENCRYPTED_PIPE_RECORD).contains(&record_len) {
-            return Err(EncryptedPipeError::InvalidRecordLength(record_len));
-        }
-        let mut record_type = [0u8; RECORD_TYPE_BYTES];
-        self.stream
-            .read_exact(&mut record_type)
-            .await
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                    EncryptedPipeError::UnexpectedEof
-                } else {
-                    EncryptedPipeError::Io(error)
-                }
-            })?;
-        if !matches!(record_type[0], RECORD_TYPE_DATA | RECORD_TYPE_FINAL) {
-            return Err(EncryptedPipeError::InvalidRecordType(record_type[0]));
-        }
-
-        let mut ciphertext = vec![0u8; record_len];
-        self.stream
-            .read_exact(&mut ciphertext)
-            .await
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                    EncryptedPipeError::UnexpectedEof
-                } else {
-                    EncryptedPipeError::Io(error)
-                }
-            })?;
-        let sequence = self.sequence;
-        let aad = record_aad(&self.context, sequence, record_len, record_type[0]);
-        let (message_key, next_chain_key) =
-            derive_record_keys(&self.chain_key, &self.context, sequence)?;
-        let next_chain_key = Zeroizing::new(next_chain_key);
-        let cipher = XChaCha20Poly1305::new(message_key);
-        let plaintext = cipher.decrypt(&ciphertext, &aad)?;
-        self.chain_key = next_chain_key;
-        self.sequence = sequence
-            .checked_add(1)
-            .ok_or(EncryptedPipeError::SequenceExhausted)?;
-        if record_type[0] == RECORD_TYPE_FINAL {
-            if !plaintext.is_empty() {
-                return Err(EncryptedPipeError::InvalidRecordLength(plaintext.len()));
-            }
-            self.state = PipeStreamState::Finalized;
-            return Ok(None);
-        }
-        Ok(Some(plaintext))
-    }
-
-    fn poison(&mut self) {
-        self.chain_key.zeroize();
-        self.state = PipeStreamState::Failed;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::derive_record_keys;
     use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn cancelled_record_io_cannot_reuse_a_partial_stream() {
+        let context = PipeProtectionContext::new(b"cancelled", 0x40, 0).expect("context");
+        let (left, right) = duplex(1);
+        let mut writer = EncryptedPipeWriter::new(left, [7; 32], context.clone());
+        let mut write = Box::pin(writer.write_record(b"partial record"));
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(write.as_mut().poll(cx).is_pending())
+            })
+            .await
+        );
+        drop(write);
+        assert!(matches!(
+            writer.write_record(b"retry").await,
+            Err(EncryptedPipeError::InvalidState)
+        ));
+        assert!(matches!(
+            writer.try_into_inner(),
+            Err(EncryptedPipeError::InvalidState)
+        ));
+
+        let (mut left, empty) = duplex(16);
+        left.write_all(&[0]).await.expect("partial prefix");
+        let mut reader = EncryptedPipeReader::new(empty, [7; 32], context);
+        let mut read = Box::pin(reader.read_record());
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(read.as_mut().poll(cx).is_pending())
+            })
+            .await
+        );
+        drop(read);
+        assert!(matches!(
+            reader.read_record().await,
+            Err(EncryptedPipeError::InvalidState)
+        ));
+        assert!(matches!(
+            reader.try_into_inner(),
+            Err(EncryptedPipeError::InvalidState)
+        ));
+        drop(right);
+    }
 
     #[test]
     fn application_pipe_context_rejects_mtp_purposes() {

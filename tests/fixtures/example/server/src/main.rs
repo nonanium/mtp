@@ -36,7 +36,7 @@ fn dev_cert_paths() -> (String, String) {
 
 async fn handle_pipe_loopback(
     conn: &mtp::webserver::WebMTPConnection,
-    request: mtp::host::PipeRequest<
+    request: mtp::pipes::PipeRequest<
         mtp::webserver::WebMtpSender,
         mtp::webserver::WebMtpReceiver,
         mtp::webserver::H3TransportReceiver,

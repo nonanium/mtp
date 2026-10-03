@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "encrypted-pipes"
+description = "Negotiate native encrypted pipe sessions and exchange authenticated records."
+commands.allow = ["mtp_create_encrypted_pipe", "mtp_accept_encrypted_pipe", "mtp_pipe_write_record", "mtp_pipe_read_record"]

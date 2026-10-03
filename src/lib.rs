@@ -3,6 +3,9 @@ pub use mtp_common as common;
 pub use mtp_core as core;
 pub use mtp_type_map as type_map;
 
+#[cfg(feature = "pipes")]
+pub use mtp_pipes as pipes;
+
 #[cfg(feature = "native")]
 pub use mtp_native as native;
 

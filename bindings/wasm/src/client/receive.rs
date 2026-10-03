@@ -5,14 +5,12 @@ use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue};
 use crate::client::{ConnectionState, WasmClient};
 use crate::client_pipe;
 use crate::error::js_error;
-use crate::pipe::PipeReader;
 use crate::transport::WasmTransport;
-use mtp_common::{PingId, PipeId};
+use mtp_common::PingId;
 
 use super::MAX_SAFE_JS_INTEGER;
 use super::dispatch::{
-    PingTimer, frame_id, frame_property, frame_type, reject_pending_requests, route_incoming_frame,
-    set_shared_state, stop_ping_timer,
+    PingTimer, reject_pending_requests, route_incoming_frame, set_shared_state, stop_ping_timer,
 };
 
 const DEFAULT_MAX_MISSED_PINGS: usize = 3;
@@ -164,7 +162,6 @@ impl WasmClient {
         let state_callback = self.state_callback.as_ref().clone();
         let on_msg = self.on_message.clone();
         let on_err = self.on_error.clone();
-        let frame_on_err = on_err.clone();
         let subscriptions = self.subscriptions.clone();
         let pending_requests = self.pending_requests.clone();
         let loop_pending_requests = pending_requests.clone();
@@ -174,140 +171,71 @@ impl WasmClient {
         let ping_ms = self.ping_ms.clone();
         let loop_ping_ms = ping_ms.clone();
         let pending_pipe_creations = self.pending_pipe_creations.clone();
-        let expired_pipe_creations = self.expired_pipe_creations.clone();
         let pending_pipes = self.pending_pipes.clone();
-        let loop_pending_pipes = pending_pipes.clone();
-        let abort_pending_pipes = pending_pipes.clone();
-        let expected_pending_pipes = pending_pipes.clone();
+        let self_pending_pipes = pending_pipes.clone();
         let on_pipe_request = self.on_pipe_request.clone();
-        let loop_pipe_creations = pending_pipe_creations.clone();
-        let loop_expired_pipe_creations = expired_pipe_creations.clone();
         let loop_generation = generation;
         let frame_generation = connection_generation.clone();
         let transport_for_cleanup = self.transport.clone();
         let connection_client_id = self.connection_client_id.clone();
+        let dispatcher = mtp_pipes::PipeDispatcher::new(
+            std::sync::Arc::new(mtp_core::Policy::default()),
+            loop_transport.type_map(),
+        );
+        *pending_pipe_creations.borrow_mut() = Some(dispatcher.clone());
+        let (app_tx, mut app_rx) = tokio::sync::mpsc::channel(1000);
+        let (pipe_tx, mut pipe_rx) = tokio::sync::mpsc::channel(1000);
+        loop_transport.enable_application_frames();
+        let receiver = loop_transport.receiver.clone();
+        let sender = loop_transport.sender.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            loop_transport
-                .receive_loop_with_pipes(
-                    move |frame: JsValue| {
-                        if frame_generation.get() != loop_generation {
-                            return;
-                        }
-                        let message_type = frame_type(&frame);
-                        if let Some(ref msg_type) = message_type {
-                            if msg_type == "PipeRequest" {
-                                let Some(pipe_id) = frame_id(&frame).and_then(PipeId::new) else {
-                                    return;
-                                };
-                                let description = frame_property(&frame, "data")
-                                    .and_then(|data| {
-                                        let desc = js_sys::Reflect::get(
-                                            &data,
-                                            &JsValue::from_str("Description"),
-                                        )
-                                        .ok()?;
-                                        desc.as_string()
-                                    })
-                                    .unwrap_or_default();
-
-                                let cb = on_pipe_request.borrow();
-                                if let Some(ref callback) = *cb {
-                                    let obj = js_sys::Object::new();
-                                    let _ = js_sys::Reflect::set(
-                                        &obj,
-                                        &"pipeId".into(),
-                                        &JsValue::from_f64(pipe_id.get() as f64),
-                                    );
-                                    let _ = js_sys::Reflect::set(
-                                        &obj,
-                                        &"description".into(),
-                                        &JsValue::from_str(&description),
-                                    );
-                                    let _ = callback.call1(&JsValue::NULL, &obj.into());
-                                }
-                                return;
+            mtp_pipes::run_dispatcher(receiver, sender, app_tx, pipe_tx, dispatcher).await;
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            while let Some(request) = pipe_rx.recv().await {
+                if frame_generation.get() != loop_generation {
+                    break;
+                }
+                let obj = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &"pipeId".into(),
+                    &JsValue::from_f64(request.id().get() as f64),
+                );
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &"description".into(),
+                    &JsValue::from_str(request.description()),
+                );
+                pending_pipes.borrow_mut().insert(request.id(), request);
+                if let Some(callback) = on_pipe_request.borrow().as_ref() {
+                    let _ = callback.call1(&JsValue::NULL, &obj);
+                }
+            }
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            while let Some(result) = app_rx.recv().await {
+                if connection_generation.get() != loop_generation {
+                    break;
+                }
+                match result {
+                    Ok(message) => {
+                        let frame = match message
+                            .to_bytes()
+                            .map_err(|e| js_error(e.to_string()))
+                            .and_then(|bytes| {
+                                crate::frame::parse_frame_value_with_limits(
+                                    &bytes,
+                                    &loop_transport.type_map(),
+                                    loop_transport.decode_limits(),
+                                )
+                            }) {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                let _ = on_err.call1(&JsValue::NULL, &error);
+                                continue;
                             }
-
-                            if msg_type == "PipeResponse" {
-                                let Some(pipe_id) = frame_id(&frame).and_then(PipeId::new) else {
-                                    return;
-                                };
-                                let Some(accepted) =
-                                    frame_property(&frame, "data").and_then(|data| {
-                                        let acc = js_sys::Reflect::get(
-                                            &data,
-                                            &JsValue::from_str("Accepted"),
-                                        )
-                                        .ok()?;
-                                        acc.as_bool()
-                                    })
-                                else {
-                                    let _ = frame_on_err.call1(
-                                        &JsValue::NULL,
-                                        &js_error(
-                                            "PipeResponse must contain a boolean Accepted field",
-                                        ),
-                                    );
-                                    return;
-                                };
-
-                                let pending = {
-                                    let mut pending = loop_pipe_creations.borrow_mut();
-                                    if pending
-                                        .get(&pipe_id)
-                                        .is_some_and(|entry| entry.generation == loop_generation)
-                                    {
-                                        pending.remove(&pipe_id)
-                                    } else {
-                                        None
-                                    }
-                                };
-                                if let Some(entry) = pending {
-                                    let _ = entry.sender.send(Ok(accepted));
-                                } else {
-                                    let _ = client_pipe::consume_expired_pipe_creation(
-                                        &loop_expired_pipe_creations,
-                                        pipe_id,
-                                    );
-                                }
-                                return;
-                            }
-
-                            if msg_type == "PipeAbort" {
-                                let Some(pipe_id) = frame_id(&frame).and_then(PipeId::new) else {
-                                    let _ = frame_on_err.call1(
-                                        &JsValue::NULL,
-                                        &js_error("PipeAbort must contain a non-zero id"),
-                                    );
-                                    return;
-                                };
-                                let pending = {
-                                    let mut pending = loop_pipe_creations.borrow_mut();
-                                    if pending
-                                        .get(&pipe_id)
-                                        .is_some_and(|entry| entry.generation == loop_generation)
-                                    {
-                                        pending.remove(&pipe_id)
-                                    } else {
-                                        None
-                                    }
-                                };
-                                if let Some(entry) = pending {
-                                    let _ = entry
-                                        .sender
-                                        .send(Err(js_error("pipe request was cancelled")));
-                                }
-                                if let Some(entry) =
-                                    abort_pending_pipes.borrow_mut().remove(&pipe_id)
-                                {
-                                    let _ = entry
-                                        .sender
-                                        .send(Err(js_error("pipe request was cancelled")));
-                                }
-                                return;
-                            }
-                        }
-
+                        };
                         route_incoming_frame(
                             &frame,
                             loop_generation,
@@ -317,36 +245,18 @@ impl WasmClient {
                             &loop_ping_tracker,
                             &loop_ping_ms,
                         );
-                    },
-                    move |error| {
+                    }
+                    Err(error) => {
                         if error_generation.get() == generation {
-                            let _ = on_err.call1(&JsValue::NULL, &error);
+                            let _ = on_err.call1(
+                                &JsValue::NULL,
+                                &crate::error::from_communication_error(error),
+                            );
                         }
-                    },
-                    move |pipe_reader: PipeReader| {
-                        let Some(pipe_id) = PipeId::new(pipe_reader.pipe_id()) else {
-                            return;
-                        };
-                        let mut pending = loop_pending_pipes.borrow_mut();
-                        if pending
-                            .get(&pipe_id)
-                            .is_some_and(|entry| entry.generation == loop_generation)
-                            && let Some(entry) = pending.remove(&pipe_id)
-                        {
-                            let _ = entry.sender.send(Ok(pipe_reader));
-                        }
-                    },
-                    move |pipe_id| {
-                        let Some(pipe_id) = PipeId::new(pipe_id) else {
-                            return false;
-                        };
-                        expected_pending_pipes
-                            .borrow()
-                            .get(&pipe_id)
-                            .is_some_and(|entry| entry.generation == loop_generation)
-                    },
-                )
-                .await;
+                        break;
+                    }
+                }
+            }
             if connection_generation.get() != generation {
                 return;
             }
@@ -365,8 +275,7 @@ impl WasmClient {
             reject_pending_requests(&pending_requests, "disconnected");
             pending_requests.borrow_mut().clear_expired();
             client_pipe::reject_pending_pipe_creations(&pending_pipe_creations, "disconnected");
-            expired_pipe_creations.borrow_mut().clear();
-            client_pipe::reject_pending_pipes(&pending_pipes, "disconnected");
+            client_pipe::reject_pending_pipes(&self_pending_pipes, "disconnected");
             connection_client_id.set(0);
         });
         self.connection_client_id.set(client_id);

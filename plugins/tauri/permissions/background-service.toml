@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "background-service"
+description = "Enable or disable the Android background service without erasing credentials."
+commands.allow = ["mtp_set_background_enabled"]

@@ -25,7 +25,10 @@ getrandom = { version = "0.2.17", features = ["js"] }
 getrandom-v04 = { package = "getrandom", version = "0.4.3", features = ["wasm_js"] }
 
 mtp-common.workspace = true
-mtp-core.workspace = true
+mtp-core = { workspace = true, features = ["pipes"] }
+mtp-pipes = { workspace = true, features = ["encrypted"] }
+tokio = { version = "1", features = ["io-util", "sync"] }
+async-trait = "0.1"
 mtp-type-map.workspace = true
 mtp-codec = { workspace = true, features = ["crypto", "pipes", "registry"] }
 mtp-crypto = { workspace = true, features = ["wasm", "password-kdf"] }
@@ -38,4 +41,4 @@ hex = "0.4"
 
 [features]
 default = []
-pipes = []
+pipes = ["mtp-core/pipes", "mtp-pipes/encrypted"]

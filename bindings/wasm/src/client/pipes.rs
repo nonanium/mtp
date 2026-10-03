@@ -25,17 +25,7 @@ impl WasmClient {
             .clone()
             .ok_or_else(|| js_error("not connected"))?;
 
-        let pipe_id = client_pipe::random_pipe_id()?;
-        client_pipe::wasm_create_pipe(
-            &transport,
-            description,
-            pipe_id,
-            &self.pending_pipe_creations,
-            &self.expired_pipe_creations,
-            self.connection_generation.get(),
-            &self.connection_generation,
-        )
-        .await
+        client_pipe::wasm_create_pipe(&transport, description, &self.pending_pipe_creations).await
     }
 
     #[wasm_bindgen]
@@ -43,21 +33,7 @@ impl WasmClient {
         if self.state.get() != ConnectionState::Connected {
             return Err(js_error("not connected"));
         }
-        let transport = self
-            .transport
-            .borrow()
-            .clone()
-            .ok_or_else(|| js_error("not connected"))?;
-
-        let generation = self.connection_generation.get();
-        client_pipe::wasm_accept_pipe(
-            &transport,
-            pipe_id,
-            &self.pending_pipes,
-            generation,
-            &self.connection_generation,
-        )
-        .await
+        client_pipe::wasm_accept_pipe(pipe_id, &self.pending_pipes).await
     }
 
     #[wasm_bindgen]
@@ -65,12 +41,6 @@ impl WasmClient {
         if self.state.get() != ConnectionState::Connected {
             return Err(js_error("not connected"));
         }
-        let transport = self
-            .transport
-            .borrow()
-            .clone()
-            .ok_or_else(|| js_error("not connected"))?;
-
-        client_pipe::wasm_deny_pipe(&transport, pipe_id).await
+        client_pipe::wasm_deny_pipe(pipe_id, &self.pending_pipes).await
     }
 }

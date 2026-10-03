@@ -9,7 +9,6 @@ import type { MTPSignatureVerificationPolicy } from "./signature-policy.js";
 import type {
   MTPDataValue,
   MTPReceiveLimits,
-  MTPVerifiedRelayContent,
   ParsedFrame,
 } from "./client.js";
 
@@ -200,5 +199,3 @@ export function registerRelayMetadata(
 ): void {
   relayMetadataFinalizer.register(metadata, native, finalizerToken);
 }
-
-export type { MTPVerifiedRelayContent };

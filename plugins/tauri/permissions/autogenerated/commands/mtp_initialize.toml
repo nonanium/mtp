@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-initialize"
+description = "Enables the mtp_initialize command without any pre-configured scope."
+commands.allow = ["mtp_initialize"]
+
+[[permission]]
+identifier = "deny-mtp-initialize"
+description = "Denies the mtp_initialize command without any pre-configured scope."
+commands.deny = ["mtp_initialize"]

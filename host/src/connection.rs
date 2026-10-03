@@ -1,5 +1,3 @@
-#[cfg(feature = "pipes")]
-use mtp_codec::{CommunicationType, DataType, DataValue};
 use mtp_codec::{CommunicationValue, Version, registry::VersionedCodec};
 use mtp_common::CommunicationError;
 use std::net::SocketAddr;
@@ -11,12 +9,9 @@ use tokio::sync::{Mutex, mpsc};
 #[cfg(feature = "crypto")]
 use crate::error::random_client_id;
 #[cfg(feature = "pipes")]
-use crate::pipe::{
-    PendingCreationGuard, PipeDispatcher, PipeReceiver, PipeRequest, PipeSender,
-    is_expired_creation, run_dispatcher,
-};
-#[cfg(feature = "pipes")]
 use mtp_core::Policy;
+#[cfg(feature = "pipes")]
+use mtp_pipes::{PipeDispatcher, PipeReceiver, PipeRequest, PipeSender, run_dispatcher};
 
 mod connection_capability {
     pub trait Sealed {}
@@ -55,7 +50,7 @@ impl<C: mtp_core::TransportConnection> MtpReceiverLike for mtp_core::GenericRece
 pub struct MTPConnection<
     S = mtp_native::Sender,
     R = mtp_native::Receiver,
-    P = wtransport::RecvStream,
+    P = mtp_native::NativeRecvStream,
 > {
     pub version: Version,
     pub codec: VersionedCodec,
@@ -352,56 +347,10 @@ where
     pub async fn create_pipe(
         &self,
         description: &str,
-    ) -> Result<crate::pipe::PipeHandle<S, P>, mtp_common::PipeError> {
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        let pipe_id = {
-            let mut pending = self
-                .pipe_dispatcher
-                .pending_creations
-                .lock()
-                .map_err(|_| mtp_common::PipeError::ConnectionClosed)?;
-            let pipe_id = loop {
-                let candidate = mtp_common::PipeId::random();
-                if !pending.contains_key(&candidate)
-                    && !is_expired_creation(&self.pipe_dispatcher, candidate)
-                {
-                    break candidate;
-                }
-            };
-            let token = Arc::new(());
-            pending.insert(
-                pipe_id,
-                crate::pipe::PendingCreation {
-                    token: token.clone(),
-                    sender: response_tx,
-                },
-            );
-            drop(pending);
-            (pipe_id, token)
-        };
-        let (pipe_id, token) = pipe_id;
-        let mut creation_guard =
-            PendingCreationGuard::new(self.pipe_dispatcher.clone(), pipe_id, token.clone());
-
-        let request = CommunicationValue::new_with_type_map(
-            CommunicationType::PipeRequest,
-            self.codec.type_map(),
-        )
-        .with_id(pipe_id.get())
-        .add_typed_default(DataType::Description, DataValue::Str(description.into()));
-        if let Err(error) = self.sender.send_pipe_message(&request).await {
-            return Err(mtp_common::PipeError::from(error));
-        }
-
-        creation_guard.disarm();
-        Ok(crate::pipe::PipeHandle {
-            pipe_id,
-            description: description.to_owned(),
-            sender: self.sender.clone(),
-            response_rx,
-            dispatcher: self.pipe_dispatcher.clone(),
-            token,
-        })
+    ) -> Result<mtp_pipes::PipeHandle<S, P>, mtp_common::PipeError> {
+        self.pipe_dispatcher
+            .create(self.sender.clone(), description)
+            .await
     }
 
     pub async fn receive_pipe(&self) -> Result<PipeRequest<S, R, P>, CommunicationError> {

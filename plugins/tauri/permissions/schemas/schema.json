@@ -1,0 +1,708 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PermissionFile",
+  "description": "Permission file that can define a default permission, a set of permissions or a list of inlined permissions.",
+  "type": "object",
+  "properties": {
+    "default": {
+      "description": "The default permission set for the plugin",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DefaultPermission"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "set": {
+      "description": "A list of permissions sets defined",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PermissionSet"
+      }
+    },
+    "permission": {
+      "description": "A list of inlined permissions",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Permission"
+      }
+    }
+  },
+  "definitions": {
+    "DefaultPermission": {
+      "description": "The default permission set of the plugin.\n\nWorks similarly to a permission with the \"default\" identifier.",
+      "type": "object",
+      "required": [
+        "permissions"
+      ],
+      "properties": {
+        "version": {
+          "description": "The version of the permission.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1.0
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does. Tauri convention is to use `<h4>` headings in markdown content for Tauri documentation generation purposes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permissions": {
+          "description": "All permissions this set contains.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "PermissionSet": {
+      "description": "A set of direct permissions grouped together under a new name.",
+      "type": "object",
+      "required": [
+        "description",
+        "identifier",
+        "permissions"
+      ],
+      "properties": {
+        "identifier": {
+          "description": "A unique identifier for the permission.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does.",
+          "type": "string"
+        },
+        "permissions": {
+          "description": "All permissions this set contains.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PermissionKind"
+          }
+        }
+      }
+    },
+    "Permission": {
+      "description": "Descriptions of explicit privileges of commands.\n\nIt can enable commands to be accessible in the frontend of the application.\n\nIf the scope is defined it can be used to fine grain control the access of individual or multiple commands.",
+      "type": "object",
+      "required": [
+        "identifier"
+      ],
+      "properties": {
+        "version": {
+          "description": "The version of the permission.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1.0
+        },
+        "identifier": {
+          "description": "A unique identifier for the permission.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does. Tauri internal convention is to use `<h4>` headings in markdown content for Tauri documentation generation purposes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commands": {
+          "description": "Allowed or denied commands when using this permission.",
+          "default": {
+            "allow": [],
+            "deny": []
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/Commands"
+            }
+          ]
+        },
+        "scope": {
+          "description": "Allowed or denied scoped when using this permission.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Scopes"
+            }
+          ]
+        },
+        "platforms": {
+          "description": "Target platforms this permission applies. By default all platforms are affected by this permission.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Target"
+          }
+        }
+      }
+    },
+    "Commands": {
+      "description": "Allowed and denied commands inside a permission.\n\nIf two commands clash inside of `allow` and `deny`, it should be denied by default.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Allowed command.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Denied command, which takes priority.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "Scopes": {
+      "description": "An argument for fine grained behavior control of Tauri commands.\n\nIt can be of any serde serializable type and is used to allow or prevent certain actions inside a Tauri command. The configured scope is passed to the command and will be enforced by the command implementation.\n\n## Example\n\n```json { \"allow\": [{ \"path\": \"$HOME/**\" }], \"deny\": [{ \"path\": \"$HOME/secret.txt\" }] } ```",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Data that defines what is allowed by the scope.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        },
+        "deny": {
+          "description": "Data that defines what is denied by the scope. This should be prioritized by validation logic.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        }
+      }
+    },
+    "Value": {
+      "description": "All supported ACL values.",
+      "anyOf": [
+        {
+          "description": "Represents a null JSON value.",
+          "type": "null"
+        },
+        {
+          "description": "Represents a [`bool`].",
+          "type": "boolean"
+        },
+        {
+          "description": "Represents a valid ACL [`Number`].",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Number"
+            }
+          ]
+        },
+        {
+          "description": "Represents a [`String`].",
+          "type": "string"
+        },
+        {
+          "description": "Represents a list of other [`Value`]s.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        },
+        {
+          "description": "Represents a map of [`String`] keys to [`Value`]s.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/Value"
+          }
+        }
+      ]
+    },
+    "Number": {
+      "description": "A valid ACL number.",
+      "anyOf": [
+        {
+          "description": "Represents an [`i64`].",
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "description": "Represents a [`f64`].",
+          "type": "number",
+          "format": "double"
+        }
+      ]
+    },
+    "Target": {
+      "description": "Platform target.",
+      "oneOf": [
+        {
+          "description": "MacOS.",
+          "type": "string",
+          "enum": [
+            "macOS"
+          ]
+        },
+        {
+          "description": "Windows.",
+          "type": "string",
+          "enum": [
+            "windows"
+          ]
+        },
+        {
+          "description": "Linux.",
+          "type": "string",
+          "enum": [
+            "linux"
+          ]
+        },
+        {
+          "description": "Android.",
+          "type": "string",
+          "enum": [
+            "android"
+          ]
+        },
+        {
+          "description": "iOS.",
+          "type": "string",
+          "enum": [
+            "iOS"
+          ]
+        }
+      ]
+    },
+    "PermissionKind": {
+      "type": "string",
+      "oneOf": [
+        {
+          "description": "Enables the mtp_accept_encrypted_pipe command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-accept-encrypted-pipe",
+          "markdownDescription": "Enables the mtp_accept_encrypted_pipe command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_accept_encrypted_pipe command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-accept-encrypted-pipe",
+          "markdownDescription": "Denies the mtp_accept_encrypted_pipe command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_accept_pipe command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-accept-pipe",
+          "markdownDescription": "Enables the mtp_accept_pipe command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_accept_pipe command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-accept-pipe",
+          "markdownDescription": "Denies the mtp_accept_pipe command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_attach command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-attach",
+          "markdownDescription": "Enables the mtp_attach command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_attach command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-attach",
+          "markdownDescription": "Denies the mtp_attach command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_build_protected command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-build-protected",
+          "markdownDescription": "Enables the mtp_build_protected command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_build_protected command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-build-protected",
+          "markdownDescription": "Denies the mtp_build_protected command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_build_relay command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-build-relay",
+          "markdownDescription": "Enables the mtp_build_relay command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_build_relay command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-build-relay",
+          "markdownDescription": "Denies the mtp_build_relay command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_clear_credentials command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-clear-credentials",
+          "markdownDescription": "Enables the mtp_clear_credentials command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_clear_credentials command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-clear-credentials",
+          "markdownDescription": "Denies the mtp_clear_credentials command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_connect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-connect",
+          "markdownDescription": "Enables the mtp_connect command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_connect command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-connect",
+          "markdownDescription": "Denies the mtp_connect command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_create_encrypted_pipe command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-create-encrypted-pipe",
+          "markdownDescription": "Enables the mtp_create_encrypted_pipe command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_create_encrypted_pipe command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-create-encrypted-pipe",
+          "markdownDescription": "Denies the mtp_create_encrypted_pipe command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_create_pipe command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-create-pipe",
+          "markdownDescription": "Enables the mtp_create_pipe command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_create_pipe command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-create-pipe",
+          "markdownDescription": "Denies the mtp_create_pipe command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_deny_pipe command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-deny-pipe",
+          "markdownDescription": "Enables the mtp_deny_pipe command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_deny_pipe command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-deny-pipe",
+          "markdownDescription": "Denies the mtp_deny_pipe command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_detach command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-detach",
+          "markdownDescription": "Enables the mtp_detach command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_detach command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-detach",
+          "markdownDescription": "Denies the mtp_detach command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_export_credentials command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-export-credentials",
+          "markdownDescription": "Enables the mtp_export_credentials command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_export_credentials command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-export-credentials",
+          "markdownDescription": "Denies the mtp_export_credentials command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_initialize command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-initialize",
+          "markdownDescription": "Enables the mtp_initialize command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_initialize command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-initialize",
+          "markdownDescription": "Denies the mtp_initialize command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_open_protected command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-open-protected",
+          "markdownDescription": "Enables the mtp_open_protected command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_open_protected command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-open-protected",
+          "markdownDescription": "Denies the mtp_open_protected command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_open_relay_content command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-open-relay-content",
+          "markdownDescription": "Enables the mtp_open_relay_content command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_open_relay_content command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-open-relay-content",
+          "markdownDescription": "Denies the mtp_open_relay_content command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_open_relay_metadata command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-open-relay-metadata",
+          "markdownDescription": "Enables the mtp_open_relay_metadata command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_open_relay_metadata command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-open-relay-metadata",
+          "markdownDescription": "Denies the mtp_open_relay_metadata command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_pipe_abort command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-pipe-abort",
+          "markdownDescription": "Enables the mtp_pipe_abort command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_pipe_abort command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-pipe-abort",
+          "markdownDescription": "Denies the mtp_pipe_abort command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_pipe_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-pipe-cancel",
+          "markdownDescription": "Enables the mtp_pipe_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_pipe_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-pipe-cancel",
+          "markdownDescription": "Denies the mtp_pipe_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_pipe_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-pipe-close",
+          "markdownDescription": "Enables the mtp_pipe_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_pipe_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-pipe-close",
+          "markdownDescription": "Denies the mtp_pipe_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_pipe_read command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-pipe-read",
+          "markdownDescription": "Enables the mtp_pipe_read command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_pipe_read command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-pipe-read",
+          "markdownDescription": "Denies the mtp_pipe_read command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_pipe_read_record command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-pipe-read-record",
+          "markdownDescription": "Enables the mtp_pipe_read_record command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_pipe_read_record command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-pipe-read-record",
+          "markdownDescription": "Denies the mtp_pipe_read_record command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_pipe_wait command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-pipe-wait",
+          "markdownDescription": "Enables the mtp_pipe_wait command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_pipe_wait command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-pipe-wait",
+          "markdownDescription": "Denies the mtp_pipe_wait command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_pipe_write command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-pipe-write",
+          "markdownDescription": "Enables the mtp_pipe_write command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_pipe_write command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-pipe-write",
+          "markdownDescription": "Denies the mtp_pipe_write command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_pipe_write_record command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-pipe-write-record",
+          "markdownDescription": "Enables the mtp_pipe_write_record command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_pipe_write_record command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-pipe-write-record",
+          "markdownDescription": "Denies the mtp_pipe_write_record command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_protected_claimed_signer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-protected-claimed-signer",
+          "markdownDescription": "Enables the mtp_protected_claimed_signer command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_protected_claimed_signer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-protected-claimed-signer",
+          "markdownDescription": "Denies the mtp_protected_claimed_signer command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_relay_claimed_signer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-relay-claimed-signer",
+          "markdownDescription": "Enables the mtp_relay_claimed_signer command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_relay_claimed_signer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-relay-claimed-signer",
+          "markdownDescription": "Denies the mtp_relay_claimed_signer command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_release_relay command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-release-relay",
+          "markdownDescription": "Enables the mtp_release_relay command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_release_relay command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-release-relay",
+          "markdownDescription": "Denies the mtp_release_relay command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_request command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-request",
+          "markdownDescription": "Enables the mtp_request command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_request command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-request",
+          "markdownDescription": "Denies the mtp_request command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_send command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-send",
+          "markdownDescription": "Enables the mtp_send command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_send command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-send",
+          "markdownDescription": "Denies the mtp_send command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_set_background_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-set-background-enabled",
+          "markdownDescription": "Enables the mtp_set_background_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_set_background_enabled command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-set-background-enabled",
+          "markdownDescription": "Denies the mtp_set_background_enabled command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-status",
+          "markdownDescription": "Enables the mtp_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-status",
+          "markdownDescription": "Denies the mtp_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mtp_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-stop",
+          "markdownDescription": "Enables the mtp_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-stop",
+          "markdownDescription": "Denies the mtp_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Enable or disable the Android background service without erasing credentials.",
+          "type": "string",
+          "const": "background-service",
+          "markdownDescription": "Enable or disable the Android background service without erasing credentials."
+        },
+        {
+          "description": "Attach to native connections and exchange live frames.\n#### This default permission set includes:\n\n- `allow-mtp-status`\n- `allow-mtp-initialize`\n- `allow-mtp-connect`\n- `allow-mtp-clear-credentials`\n- `allow-mtp-attach`\n- `allow-mtp-detach`\n- `allow-mtp-request`\n- `allow-mtp-send`\n- `allow-mtp-build-protected`\n- `allow-mtp-open-protected`\n- `allow-mtp-protected-claimed-signer`\n- `allow-mtp-build-relay`\n- `allow-mtp-relay-claimed-signer`\n- `allow-mtp-open-relay-metadata`\n- `allow-mtp-open-relay-content`\n- `allow-mtp-release-relay`\n- `allow-mtp-create-pipe`\n- `allow-mtp-pipe-wait`\n- `allow-mtp-accept-pipe`\n- `allow-mtp-deny-pipe`\n- `allow-mtp-pipe-write`\n- `allow-mtp-pipe-read`\n- `allow-mtp-pipe-close`\n- `allow-mtp-pipe-abort`\n- `allow-mtp-pipe-cancel`",
+          "type": "string",
+          "const": "default",
+          "markdownDescription": "Attach to native connections and exchange live frames.\n#### This default permission set includes:\n\n- `allow-mtp-status`\n- `allow-mtp-initialize`\n- `allow-mtp-connect`\n- `allow-mtp-clear-credentials`\n- `allow-mtp-attach`\n- `allow-mtp-detach`\n- `allow-mtp-request`\n- `allow-mtp-send`\n- `allow-mtp-build-protected`\n- `allow-mtp-open-protected`\n- `allow-mtp-protected-claimed-signer`\n- `allow-mtp-build-relay`\n- `allow-mtp-relay-claimed-signer`\n- `allow-mtp-open-relay-metadata`\n- `allow-mtp-open-relay-content`\n- `allow-mtp-release-relay`\n- `allow-mtp-create-pipe`\n- `allow-mtp-pipe-wait`\n- `allow-mtp-accept-pipe`\n- `allow-mtp-deny-pipe`\n- `allow-mtp-pipe-write`\n- `allow-mtp-pipe-read`\n- `allow-mtp-pipe-close`\n- `allow-mtp-pipe-abort`\n- `allow-mtp-pipe-cancel`"
+        },
+        {
+          "description": "Negotiate native encrypted pipe sessions and exchange authenticated records.",
+          "type": "string",
+          "const": "encrypted-pipes",
+          "markdownDescription": "Negotiate native encrypted pipe sessions and exchange authenticated records."
+        },
+        {
+          "description": "Permit credential export only when the Rust host also enables it.",
+          "type": "string",
+          "const": "export-credentials",
+          "markdownDescription": "Permit credential export only when the Rust host also enables it."
+        }
+      ]
+    }
+  }
+}

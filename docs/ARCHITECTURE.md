@@ -36,6 +36,13 @@ MTP separates wire encoding, QUIC transport, connection policy, protocol negotia
 `mtp-codec` owns `CommunicationValue` and `DataValue` serialization. A version-specific `TypeMap` translates generated type names to wire IDs.
 `CommunicationValue` supplies the canonical four-byte length prefix. `mtp-core` applies the shared frame-size, retry, and policy decisions. `mtp-native`, `mtp-h3`, and `mtp-wasm` translate stream operations and platform errors at the adapter boundary.
 
+`mtp-pipes` composes core transport interfaces with common protocol types and
+codec. Its optional `encrypted` feature adds crypto for authenticated session
+offers, forward-secure handshakes and ordered records. Negotiation deadlines and
+cancellation also live in this crate. Bindings depend on it and supply streams;
+neither core nor pipes depends on bindings. Public pipe APIs use `mtp_pipes::*`
+or umbrella `mtp::pipes::*`, with no core compatibility exports.
+
 The top row represents application entry points. Native Rust code calls the client or host crates directly. Browser code calls the TypeScript SDK, which uses generated WASM bindings for the same codec and WebTransport session.
 Both clients exchange the same MTP frames with a host.
 

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-open-protected"
+description = "Enables the mtp_open_protected command without any pre-configured scope."
+commands.allow = ["mtp_open_protected"]
+
+[[permission]]
+identifier = "deny-mtp-open-protected"
+description = "Denies the mtp_open_protected command without any pre-configured scope."
+commands.deny = ["mtp_open_protected"]

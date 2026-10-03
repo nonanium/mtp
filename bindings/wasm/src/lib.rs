@@ -3,6 +3,8 @@ pub mod client;
 pub mod client_pipe;
 pub mod config;
 pub mod crypto;
+pub mod encrypted_pipe;
+mod encrypted_pipe_duplex;
 pub mod error;
 pub mod frame;
 pub mod logging;

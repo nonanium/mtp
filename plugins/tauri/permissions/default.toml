@@ -1,0 +1,3 @@
+[default]
+description = "Attach to native connections and exchange live frames."
+permissions = ["allow-mtp-status", "allow-mtp-initialize", "allow-mtp-connect", "allow-mtp-clear-credentials", "allow-mtp-attach", "allow-mtp-detach", "allow-mtp-request", "allow-mtp-send", "allow-mtp-build-protected", "allow-mtp-open-protected", "allow-mtp-protected-claimed-signer", "allow-mtp-build-relay", "allow-mtp-relay-claimed-signer", "allow-mtp-open-relay-metadata", "allow-mtp-open-relay-content", "allow-mtp-release-relay", "allow-mtp-create-pipe", "allow-mtp-pipe-wait", "allow-mtp-accept-pipe", "allow-mtp-deny-pipe", "allow-mtp-pipe-write", "allow-mtp-pipe-read", "allow-mtp-pipe-close", "allow-mtp-pipe-abort", "allow-mtp-pipe-cancel"]

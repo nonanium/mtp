@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-set-background-enabled"
+description = "Enables the mtp_set_background_enabled command without any pre-configured scope."
+commands.allow = ["mtp_set_background_enabled"]
+
+[[permission]]
+identifier = "deny-mtp-set-background-enabled"
+description = "Denies the mtp_set_background_enabled command without any pre-configured scope."
+commands.deny = ["mtp_set_background_enabled"]

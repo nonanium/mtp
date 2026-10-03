@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-relay-claimed-signer"
+description = "Enables the mtp_relay_claimed_signer command without any pre-configured scope."
+commands.allow = ["mtp_relay_claimed_signer"]
+
+[[permission]]
+identifier = "deny-mtp-relay-claimed-signer"
+description = "Denies the mtp_relay_claimed_signer command without any pre-configured scope."
+commands.deny = ["mtp_relay_claimed_signer"]

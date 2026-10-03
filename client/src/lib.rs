@@ -651,7 +651,6 @@ impl MTPClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::time::Duration;
 
     #[test]
@@ -705,18 +704,10 @@ mod tests {
         let dispatcher = pipe::PipeDispatcher {
             pending_requests: Mutex::new(mtp_common::RequestTracker::default()),
             #[cfg(feature = "pipes")]
-            type_map: mtp_codec::TypeMap::latest(),
-            #[cfg(feature = "pipes")]
-            pending_creations: std::sync::Mutex::new(HashMap::new()),
-            #[cfg(feature = "pipes")]
-            expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
-                Policy::default().pipe_tombstone_ttl.as_secs_f64() * 1000.0,
-                Policy::default().pipe_tombstone_capacity,
-            )),
-            #[cfg(feature = "pipes")]
-            pending_pipes: Mutex::new(HashMap::new()),
-            #[cfg(feature = "pipes")]
-            policy: Arc::new(Policy::default()),
+            pipes: mtp_pipes::PipeDispatcher::new(
+                Arc::new(Policy::default()),
+                mtp_codec::TypeMap::latest(),
+            ),
         };
         let (app_tx, mut app_rx) = tokio::sync::mpsc::channel(2);
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -748,18 +739,10 @@ mod tests {
         let dispatcher = pipe::PipeDispatcher {
             pending_requests: Mutex::new(mtp_common::RequestTracker::default()),
             #[cfg(feature = "pipes")]
-            type_map: mtp_codec::TypeMap::latest(),
-            #[cfg(feature = "pipes")]
-            pending_creations: std::sync::Mutex::new(HashMap::new()),
-            #[cfg(feature = "pipes")]
-            expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
-                Policy::default().pipe_tombstone_ttl.as_secs_f64() * 1000.0,
-                Policy::default().pipe_tombstone_capacity,
-            )),
-            #[cfg(feature = "pipes")]
-            pending_pipes: Mutex::new(HashMap::new()),
-            #[cfg(feature = "pipes")]
-            policy: Arc::new(Policy::default()),
+            pipes: mtp_pipes::PipeDispatcher::new(
+                Arc::new(Policy::default()),
+                mtp_codec::TypeMap::latest(),
+            ),
         };
         let token = Arc::new(());
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -794,18 +777,7 @@ mod tests {
         let dispatcher = pipe::PipeDispatcher {
             pending_requests: Mutex::new(mtp_common::RequestTracker::default()),
             #[cfg(feature = "pipes")]
-            type_map: type_map.clone(),
-            #[cfg(feature = "pipes")]
-            pending_creations: std::sync::Mutex::new(HashMap::new()),
-            #[cfg(feature = "pipes")]
-            expired_creations: std::sync::Mutex::new(mtp_common::ExpiringSet::new(
-                Policy::default().pipe_tombstone_ttl.as_secs_f64() * 1000.0,
-                Policy::default().pipe_tombstone_capacity,
-            )),
-            #[cfg(feature = "pipes")]
-            pending_pipes: Mutex::new(HashMap::new()),
-            #[cfg(feature = "pipes")]
-            policy: Arc::new(Policy::default()),
+            pipes: mtp_pipes::PipeDispatcher::new(Arc::new(Policy::default()), type_map.clone()),
         };
         let (app_tx, mut app_rx) = tokio::sync::mpsc::channel(2);
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();

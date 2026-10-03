@@ -175,6 +175,30 @@ async fn mock_connected_pair() -> (MockTransportConnection, MockTransportConnect
 }
 
 #[tokio::test]
+async fn stopping_a_pipe_keeps_the_connection_usable() -> Result<(), Box<dyn std::error::Error>> {
+    let (conn_a, conn_b) = mock_connected_pair().await;
+    let policy = Arc::new(Policy::default());
+    let sender = GenericSender::new(conn_a, policy.clone());
+    let receiver = GenericReceiver::new(conn_b, policy);
+    let pipe_id = PipeId::new(42).unwrap();
+    receiver.expect_pipe_id(pipe_id)?;
+    let mut writer = sender.open_pipe_id(pipe_id, "cancelled").await?;
+    receiver.receive_pipe().await?.stop(7)?;
+    assert!(writer.write_all(b"stopped").await.is_err());
+
+    let next_id = PipeId::new(43).unwrap();
+    receiver.expect_pipe_id(next_id)?;
+    let mut next = sender.open_pipe_id(next_id, "next").await?;
+    next.write_all(b"still connected").await?;
+    next.finish().await?;
+    let mut reader = receiver.receive_pipe().await?;
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data).await?;
+    assert_eq!(data, b"still connected");
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_open_pipe_and_receive_reader() -> Result<(), Box<dyn std::error::Error>> {
     let (conn_a, conn_b) = mock_connected_pair().await;
     let policy = Arc::new(Policy::default());

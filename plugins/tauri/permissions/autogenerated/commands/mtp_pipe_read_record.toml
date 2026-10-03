@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-pipe-read-record"
+description = "Enables the mtp_pipe_read_record command without any pre-configured scope."
+commands.allow = ["mtp_pipe_read_record"]
+
+[[permission]]
+identifier = "deny-mtp-pipe-read-record"
+description = "Denies the mtp_pipe_read_record command without any pre-configured scope."
+commands.deny = ["mtp_pipe_read_record"]

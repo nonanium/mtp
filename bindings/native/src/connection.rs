@@ -1,4 +1,4 @@
-//! Native compatibility wrappers around the transport-neutral frame engine.
+//! Native connection adapters for the transport-neutral frame engine.
 
 #[cfg(feature = "pipes")]
 use crate::PipeId;
@@ -62,25 +62,7 @@ impl Sender {
         pipe_id: PipeId,
         description: &str,
     ) -> Result<crate::pipe::PipeWriter, CommunicationError> {
-        Ok(crate::pipe::PipeWriter::from_inner(
-            self.inner
-                .open_pipe_id(pipe_id, description)
-                .await?
-                .into_inner()
-                .into_inner(),
-        ))
-    }
-
-    #[cfg(feature = "pipes")]
-    #[deprecated(note = "use open_pipe_id with PipeId")]
-    pub async fn open_pipe(
-        &self,
-        pipe_id: u32,
-        description: &str,
-    ) -> Result<crate::pipe::PipeWriter, CommunicationError> {
-        let pipe_id = PipeId::try_from(pipe_id)
-            .map_err(|_| CommunicationError::Other("pipe id must be non-zero".into()))?;
-        self.open_pipe_id(pipe_id, description).await
+        self.inner.open_pipe_id(pipe_id, description).await
     }
 
     pub fn close_immediate(&self) {
@@ -154,69 +136,30 @@ impl Receiver {
     pub async fn set_expected_pong_id_value(&self, expected: Option<PingId>) {
         self.inner.set_expected_pong_id_value(expected).await;
     }
-    #[deprecated(note = "use set_expected_pong_id_value with PingId")]
-    pub async fn set_expected_pong_id(&self, expected: Option<u32>) {
-        self.set_expected_pong_id_value(expected.and_then(PingId::new))
-            .await;
-    }
 
     #[cfg(feature = "pipes")]
     pub async fn receive_event(&self) -> Result<TransportEvent, CommunicationError> {
         match self.inner.receive_event().await? {
             mtp_core::TransportEvent::Message(message) => Ok(TransportEvent::Message(message)),
-            mtp_core::TransportEvent::Pipe(reader) => {
-                let (stream, description, pipe_id) = reader.into_parts();
-                Ok(TransportEvent::Pipe(
-                    crate::pipe::PipeReader::from_parts_id(
-                        stream.into_inner(),
-                        description,
-                        pipe_id,
-                    ),
-                ))
-            }
+            mtp_core::TransportEvent::Pipe(reader) => Ok(TransportEvent::Pipe(reader)),
         }
     }
 
     #[cfg(feature = "pipes")]
     pub async fn receive_pipe(&self) -> Result<crate::pipe::PipeReader, CommunicationError> {
-        let (stream, description, pipe_id) = self.inner.receive_pipe().await?.into_parts();
-        Ok(crate::pipe::PipeReader::from_parts_id(
-            stream.into_inner(),
-            description,
-            pipe_id,
-        ))
+        self.inner.receive_pipe().await
     }
     #[cfg(feature = "pipes")]
     pub fn try_receive_pipe(&self) -> Result<Option<crate::pipe::PipeReader>, CommunicationError> {
-        self.inner.try_receive_pipe().map(|reader| {
-            reader.map(|reader| {
-                let (stream, description, pipe_id) = reader.into_parts();
-                crate::pipe::PipeReader::from_parts_id(stream.into_inner(), description, pipe_id)
-            })
-        })
+        self.inner.try_receive_pipe()
     }
     #[cfg(feature = "pipes")]
     pub fn expect_pipe_id(&self, pipe_id: PipeId) -> Result<(), CommunicationError> {
         self.inner.expect_pipe_id(pipe_id)
     }
     #[cfg(feature = "pipes")]
-    #[deprecated(note = "use expect_pipe_id with PipeId")]
-    pub fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
-        self.expect_pipe_id(
-            PipeId::try_from(pipe_id)
-                .map_err(|_| CommunicationError::Other("pipe id must be non-zero".into()))?,
-        )
-    }
-    #[cfg(feature = "pipes")]
     pub fn cancel_expected_pipe_id(&self, pipe_id: PipeId) {
         self.inner.cancel_expected_pipe_id(pipe_id);
-    }
-    #[cfg(feature = "pipes")]
-    #[deprecated(note = "use cancel_expected_pipe_id with PipeId")]
-    pub fn cancel_expected_pipe(&self, pipe_id: u32) {
-        if let Some(pipe_id) = PipeId::new(pipe_id) {
-            self.cancel_expected_pipe_id(pipe_id);
-        }
     }
 
     pub fn handle(&self) -> &Arc<ConnectionHandle> {

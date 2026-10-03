@@ -7,6 +7,7 @@ edition.workspace = true
 mtp-codec.workspace = true
 mtp-common.workspace = true
 mtp-core.workspace = true
+mtp-pipes = { workspace = true, optional = true, features = ["encrypted"] }
 mtp-crypto.workspace = true
 wtransport = { version = "0.7.1", default-features = false, features = [
     "aws-lc-rs",
@@ -21,14 +22,12 @@ x509-parser = "0.18"
 tracing = "0.1"
 async-trait = "0.1"
 sha2 = "0.11"
-rand = "0.10.2"
-zeroize = "1.9"
 
 [features]
 # Enables hosting a MTP server
 host = []
 
-pipes = ["mtp-codec/pipes", "mtp-codec/crypto", "mtp-core/pipes"]
+pipes = ["dep:mtp-pipes", "mtp-core/pipes"]
 
 # Compiles the insecure certificate verifier (NoopCertVerifier).
 # Even with this feature enabled, the verifier requires the environment

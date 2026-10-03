@@ -9,7 +9,11 @@ pub struct PipeWriter<S> {
     pub(crate) stream: S,
 }
 
-impl<S: tokio::io::AsyncWrite + Send + Unpin> PipeWriter<S> {
+impl<S: tokio::io::AsyncWrite + Unpin> PipeWriter<S> {
+    pub fn from_inner(stream: S) -> Self {
+        Self { stream }
+    }
+
     pub fn into_inner(self) -> S {
         self.stream
     }
@@ -26,7 +30,7 @@ impl<S: tokio::io::AsyncWrite + Send + Unpin> PipeWriter<S> {
     }
 }
 
-impl<S: tokio::io::AsyncWrite + Send + Unpin> AsyncWrite for PipeWriter<S> {
+impl<S: tokio::io::AsyncWrite + Unpin> AsyncWrite for PipeWriter<S> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -52,6 +56,14 @@ pub struct PipeReader<R> {
 }
 
 impl<R> PipeReader<R> {
+    pub fn from_parts_id(stream: R, description: String, pipe_id: PipeId) -> Self {
+        Self {
+            stream,
+            description,
+            pipe_id,
+        }
+    }
+
     pub fn into_parts(self) -> (R, String, PipeId) {
         (self.stream, self.description, self.pipe_id)
     }
@@ -67,14 +79,25 @@ impl<R> PipeReader<R> {
     pub fn pipe_id_value(&self) -> PipeId {
         self.pipe_id
     }
+}
 
-    #[deprecated(note = "use pipe_id_value")]
-    pub fn pipe_id(&self) -> u32 {
-        self.pipe_id.get()
+impl<S: crate::TransportSendStream + Unpin> PipeWriter<S> {
+    pub async fn finish(mut self) -> Result<(), mtp_common::CommunicationError> {
+        self.stream.finish().await
+    }
+
+    pub fn abort(&mut self) -> Result<(), mtp_common::CommunicationError> {
+        self.stream.reset(0)
     }
 }
 
-impl<R: tokio::io::AsyncRead + Send + Unpin> AsyncRead for PipeReader<R> {
+impl<R: crate::TransportRecvStream> PipeReader<R> {
+    pub fn stop(self, code: u32) -> Result<(), mtp_common::CommunicationError> {
+        self.stream.stop(code)
+    }
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> AsyncRead for PipeReader<R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,

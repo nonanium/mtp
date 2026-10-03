@@ -9,6 +9,7 @@ Area-specific guides:
 - [Architecture](./docs/ARCHITECTURE.md)
 - [Connection lifecycle](./docs/CONNECTIONS.md)
 - [Native client](./docs/NATIVE-CLIENT.md)
+- [Tauri integration](./docs/TAURI.md)
 - [WASM client](./docs/WASM-CLIENT.md)
 - [Native host](./docs/NATIVE-HOST.md)
 - [Web server](./docs/NATIVE-HOST-WEB-SERVER.md)
@@ -78,6 +79,13 @@ The codec encodes and decodes MTP frames using Communication Types and Data Type
 ### Core and bindings
 
 `mtp-core` owns portable framing, retry, limit, and policy decisions. The crates under `bindings/` adapt those decisions to native wtransport, H3 WebTransport, and browser WebTransport. Native `Sender` and `Receiver` retain their connection metadata API while sharing the portable policy and framing rules.
+
+`mtp-pipes` owns pipe negotiation, deadlines, cancellation and encrypted records.
+It depends on core transport interfaces, common protocol types and codec, with
+crypto enabled by its `encrypted` feature. It never depends on bindings.
+Use `mtp_pipes::PipeDispatcher`, `mtp_pipes::PipeRequest` and
+`mtp_pipes::EncryptedPipeWriter`, or `mtp::pipes` with umbrella features `pipes`
+and `crypto`. Async byte streams may use non-`Send` browser futures.
 
 Certificate verification is controlled by client configuration. Use system roots or explicit certificate and SPKI pinning for production. Development self-signed and insecure modes: [Security](./docs/SECURITY.md).
 

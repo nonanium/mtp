@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-open-relay-content"
+description = "Enables the mtp_open_relay_content command without any pre-configured scope."
+commands.allow = ["mtp_open_relay_content"]
+
+[[permission]]
+identifier = "deny-mtp-open-relay-content"
+description = "Denies the mtp_open_relay_content command without any pre-configured scope."
+commands.deny = ["mtp_open_relay_content"]

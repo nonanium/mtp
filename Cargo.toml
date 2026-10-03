@@ -3,6 +3,7 @@ members = [
     ".",
     "common",
     "core",
+    "pipes",
     "crypto",
     "type-map",
     "codec",
@@ -11,6 +12,7 @@ members = [
     "bindings/wasm",
     "host",
     "client",
+    "plugins/tauri",
     "files",
     "webserver",
     "tests/rust",
@@ -30,6 +32,7 @@ default-members = [
     ".",
     "common",
     "core",
+    "pipes",
     "crypto",
     "type-map",
     "codec",
@@ -44,21 +47,22 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 [workspace.dependencies]
-mtp-common = { version = "0.3.0", path = "common" }
-mtp-core = { version = "0.3.0", path = "core" }
-mtp-type-map = { version = "0.3.0", path = "type-map" }
-mtp-codec = { version = "0.3.0", path = "codec" }
-mtp-crypto = { version = "0.3.0", path = "crypto" }
-mtp-native = { version = "0.3.0", path = "bindings/native" }
-mtp-h3 = { version = "0.3.0", path = "bindings/h3" }
-mtp-host = { version = "0.3.0", path = "host" }
-mtp-client = { version = "0.3.0", path = "client" }
-mtp-files = { version = "0.3.0", path = "files" }
-mtp-webserver = { version = "0.3.0", path = "webserver" }
+mtp-common = { version = "0.4.0", path = "common" }
+mtp-core = { version = "0.4.0", path = "core" }
+mtp-pipes = { version = "0.4.0", path = "pipes" }
+mtp-type-map = { version = "0.4.0", path = "type-map" }
+mtp-codec = { version = "0.4.0", path = "codec" }
+mtp-crypto = { version = "0.4.0", path = "crypto" }
+mtp-native = { version = "0.4.0", path = "bindings/native" }
+mtp-h3 = { version = "0.4.0", path = "bindings/h3" }
+mtp-host = { version = "0.4.0", path = "host" }
+mtp-client = { version = "0.4.0", path = "client" }
+mtp-files = { version = "0.4.0", path = "files" }
+mtp-webserver = { version = "0.4.0", path = "webserver" }
 
 # =============================================================================
 # mtp - umbrella crate
@@ -91,6 +95,7 @@ mtp-client = { workspace = true, optional = true }
 mtp-files = { workspace = true, optional = true }
 mtp-webserver = { workspace = true, optional = true }
 mtp-native = { workspace = true, optional = true }
+mtp-pipes = { workspace = true, optional = true }
 
 [features]
 # Serialization
@@ -104,6 +109,7 @@ crypto = [
     "mtp-host?/crypto",
     "mtp-client?/crypto",
     "mtp-webserver?/crypto",
+    "mtp-pipes?/encrypted",
 ]
 
 # MTP server host - version negotiation, Registry, incoming QUIC connections.
@@ -118,7 +124,7 @@ native = ["dep:mtp-native"]
 
 # Direct access to the pipes. Pipes can be used to send raw binary
 # without after creation overhead.
-pipes = ["mtp-common/pipes", "mtp-codec/pipes", "mtp-native?/pipes", "mtp-host?/pipes", "mtp-client?/pipes", "mtp-webserver?/pipes"]
+pipes = ["dep:mtp-pipes", "mtp-common/pipes", "mtp-codec/pipes", "mtp-native?/pipes", "mtp-host?/pipes", "mtp-client?/pipes", "mtp-webserver?/pipes"]
 
 # On-disk storage for keyrings (`.mk`) and public key bundles (`.mpkb`).
 # Pulls in `crypto` so the `Keyring` / `PublicKeyBundle` types are in scope.

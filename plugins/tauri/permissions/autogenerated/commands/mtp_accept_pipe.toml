@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-accept-pipe"
+description = "Enables the mtp_accept_pipe command without any pre-configured scope."
+commands.allow = ["mtp_accept_pipe"]
+
+[[permission]]
+identifier = "deny-mtp-accept-pipe"
+description = "Denies the mtp_accept_pipe command without any pre-configured scope."
+commands.deny = ["mtp_accept_pipe"]

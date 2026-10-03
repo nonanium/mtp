@@ -60,6 +60,7 @@ import {
 } from "./credentials.js";
 import type { InternalCredentials } from "./credentials.js";
 import { withTimeout } from "./timeout.js";
+import { androidTauri, NativeTransport, nativeOptions } from "./native.js";
 import { communicationError } from "./communication-error.js";
 
 async function normalizeCommunicationError<T>(operation: Promise<T>): Promise<T> {
@@ -94,6 +95,7 @@ import {
   initiateMTPPipeSession,
   MTPEncryptedPipeReader,
   MTPEncryptedPipeWriter,
+  MTPPipeProtectionContext,
   validateApplicationProtectionPurpose,
 } from "./encrypted-pipe.js";
 import {
@@ -301,6 +303,10 @@ export interface MTPClientOptions<
   Registry extends MTPSchemaRegistry = MTPNoSchemas,
 > {
   url: string;
+  /** Native persistent identity name. Defaults to the credential storage key. */
+  nativeName?: string;
+  /** Create an independent ephemeral native identity and connection. */
+  nativeFresh?: boolean;
   descriptor?: string;
   hostPublicKey?: MTPKeyMaterialInput;
   credentials?: MTPCredentials | string | null;
@@ -1019,6 +1025,8 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   readonly #relayReplayGuard = new InMemoryReplayGuard();
   #sealedRelayContentSubscriptions = 0;
   readonly raw: MTPRaw;
+  #native?: NativeTransport;
+  #subscriptionDisposers = new Set<Unsubscribe>();
 
   readonly crypto = MTPClient.crypto;
   readonly codec = MTPClient.codec;
@@ -1073,6 +1081,36 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       securityProfile: resolveSecurityProfile(options),
     };
 
+    const runtime = androidTauri();
+    if (runtime) {
+      if (options.nativeFresh != null && typeof options.nativeFresh !== "boolean") throw new TypeError("nativeFresh must be a boolean");
+      if (options.nativeName != null && (typeof options.nativeName !== "string" || !options.nativeName.trim())) throw new TypeError("nativeName must be a non-empty string");
+      if ((options.nativeFresh || options.credentials === null) && !normalizedOptions.hostPublicKey) throw new Error("fresh native clients require pinned hostPublicKey");
+      const name = options.nativeFresh || options.credentials === null
+        ? `mtp:temporary:${globalThis.crypto.randomUUID()}`
+        : options.nativeName ?? options.credentialsStorageKey ?? DEFAULT_CREDENTIALS_KEY;
+      let nativeSdk: MTPClient<Registry>;
+      const native = new NativeTransport(runtime, name,
+        (bytes) => decodeWithLimits(bytes, normalizedOptions.receiveLimits),
+        (frame) => { if (nativeSdk) nativeSdk.#handleFrame(frame); },
+        (error) => emit(options.logger, { hint: "error", type: "Native", error: String(error) }));
+      await native.initialize(nativeOptions({
+        url: options.url, descriptor: options.descriptor,
+        hostPublicKey: normalizedOptions.hostPublicKey,
+      credentials: options.credentials == null ? undefined : deserializeCredentials(options.credentials),
+        fresh: options.nativeFresh || options.credentials === null,
+        serverCertificateHashes: options.serverCertificateHashes,
+        maxMessageSize: options.maxMessageSize ?? DEFAULT_MAX_MESSAGE_SIZE,
+        authTimeoutMs: options.authTimeoutMs,
+        requirePq: options.requirePq ?? normalizedOptions.securityProfile.requirePq,
+        pings: options.pings ?? true,
+        receiveLimits: normalizedOptions.receiveLimits,
+      }) as Record<string, unknown>);
+      nativeSdk = new MTPClient<Registry>({ ...normalizedOptions, credentials: null }, native as unknown as RawBindings.WasmClient);
+      nativeSdk.#native = native;
+      return nativeSdk;
+    }
+
     let sdk: MTPClient<Registry> | undefined;
     const client = new WasmClient(
       (state) =>
@@ -1125,7 +1163,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   }
 
   static isSupported(): boolean {
-    return WasmClient.is_supported();
+    return !!androidTauri() || WasmClient.is_supported();
   }
 
   static async init(
@@ -1135,7 +1173,13 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   }
 
   get credentials(): MTPClientCredentials | null {
+    if (this.#native) return null;
     return publicCredentials(this.#credentials);
+  }
+
+  /** Public identity information. Native secret keys never leave the plugin. */
+  get nativeIdentity(): { name: string; clientId: bigint | null; publicKeys: Uint8Array } | null {
+    return this.#native ? { name: this.#native.name, clientId: this.#native.clientId, publicKeys: this.#native.publicKeys.slice() } : null;
   }
 
   get defaultSignatureVerificationPolicy(): MTPSignatureVerificationPolicy {
@@ -1183,6 +1227,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   }
 
   async connect(): Promise<void> {
+    if (this.#native) { await this.#native.connect("connect"); return; }
     if (this.#credentials?.clientId != null && this.#options.hostPublicKey) {
       await this.auth();
       return;
@@ -1192,6 +1237,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   }
 
   async connectUnauthenticated(): Promise<void> {
+    if (this.#native) { await this.#native.connect("unauthenticated"); return; }
     const config = this.#connectionConfig();
     try {
       // The deprecated raw method clones its borrowed config synchronously and
@@ -1211,6 +1257,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   }
 
   async auth(): Promise<bigint> {
+    if (this.#native) return this.#native.connect("auth");
     if (!this.#options.hostPublicKey) {
       throw new Error("MTPClient.auth requires hostPublicKey");
     }
@@ -1259,6 +1306,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   }
 
   async register(): Promise<bigint> {
+    if (this.#native) return this.#native.connect("register");
     if (!this.#options.hostPublicKey) {
       throw new Error("MTPClient.register requires hostPublicKey");
     }
@@ -1300,6 +1348,12 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   }
 
   async clearCredentials(): Promise<void> {
+    if (this.#native) {
+      await this.#native.call("clear_credentials");
+      this.#native.clientId = null;
+      this.#native.publicKeys = new Uint8Array();
+      return;
+    }
     zeroCredentials(this.#credentials);
     this.#credentials = null;
     await storageRemove(
@@ -1552,6 +1606,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       if (closed) return;
       closed = true;
       dispatcher.close();
+      this.#subscriptionDisposers.delete(close);
       if (id !== undefined) this.raw.client.unsubscribe(id);
       onClose?.();
     };
@@ -1579,6 +1634,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       onOverflow: close,
     });
     id = this.raw.client.subscribe(type, (frame) => dispatcher.enqueue(frame, frame));
+    this.#subscriptionDisposers.add(close);
     return close;
   }
 
@@ -1611,6 +1667,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       if (closed) return;
       closed = true;
       dispatcher.close();
+      this.#subscriptionDisposers.delete(close);
       if (id !== undefined) this.raw.client.unsubscribe(id);
     };
     const reportError = (error: unknown, frame: ParsedFrame) => {
@@ -1651,6 +1708,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       onOverflow: close,
     });
     id = this.raw.client.subscribe(type, (message) => dispatcher.enqueue(message, message));
+    this.#subscriptionDisposers.add(close);
     return close;
   }
 
@@ -1756,6 +1814,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
         }
       });
     }
+    if (this.#native?.clientId === signerId) return [this.#native.publicKeys.slice()];
     if (this.#credentials?.clientId === signerId) {
       try {
         const bytes = this.#getPublicKeyBundleBytes();
@@ -1777,6 +1836,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     frame: ParsedFrame,
     options: MTPOpenRelayMetadataOptions = {},
   ): Promise<MTPVerifiedRelayMetadata> {
+    if (this.#native) return this.#openNativeRelayMetadata(frame, options);
     // The resolver is asynchronous. Keep an immutable byte snapshot so the
     // signer claim and the later native verification refer to one frame.
     const signaturePolicy = resolveSignatureVerificationPolicy(
@@ -1910,6 +1970,28 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     metadata: MTPVerifiedRelayMetadata,
     options: MTPOpenRelayContentOptions = {},
   ): Promise<MTPVerifiedRelayContent> {
+    if (this.#native) {
+      const state = relayMetadataState.get(metadata);
+      if (!state || state.disposed) throw new Error("relay metadata has been disposed or is unauthenticated");
+      this.#assertExpectedSignerId(state.signerId, options.expectedSignerId);
+      const policy = resolveSignatureVerificationPolicy(options.signaturePolicy, state.signaturePolicy);
+      if (policy !== state.signaturePolicy) throw new MTPSignatureVerificationError("policy-rejected", state.signerId);
+      const keys = options.resolveSignerPublicKeys ? await this.#resolveSignerPublicKeys(state.signerId, options) : state.signerPublicKeys;
+      if (state.disposed) throw new Error("relay metadata has been disposed");
+      const limits = options.limits ? this.#nativeLimits(options.limits) : state.receiveLimits ?? {};
+      try {
+      const result = await this.#native.call<any>("open_relay_content", {
+        handle: (state.native as any).nativeHandle,
+        options: nativeOptions({ ...this.#nativeProtectionOptions(options), signerPublicKeys: keys, signaturePolicy: policy,
+          expectedFinalRecipientId: options.expectedFinalRecipientId ?? options.recipient?.id ?? this.#native.clientId,
+          limits }),
+      });
+      return { type: result.type, data: decodeDataValueWithLimits(Uint8Array.from(result.content), limits), signerId: BigInt(result.signerId), finalRecipientId: BigInt(result.finalRecipientId), messageId: state.messageId, createdAt: state.createdAt, metadata: state.metadata };
+      } catch (error) {
+        metadata.dispose();
+        throw error;
+      }
+    }
     const recipient = this.#resolveDecryptionIdentity(options.recipient);
     const state = relayMetadataState.get(metadata);
     if (!state) {
@@ -2032,6 +2114,25 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     frame: ParsedFrame;
     message: MTPVerifiedProtectedMessage;
   }> {
+    if (this.#native) {
+      if (typeof options?.resolveSignerPublicKeys !== "function") throw new TypeError("openProtected requires resolveSignerPublicKeys");
+      validateApplicationProtectionPurpose(options.signaturePurpose);
+      validateApplicationProtectionPurpose(options.encryptionPurpose);
+      const limits = this.#nativeLimits(options.limits);
+      const frame = cloneParsedFrame(parseProtectedFrame(frameInput, limits));
+      assertKnownCommunicationType(frame);
+      const bytes = protectedFrameBytes(frame, limits);
+      const args = { bytes: Array.from(bytes), options: nativeOptions({ ...this.#nativeProtectionOptions(options), limits }) };
+      const signerId = BigInt(await this.#native.call<string>("protected_claimed_signer", args));
+      this.#assertExpectedSignerId(signerId, options.expectedSignerId);
+      const keys = await this.#resolveSignerPublicKeys(signerId, options);
+      const result = await this.#native.call<any>("open_protected", { ...args, options: nativeOptions({ ...this.#nativeProtectionOptions(options), limits, signerId, signerPublicKeys: keys,
+        expectedReceiverId: options.expectedReceiverId ?? options.recipient?.id ?? this.#native.clientId,
+        signaturePolicy: resolveSignatureVerificationPolicy(options.signaturePolicy, this.defaultSignatureVerificationPolicy) }) });
+      const message = { type: result.type, protectedVersion: Number(result.protectedVersion), signerId: BigInt(result.signerId), finalRecipientId: BigInt(result.finalRecipientId), messageId: BigInt(result.messageId), createdAt: BigInt(result.createdAt), receiver: frame.receiver, outerSender: frame.sender, data: decodeDataValueWithLimits(Uint8Array.from(result.content), limits) };
+      if (!await (options.replayGuard ?? this.#protectedReplayGuard).accept(message.signerId, message.messageId, message.createdAt)) throw new MTPReplayError(message.signerId, message.messageId);
+      return { frame, message };
+    }
     if (!options || typeof options !== "object") {
       throw new TypeError("openProtected requires an options object");
     }
@@ -2201,6 +2302,42 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     data: MTPDataValueInput,
     options: MTPSendProtectedOptions,
   ): Promise<void> {
+    await this.send(await this.#buildProtected(type, data, options));
+  }
+
+  /** Return the correlated ciphertext frame, ready for openProtected. */
+  async requestProtected(
+    type: MTPCommunicationType,
+    data: MTPDataValueInput,
+    options: MTPSendProtectedOptions,
+    requestOptions?: MTPRequestOptions,
+  ): Promise<ParsedFrame> {
+    const frame = await this.#buildProtected(type, data, { ...options, id: options.id ?? this.#nextSealedRelayRequestId++ });
+    return this.request(frame, undefined, requestOptions);
+  }
+
+  /** Subscribe to ciphertext frames without application plaintext schemas. */
+  subscribeRaw(type: MTPCommunicationType, handler: (frame: ParsedFrame) => void | Promise<void>, options: MTPSubscriptionOptions = {}): Unsubscribe {
+    return this.#subscribeBounded(type, handler, options);
+  }
+
+  async #buildProtected(
+    type: MTPCommunicationType,
+    data: MTPDataValueInput,
+    options: MTPSendProtectedOptions,
+  ): Promise<Uint8Array> {
+    if (this.#native) {
+      const messageType = assertApplicationCommunicationType(type);
+      validateApplicationProtectionPurpose(options.signaturePurpose);
+      validateApplicationProtectionPurpose(options.encryptionPurpose);
+      const recipients = normalizeRecipientBundles(options.recipients, "recipients");
+      const bytes = await this.#native.call<number[]>("build_protected", { type: messageType,
+        content: Array.from(encodeMTPDataValue(data, this.#encodeLimits())),
+        options: nativeOptions({ ...this.#nativeProtectionOptions(options), receiverId: inputU64(options.receiverId, "receiverId"), recipients,
+          signatureSuite: options.signatureSuite ?? this.#options.securityProfile.protectedSignatureSuite,
+          messageId: createMessageId(), createdAt: unixTimeMillis(), limits: { ...this.#encodeLimits(), ...normalizeReceiveLimits(options.limits, "limits") } }) });
+      return Uint8Array.from(bytes);
+    }
     const messageType = assertApplicationCommunicationType(type);
     const identity = resolveProtectionIdentity(
       options.identity,
@@ -2242,7 +2379,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     } catch (error) {
       throw protectedOpeningError(error, identity.signerId);
     }
-    await this.send(frame);
+    return frame;
   }
 
   async sendSealedRelay(
@@ -2250,7 +2387,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     data: MTPDataValueInput,
     options: MTPSendSealedRelayOptions,
   ): Promise<void> {
-    await this.send(this.#buildSealedRelayFrame(type, data, options));
+    await this.send(this.#native ? await this.#buildNativeRelay(type, data, options) : this.#buildSealedRelayFrame(type, data, options));
   }
 
   /** Send a sealed relay and await the response from its next hop. */
@@ -2262,7 +2399,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   ): Promise<ParsedFrame> {
     return this.request(
       this.#addSealedRelayRequestId(
-        this.#buildSealedRelayFrame(type, data, options),
+        this.#native ? await this.#buildNativeRelay(type, data, options) : this.#buildSealedRelayFrame(type, data, options),
       ),
       undefined,
       requestOptions,
@@ -2497,16 +2634,6 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     );
   }
 
-  /** Explicit alias for callers that want to emphasize encrypted metadata. */
-  subscribeEncryptedMetadata(
-    handler: (
-      metadata: MTPVerifiedRelayMetadata,
-      frame: ParsedFrame,
-    ) => void | Promise<void>,
-    options: MTPRelayMetadataSubscriptionOptions = {},
-  ): Unsubscribe {
-    return this.subscribeRelayMetadata(handler, options);
-  }
 
   async setEncryptedSecret(record: MTPEncryptedSecretRecord): Promise<void> {
     await this.encryptedSecretProvider.set(record);
@@ -2535,11 +2662,107 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     };
   }
 
+  #nativeLimits(limits?: MTPReceiveLimits): MTPReceiveLimits {
+    return limits ? effectiveReceiveLimits(normalizeReceiveLimits(limits, "limits"), this.#options.maxMessageSize ?? DEFAULT_MAX_MESSAGE_SIZE) : this.#options.receiveLimits ?? {};
+  }
+
+  #nativeProtectionOptions(options: { identity?: MTPProtectionIdentity; recipient?: MTPDecryptionIdentity }): Record<string, unknown> {
+    return {
+      ...options,
+      ...(options.identity ? { identity: {
+        signerId: inputU64(options.identity.signerId, "identity.signerId"),
+        keyring: normalizeBytes(options.identity.keyring, "identity.keyring"),
+      } } : {}),
+      ...(options.recipient ? { recipient: {
+        id: options.recipient.id == null ? undefined : inputU64(options.recipient.id, "recipient.id"),
+        keyring: normalizeBytes(options.recipient.keyring, "recipient.keyring"),
+        keyringHistory: options.recipient.keyringHistory?.map((key, index) => normalizeBytes(key, `recipient.keyringHistory[${index}]`)),
+      } } : {}),
+    };
+  }
+
+  async #buildNativeRelay(type: MTPCommunicationType, data: MTPDataValueInput, options: MTPSendSealedRelayOptions): Promise<Uint8Array> {
+    const bytes = await this.#native!.call<number[]>("build_relay", {
+      type: assertApplicationCommunicationType(type), content: Array.from(encodeMTPDataValue(data, this.#encodeLimits())),
+      metadata: options.metadata === undefined ? null : Array.from(encodeMTPDataValue(options.metadata, this.#encodeLimits())),
+      options: nativeOptions({ ...this.#nativeProtectionOptions(options), metadata: undefined, nextHopId: encodeMTPRelayTarget(options.nextHop),
+        finalRecipientId: inputU64(options.finalRecipientId, "finalRecipientId"),
+        metadataRecipients: normalizeRecipientBundles(options.metadataRecipients, "metadataRecipients"),
+        contentRecipients: normalizeRecipientBundles(options.contentRecipients, "contentRecipients"),
+        signatureSuite: options.signatureSuite ?? this.#options.securityProfile.protectedSignatureSuite,
+        messageId: createMessageId(), createdAt: unixTimeMillis(), limits: { ...this.#encodeLimits(), ...normalizeReceiveLimits(options.limits, "limits") } }),
+    });
+    return Uint8Array.from(bytes);
+  }
+
+  async #openNativeRelayMetadata(frame: ParsedFrame, options: MTPOpenRelayMetadataOptions): Promise<MTPVerifiedRelayMetadata> {
+    const transport = this.#native!;
+    const limits = this.#nativeLimits(options.limits);
+    const bytes = frame.raw.slice();
+    const snapshot = decodeWithLimits(bytes, limits);
+    const args = { bytes: Array.from(bytes), options: nativeOptions({ ...this.#nativeProtectionOptions(options), limits }) };
+    const signerId = BigInt(await transport.call<string>("relay_claimed_signer", args));
+    this.#assertExpectedSignerId(signerId, options.expectedSignerId);
+    const keys = await this.#resolveSignerPublicKeys(signerId, options);
+    if (!keys) throw signerKeysUnavailable(signerId);
+    const signaturePolicy = resolveSignatureVerificationPolicy(options.signaturePolicy, this.defaultSignatureVerificationPolicy);
+    const result = await transport.call<any>("open_relay_metadata", { ...args, options: nativeOptions({ ...this.#nativeProtectionOptions(options), limits, signerId, signerPublicKeys: keys, signaturePolicy }) });
+    const native = { nativeHandle: result.handle, free: () => { void transport.call("release_relay", { handle: result.handle }).catch(() => {}); } } as unknown as RawBindings.WasmVerifiedRelayMetadata;
+    let transferred = false;
+    try {
+      const messageId = BigInt(result.messageId), createdAt = BigInt(result.createdAt);
+      if (!await (options.replayGuard ?? this.#relayReplayGuard).accept(BigInt(result.signerId), messageId, createdAt)) throw new MTPReplayError(signerId, messageId);
+      if (!Number.isSafeInteger(result.matchedSignerKeyIndex) || result.matchedSignerKeyIndex < 0 || result.matchedSignerKeyIndex >= keys.length) throw new Error("invalid matched signer key index");
+      const token = {};
+      const metadata = new MTPVerifiedRelayMetadata(RELAY_METADATA_TOKEN, {
+        frame: snapshot, native, relayVersion: Number(result.relayVersion), signerId: BigInt(result.signerId), finalRecipientId: BigInt(result.finalRecipientId), messageId, createdAt,
+        hasMetadata: result.metadata != null, metadata: result.metadata == null ? undefined : decodeDataValueWithLimits(Uint8Array.from(result.metadata), limits),
+        encryptedContent: Uint8Array.from(result.encryptedContent), signerPublicKeys: keys.map(key => key.slice()), matchedSignerKeyIndex: result.matchedSignerKeyIndex,
+        signaturePolicy, receiveLimits: limits, receiveLimitsExplicit: true, disposed: false, finalizerToken: token,
+      });
+      registerRelayMetadata(metadata, native, token);
+      transferred = true;
+      return metadata;
+    } finally { if (!transferred) native.free(); }
+  }
+
+  async #nativePipe(command: string, args: Record<string, unknown>): Promise<any> {
+    const transport = this.#native!;
+    const result = await transport.call<any>(command, nativeOptions(args) as Record<string, unknown>);
+    if (result == null) return null;
+    const handle = result.handle;
+    let sequence = 0n;
+    return {
+      pipeId: result.pipeId, description: result.description,
+      context: result.context == null ? undefined : new MTPPipeProtectionContext(Uint8Array.from(result.context.sessionId), result.context.purpose, result.context.direction, Uint8Array.from(result.context.transcriptHash)),
+      get sequenceNumber() { return sequence; },
+      writeRecord: async (data: Uint8Array) => {
+        if (!(data instanceof Uint8Array)) throw new TypeError("pipe record must be a Uint8Array");
+        await transport.call("pipe_write_record", { handle, bytes: Array.from(data) });
+        sequence += 1n;
+      },
+      readRecord: async () => {
+        const bytes = await transport.call<number[] | null>("pipe_read_record", { handle });
+        if (bytes == null) return null;
+        sequence += 1n;
+        return Uint8Array.from(bytes);
+      },
+      write: (data: Uint8Array) => transport.call("pipe_write", { handle, bytes: Array.from(data) }),
+      read: async () => { const bytes = await transport.call<number[] | null>("pipe_read", { handle }); return bytes == null ? null : Uint8Array.from(bytes); },
+      close: () => transport.call("pipe_close", { handle }),
+      abort: () => { void transport.call("pipe_abort", { handle }).catch(() => {}); },
+      dispose: () => { void transport.call("pipe_abort", { handle }).catch(() => {}); },
+      wait: () => this.#nativePipe("pipe_wait", { handle }),
+      cancel: () => transport.call("pipe_cancel", { handle }),
+    };
+  }
+
   setOnPipeRequest(handler: ((request: MTPPipeRequest) => void) | null): void {
     setOnPipeRequestWithContext(this.#pipeContext(), handler);
   }
 
   async createPipe(description: string): Promise<MTPOutgoingPipeHandle> {
+    if (this.#native) return this.#nativePipe("create_pipe", { description });
     return createPipeWithContext(this.#pipeContext(), description);
   }
 
@@ -2552,10 +2775,17 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   async createEncryptedPipe(
     options: MTPCreateEncryptedPipeOptions,
   ): Promise<MTPEncryptedPipeWriter | null> {
+    if (this.#native) {
+      if (options.recipientPublicKey != null && options.recipientPublicKeys != null) throw new Error("provide recipientPublicKey or recipientPublicKeys, not both");
+      const recipients = normalizeRecipientBundles(options.recipientPublicKeys ?? (options.recipientPublicKey == null ? [] : [options.recipientPublicKey]), "recipientPublicKeys");
+      this.#nativePipeProtection(options);
+      return this.#nativePipe("create_encrypted_pipe", { options: { ...options, recipientId: inputU64(options.recipientId, "recipientId"), recipientPublicKey: undefined, recipientPublicKeys: recipients, purpose: options.purpose ?? 0x40, direction: options.direction ?? 0, signatureSuite: options.signatureSuite ?? this.#options.securityProfile.encryptedPipeSignatureSuite } });
+    }
     return createEncryptedPipeWithContext(this.#pipeContext(), options);
   }
 
   async acceptPipe(pipeId: number): Promise<MTPPipeReader> {
+    if (this.#native) return this.#nativePipe("accept_pipe", { pipeId });
     return acceptPipeWithContext(this.#pipeContext(), pipeId);
   }
 
@@ -2564,16 +2794,40 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     request: MTPPipeRequest,
     options: MTPAcceptEncryptedPipeOptions,
   ): Promise<MTPEncryptedPipeReader> {
+    if (this.#native) {
+      const senderKeys = normalizeRecipientBundles(options.senderPublicKeys ?? (options.senderPublicKey == null ? [] : [options.senderPublicKey]), "senderPublicKeys");
+      this.#nativePipeProtection(options);
+      return this.#nativePipe("accept_encrypted_pipe", { request, options: { ...options, senderId: inputU64(options.senderId, "senderId"), senderPublicKey: undefined, senderPublicKeys: senderKeys, purpose: options.purpose ?? 0x40, direction: options.direction ?? 0, signaturePolicy: resolveSignatureVerificationPolicy(options.signaturePolicy, this.#options.defaultSignatureVerificationPolicy ?? this.#options.securityProfile.encryptedPipeSignaturePolicy) } });
+    }
     return acceptEncryptedPipeWithContext(this.#pipeContext(), request, options);
   }
 
   async denyPipe(pipeId: number): Promise<void> {
+    if (this.#native) { await this.#native.call("deny_pipe", { pipeId }); return; }
     return denyPipeWithContext(this.#pipeContext(), pipeId);
   }
 
+  #nativePipeProtection(options: { purpose?: number; direction?: number }) {
+    const purpose = validateApplicationProtectionPurpose(options.purpose ?? 0x40);
+    const direction = options.direction ?? 0;
+    if (!Number.isInteger(direction) || direction < 0 || direction > 0xff) {
+      throw new RangeError("direction must be a u8");
+    }
+    return { purpose, direction };
+  }
+
   disconnect(): void {
+    if (this.#native) {
+      for (const dispose of this.#subscriptionDisposers) dispose();
+    }
     this.raw.client.stop_protocol_pings();
     this.raw.client.disconnect();
+  }
+
+  async setBackgroundEnabled(enabled: boolean): Promise<void> {
+    if (!this.#native) throw new Error("background service is only available on Android Tauri");
+    if (typeof enabled !== "boolean") throw new TypeError("enabled must be a boolean");
+    await this.#native.call("set_background_enabled", { enabled });
   }
 }
 

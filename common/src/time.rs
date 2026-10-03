@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(any(not(target_arch = "wasm32"), test, feature = "test-helpers"))]
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -9,11 +12,25 @@ pub enum TimeError {
     OutOfRange,
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test, feature = "test-helpers"))]
+#[cfg_attr(not(feature = "test-helpers"), allow(unreachable_pub))]
 pub fn duration_to_unix_time_millis(duration: Duration) -> Result<u64, TimeError> {
     u64::try_from(duration.as_millis()).map_err(|_| TimeError::OutOfRange)
 }
 
 pub fn unix_time_millis() -> Result<u64, TimeError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let now = js_sys::Date::now();
+        if now < 0.0 {
+            return Err(TimeError::BeforeUnixEpoch);
+        }
+        if !now.is_finite() || now >= u64::MAX as f64 {
+            return Err(TimeError::OutOfRange);
+        }
+        Ok(now as u64)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| TimeError::BeforeUnixEpoch)

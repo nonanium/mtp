@@ -1,6 +1,8 @@
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use mtp_codec::{CommunicationType, CommunicationValue, DataType, DataValue, TypeMap};
 use mtp_common::{CommunicationError, ExpiringSet, PipeError, PipeId};
-use mtp_native::{PipeReader, PipeWriter, Policy};
+use mtp_core::{PipeReader, PipeWriter, Policy};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -16,107 +18,40 @@ pub enum TransportEvent<P> {
 }
 
 /// The sender operations needed by the transport-independent pipe protocol.
-pub trait PipeSender: Clone + Send + Sync + 'static {
-    type Writer: tokio::io::AsyncWrite + Send + Unpin + 'static;
+pub trait PipeSender: Clone + crate::PlatformSend + crate::PlatformSync + 'static {
+    type Writer: tokio::io::AsyncWrite + crate::PlatformSend + Unpin + 'static;
 
     fn send_pipe_message(
         &self,
         message: &CommunicationValue,
-    ) -> impl std::future::Future<Output = Result<(), CommunicationError>> + Send;
+    ) -> impl std::future::Future<Output = Result<(), CommunicationError>> + crate::PlatformSend;
 
     fn open_pipe_stream_id(
         &self,
         pipe_id: PipeId,
         description: &str,
-    ) -> impl std::future::Future<Output = Result<PipeWriter<Self::Writer>, CommunicationError>> + Send;
-
-    #[deprecated(note = "use open_pipe_stream_id with PipeId")]
-    fn open_pipe_stream(
-        &self,
-        pipe_id: u32,
-        description: &str,
-    ) -> impl std::future::Future<Output = Result<PipeWriter<Self::Writer>, CommunicationError>> + Send
-    {
-        async move {
-            let pipe_id = PipeId::try_from(pipe_id)
-                .map_err(|_| CommunicationError::Other("pipe id must be non-zero".into()))?;
-            self.open_pipe_stream_id(pipe_id, description).await
-        }
-    }
+    ) -> impl std::future::Future<Output = Result<PipeWriter<Self::Writer>, CommunicationError>>
+    + crate::PlatformSend;
 }
 
 /// The receiver operations needed by the transport-independent pipe protocol.
-pub trait PipeReceiver<P>: Clone + Send + Sync + 'static
+pub trait PipeReceiver<P>: Clone + crate::PlatformSend + crate::PlatformSync + 'static
 where
-    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+    P: tokio::io::AsyncRead + crate::PlatformSend + Unpin + 'static,
 {
     fn expect_pipe_id(&self, pipe_id: PipeId) -> Result<(), CommunicationError>;
 
-    #[deprecated(note = "use expect_pipe_id with PipeId")]
-    fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
-        let pipe_id = PipeId::try_from(pipe_id)
-            .map_err(|_| CommunicationError::Other("pipe id must be non-zero".into()))?;
-        self.expect_pipe_id(pipe_id)
-    }
-
     fn cancel_expected_pipe_id(&self, pipe_id: PipeId);
-
-    #[deprecated(note = "use cancel_expected_pipe_id with PipeId")]
-    fn cancel_expected_pipe(&self, pipe_id: u32) {
-        if let Some(pipe_id) = PipeId::new(pipe_id) {
-            self.cancel_expected_pipe_id(pipe_id);
-        }
-    }
 
     fn receive_pipe_event(
         &self,
-    ) -> impl std::future::Future<Output = Result<TransportEvent<P>, CommunicationError>> + Send;
-}
-
-impl PipeSender for mtp_native::Sender {
-    type Writer = wtransport::SendStream;
-
-    async fn send_pipe_message(
-        &self,
-        message: &CommunicationValue,
-    ) -> Result<(), CommunicationError> {
-        self.send(message).await
-    }
-
-    async fn open_pipe_stream_id(
-        &self,
-        pipe_id: PipeId,
-        description: &str,
-    ) -> Result<PipeWriter<Self::Writer>, CommunicationError> {
-        Ok(PipeWriter::from_inner(
-            self.open_pipe_id(pipe_id, description).await?.into_inner(),
-        ))
-    }
-}
-
-impl PipeReceiver<wtransport::RecvStream> for mtp_native::Receiver {
-    fn expect_pipe_id(&self, pipe_id: PipeId) -> Result<(), CommunicationError> {
-        self.expect_pipe_id(pipe_id)
-    }
-
-    fn cancel_expected_pipe_id(&self, pipe_id: PipeId) {
-        self.cancel_expected_pipe_id(pipe_id);
-    }
-
-    async fn receive_pipe_event(
-        &self,
-    ) -> Result<TransportEvent<wtransport::RecvStream>, CommunicationError> {
-        match self.receive_event().await? {
-            mtp_native::TransportEvent::Message(message) => Ok(TransportEvent::Message(message)),
-            mtp_native::TransportEvent::Pipe(reader) => Ok(TransportEvent::Pipe(reader)),
-        }
-    }
+    ) -> impl std::future::Future<Output = Result<TransportEvent<P>, CommunicationError>>
+    + crate::PlatformSend;
 }
 
 impl<C> PipeSender for mtp_core::GenericSender<C>
 where
     C: mtp_core::TransportConnection,
-    C::SendStream: tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     type Writer = C::SendStream;
 
@@ -132,16 +67,13 @@ where
         pipe_id: PipeId,
         description: &str,
     ) -> Result<PipeWriter<Self::Writer>, CommunicationError> {
-        Ok(PipeWriter::from_inner(
-            self.open_pipe_id(pipe_id, description).await?.into_inner(),
-        ))
+        self.open_pipe_id(pipe_id, description).await
     }
 }
 
 impl<C> PipeReceiver<C::RecvStream> for mtp_core::GenericReceiver<C>
 where
     C: mtp_core::TransportConnection,
-    C::RecvStream: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
     fn expect_pipe_id(&self, pipe_id: PipeId) -> Result<(), CommunicationError> {
         self.expect_pipe_id(pipe_id)
@@ -156,40 +88,27 @@ where
     ) -> Result<TransportEvent<C::RecvStream>, CommunicationError> {
         match self.receive_event().await? {
             mtp_core::TransportEvent::Message(message) => Ok(TransportEvent::Message(message)),
-            mtp_core::TransportEvent::Pipe(reader) => {
-                let description = reader.description().to_owned();
-                let pipe_id = reader.pipe_id_value();
-                Ok(TransportEvent::Pipe(PipeReader::from_parts_id(
-                    reader.into_inner(),
-                    description,
-                    pipe_id,
-                )))
-            }
+            mtp_core::TransportEvent::Pipe(reader) => Ok(TransportEvent::Pipe(reader)),
         }
     }
 }
 
-pub struct PipeHandle<S: PipeSender, P = wtransport::RecvStream> {
-    pub(crate) pipe_id: PipeId,
-    pub(crate) description: String,
-    pub(crate) sender: S,
-    pub(crate) response_rx: tokio::sync::oneshot::Receiver<Result<bool, PipeError>>,
-    pub(crate) dispatcher: Arc<PipeDispatcher<P>>,
-    pub(crate) token: Arc<()>,
+pub struct PipeHandle<S: PipeSender, P> {
+    pub pipe_id: PipeId,
+    pub description: String,
+    pub sender: S,
+    pub response_rx: tokio::sync::oneshot::Receiver<Result<bool, PipeError>>,
+    pub dispatcher: Arc<PipeDispatcher<P>>,
+    pub token: Arc<()>,
 }
 
 impl<S, P> PipeHandle<S, P>
 where
     S: PipeSender,
-    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+    P: tokio::io::AsyncRead + crate::PlatformSend + Unpin + 'static,
 {
     pub fn pipe_id_value(&self) -> PipeId {
         self.pipe_id
-    }
-
-    #[deprecated(note = "use pipe_id_value")]
-    pub fn pipe_id(&self) -> u32 {
-        self.pipe_id.get()
     }
 
     pub fn description(&self) -> &str {
@@ -260,7 +179,7 @@ pub struct PipeRequest<S, R, P> {
 struct ExpectedPipeGuard<R, P>
 where
     R: PipeReceiver<P>,
-    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+    P: tokio::io::AsyncRead + crate::PlatformSend + Unpin + 'static,
 {
     receiver: R,
     pipe_id: PipeId,
@@ -271,7 +190,7 @@ where
 impl<R, P> ExpectedPipeGuard<R, P>
 where
     R: PipeReceiver<P>,
-    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+    P: tokio::io::AsyncRead + crate::PlatformSend + Unpin + 'static,
 {
     fn new(receiver: R, pipe_id: PipeId) -> Self {
         Self {
@@ -290,7 +209,7 @@ where
 impl<R, P> Drop for ExpectedPipeGuard<R, P>
 where
     R: PipeReceiver<P>,
-    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+    P: tokio::io::AsyncRead + crate::PlatformSend + Unpin + 'static,
 {
     fn drop(&mut self) {
         if self.armed {
@@ -303,7 +222,7 @@ impl<S, R, P> PipeRequest<S, R, P>
 where
     S: PipeSender,
     R: PipeReceiver<P>,
-    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+    P: tokio::io::AsyncRead + crate::PlatformSend + Unpin + 'static,
 {
     pub fn id(&self) -> PipeId {
         self.pipe_id
@@ -324,6 +243,10 @@ where
             .lock()
             .await
             .insert(self.pipe_id, pipe_tx);
+        let _pending_guard = PendingAcceptanceGuard {
+            dispatcher: self.dispatcher.clone(),
+            pipe_id: self.pipe_id,
+        };
 
         let response = CommunicationValue::new_with_type_map(
             CommunicationType::PipeResponse,
@@ -378,20 +301,94 @@ where
     }
 }
 
-pub(crate) struct PipeDispatcher<P> {
-    pub(crate) pending_creations: StdMutex<HashMap<PipeId, PendingCreation>>,
-    pub(crate) expired_creations: StdMutex<ExpiringSet<PipeId>>,
-    pub(crate) pending_pipes: Mutex<HashMap<PipeId, tokio::sync::oneshot::Sender<PipeReader<P>>>>,
-    pub(crate) policy: Arc<Policy>,
-    pub(crate) type_map: TypeMap,
+struct PendingAcceptanceGuard<P> {
+    dispatcher: Arc<PipeDispatcher<P>>,
+    pipe_id: PipeId,
+}
+impl<P> Drop for PendingAcceptanceGuard<P> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.dispatcher.pending_pipes.try_lock() {
+            pending.remove(&self.pipe_id);
+        }
+    }
 }
 
-pub(crate) struct PendingCreation {
-    pub(crate) token: Arc<()>,
-    pub(crate) sender: tokio::sync::oneshot::Sender<Result<bool, PipeError>>,
+pub struct PipeDispatcher<P> {
+    pub pending_creations: StdMutex<HashMap<PipeId, PendingCreation>>,
+    pub expired_creations: StdMutex<ExpiringSet<PipeId>>,
+    pub pending_pipes: Mutex<HashMap<PipeId, tokio::sync::oneshot::Sender<PipeReader<P>>>>,
+    pub policy: Arc<Policy>,
+    pub type_map: TypeMap,
 }
 
-pub(crate) struct PendingCreationGuard<P> {
+impl<P: tokio::io::AsyncRead + crate::PlatformSend + Unpin + 'static> PipeDispatcher<P> {
+    pub fn new(policy: Arc<Policy>, type_map: TypeMap) -> Arc<Self> {
+        Arc::new(Self {
+            pending_creations: StdMutex::new(HashMap::new()),
+            expired_creations: StdMutex::new(ExpiringSet::new(
+                policy.pipe_tombstone_ttl.as_secs_f64() * 1000.0,
+                policy.pipe_tombstone_capacity,
+            )),
+            pending_pipes: Mutex::new(HashMap::new()),
+            policy,
+            type_map,
+        })
+    }
+
+    pub async fn create<S: PipeSender>(
+        self: &Arc<Self>,
+        sender: S,
+        description: &str,
+    ) -> Result<PipeHandle<S, P>, PipeError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let (pipe_id, token) = {
+            let mut pending = self
+                .pending_creations
+                .lock()
+                .map_err(|_| PipeError::ConnectionClosed)?;
+            let pipe_id = loop {
+                let candidate = PipeId::random();
+                if !pending.contains_key(&candidate) && !is_expired_creation(self, candidate) {
+                    break candidate;
+                }
+            };
+            let token = Arc::new(());
+            pending.insert(
+                pipe_id,
+                PendingCreation {
+                    token: token.clone(),
+                    sender: response_tx,
+                },
+            );
+            (pipe_id, token)
+        };
+        let mut guard = PendingCreationGuard::new(self.clone(), pipe_id, token.clone());
+        let request =
+            CommunicationValue::new_with_type_map(CommunicationType::PipeRequest, &self.type_map)
+                .with_id(pipe_id.get())
+                .add_typed_default(DataType::Description, DataValue::Str(description.into()));
+        sender
+            .send_pipe_message(&request)
+            .await
+            .map_err(PipeError::from)?;
+        guard.disarm();
+        Ok(PipeHandle {
+            pipe_id,
+            description: description.to_owned(),
+            sender,
+            response_rx,
+            dispatcher: self.clone(),
+            token,
+        })
+    }
+}
+
+pub struct PendingCreation {
+    pub token: Arc<()>,
+    pub sender: tokio::sync::oneshot::Sender<Result<bool, PipeError>>,
+}
+
+pub struct PendingCreationGuard<P> {
     dispatcher: Arc<PipeDispatcher<P>>,
     pipe_id: PipeId,
     token: Arc<()>,
@@ -399,7 +396,7 @@ pub(crate) struct PendingCreationGuard<P> {
 }
 
 impl<P> PendingCreationGuard<P> {
-    pub(crate) fn new(dispatcher: Arc<PipeDispatcher<P>>, pipe_id: PipeId, token: Arc<()>) -> Self {
+    pub fn new(dispatcher: Arc<PipeDispatcher<P>>, pipe_id: PipeId, token: Arc<()>) -> Self {
         Self {
             dispatcher,
             pipe_id,
@@ -408,7 +405,7 @@ impl<P> PendingCreationGuard<P> {
         }
     }
 
-    pub(crate) fn disarm(&mut self) {
+    pub fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -421,7 +418,7 @@ impl<P> Drop for PendingCreationGuard<P> {
     }
 }
 
-pub(crate) fn expire_pending_creation<P>(
+pub fn expire_pending_creation<P>(
     dispatcher: &PipeDispatcher<P>,
     pipe_id: PipeId,
     token: &Arc<()>,
@@ -463,7 +460,7 @@ fn consume_expired_creation<P>(dispatcher: &PipeDispatcher<P>, pipe_id: PipeId) 
     )
 }
 
-pub(crate) fn is_expired_creation<P>(dispatcher: &PipeDispatcher<P>, pipe_id: PipeId) -> bool {
+pub fn is_expired_creation<P>(dispatcher: &PipeDispatcher<P>, pipe_id: PipeId) -> bool {
     let Ok(mut expired) = dispatcher.expired_creations.lock() else {
         return true;
     };
@@ -473,10 +470,7 @@ pub(crate) fn is_expired_creation<P>(dispatcher: &PipeDispatcher<P>, pipe_id: Pi
     )
 }
 
-pub(crate) fn fail_pending_creations<P>(
-    dispatcher: &PipeDispatcher<P>,
-    error: &CommunicationError,
-) {
+pub fn fail_pending_creations<P>(dispatcher: &PipeDispatcher<P>, error: &CommunicationError) {
     let pending = dispatcher
         .pending_creations
         .lock()
@@ -493,11 +487,11 @@ pub(crate) fn fail_pending_creations<P>(
     }
 }
 
-pub(crate) async fn fail_pending_pipes<P>(dispatcher: &PipeDispatcher<P>) {
+pub async fn fail_pending_pipes<P>(dispatcher: &PipeDispatcher<P>) {
     dispatcher.pending_pipes.lock().await.clear();
 }
 
-pub(crate) async fn run_dispatcher<S, R, P>(
+pub async fn run_dispatcher<S, R, P>(
     receiver: R,
     sender: S,
     app_tx: mpsc::Sender<Result<CommunicationValue, CommunicationError>>,
@@ -506,21 +500,31 @@ pub(crate) async fn run_dispatcher<S, R, P>(
 ) where
     S: PipeSender,
     R: PipeReceiver<P>,
-    P: tokio::io::AsyncRead + Send + Unpin + 'static,
+    P: tokio::io::AsyncRead + crate::PlatformSend + Unpin + 'static,
 {
     loop {
         match receiver.receive_pipe_event().await {
             Ok(TransportEvent::Message(message)) => {
-                if message.is_type(CommunicationType::PipeRequest) {
-                    let Some(pipe_id) = message.id().and_then(PipeId::new) else {
-                        let error = CommunicationError::Other(
-                            "PipeRequest frame must contain a non-zero id".into(),
-                        );
-                        if app_tx.send(Err(error)).await.is_err() {
-                            break;
-                        }
-                        continue;
-                    };
+                let pipe_type = [
+                    (CommunicationType::PipeRequest, "PipeRequest"),
+                    (CommunicationType::PipeResponse, "PipeResponse"),
+                    (CommunicationType::PipeAbort, "PipeAbort"),
+                ]
+                .into_iter()
+                .find_map(|(kind, name)| message.is_type(kind).then_some(name));
+                let pipe_id = message.id().and_then(PipeId::new);
+                if let Some(name) = pipe_type
+                    && pipe_id.is_none()
+                {
+                    let error = CommunicationError::Other(format!(
+                        "{name} frame must contain a non-zero id"
+                    ));
+                    if app_tx.send(Err(error)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                if let (Some("PipeRequest"), Some(pipe_id)) = (pipe_type, pipe_id) {
                     let request = PipeRequest {
                         pipe_id,
                         description: message
@@ -534,16 +538,7 @@ pub(crate) async fn run_dispatcher<S, R, P>(
                     let _ = pipe_req_tx.send(request).await;
                     continue;
                 }
-                if message.is_type(CommunicationType::PipeResponse) {
-                    let Some(pipe_id) = message.id().and_then(PipeId::new) else {
-                        let error = CommunicationError::Other(
-                            "PipeResponse frame must contain a non-zero id".into(),
-                        );
-                        if app_tx.send(Err(error)).await.is_err() {
-                            break;
-                        }
-                        continue;
-                    };
+                if let (Some("PipeResponse"), Some(pipe_id)) = (pipe_type, pipe_id) {
                     let Some(accepted) = message.get_bool(DataType::Accepted) else {
                         let error = CommunicationError::Other(
                             "PipeResponse frame must contain a boolean Accepted field".into(),
@@ -565,16 +560,7 @@ pub(crate) async fn run_dispatcher<S, R, P>(
                     }
                     continue;
                 }
-                if message.is_type(CommunicationType::PipeAbort) {
-                    let Some(pipe_id) = message.id().and_then(PipeId::new) else {
-                        let error = CommunicationError::Other(
-                            "PipeAbort frame must contain a non-zero id".into(),
-                        );
-                        if app_tx.send(Err(error)).await.is_err() {
-                            break;
-                        }
-                        continue;
-                    };
+                if let (Some("PipeAbort"), Some(pipe_id)) = (pipe_type, pipe_id) {
                     let pending = dispatcher
                         .pending_creations
                         .lock()

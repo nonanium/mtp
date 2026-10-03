@@ -3,8 +3,6 @@ pub mod connection;
 pub mod engine;
 pub mod error;
 pub mod handshake;
-#[cfg(feature = "pipes")]
-pub mod pipe;
 
 pub use MTPConnection as Connection;
 pub use MTPHost as Host;
@@ -22,8 +20,6 @@ pub use mtp_native::Sender;
 pub use mtp_common::{PipeError, PipeId};
 #[cfg(feature = "pipes")]
 pub use mtp_native::PipeWriter;
-#[cfg(feature = "pipes")]
-pub use pipe::PipeRequest;
 
 pub use mtp_codec::registry::Registry;
 

@@ -12,6 +12,15 @@ protocol information in them.
 
 The creator owns the writer. The accepting peer owns the reader. A writer finishes with a stream FIN or aborts with a stream reset. A reader returns EOF after FIN and reports a connection or stream error when the peer closes unexpectedly.
 
+Rust pipe negotiation, deadlines and cancellation live in `mtp_pipes`, exposed
+by the umbrella crate as `mtp::pipes`. Encrypted records and session handshakes
+use the same direct paths. Enable `mtp-pipes/encrypted` or umbrella `pipes` and
+`crypto` for authenticated records. Use
+`PipeId` with `open_pipe_id`, `expect_pipe_id`, `cancel_expected_pipe_id`,
+`PipeReader::from_parts_id`, and `PipeSessionParameters::new_id`. Read typed
+IDs with `pipe_id_value`. The old integer-ID wrappers and moved-module
+compatibility exports have been removed in 0.4.0.
+
 ## Opening a Pipe
 
 The creator calls `create_pipe` or the corresponding SDK `createPipe` method with a description. MTP assigns a pipe ID and sends a `PipeRequest` frame. The creator receives a handle, not an active writer, because the peer must decide whether to accept the request.

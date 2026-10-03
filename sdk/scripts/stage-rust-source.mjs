@@ -16,6 +16,8 @@ const inputs = [
   "common/src",
   "core/Cargo.toml",
   "core/src",
+  "pipes/Cargo.toml",
+  "pipes/src",
   "crypto/Cargo.toml",
   "crypto/src",
   "type-map/Cargo.toml",

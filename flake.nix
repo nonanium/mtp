@@ -127,6 +127,10 @@
               pnpm
               pkg-config
               openssl
+              glib
+              gtk3
+              webkitgtk_4_1
+              libsoup_3
             ];
 
             MTP_TYPE_MAPS = "${toString ./tests/fixtures/example/type-maps.yaml}";

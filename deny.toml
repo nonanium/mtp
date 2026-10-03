@@ -19,6 +19,7 @@ wildcards = "deny"
 # - current displaydoc/serde/thiserror/tokio and wasm-bindgen trees span syn 2
 #   and syn 3, and some transitive crates still use thiserror 1.
 # - ring still uses windows-sys 0.52 while the Tokio/QUIC tree uses 0.61.
+# - tokio_with_wasm uses hashbrown 0.16 while indexmap uses 0.17.
 # Keep the duplicate-version policy strict for every other crate/version.
 skip = [
     { name = "base64", version = "0.22.1" },
@@ -30,6 +31,7 @@ skip = [
     { name = "digest", version = "0.10.7" },
     { name = "fiat-crypto", version = "0.2.9" },
     { name = "getrandom", version = "0.2.17" },
+    { name = "hashbrown", version = "0.16.1" },
     { name = "keccak", version = "0.1.6" },
     { name = "rand_core", version = "0.6.4" },
     { name = "syn", version = "2.0.119" },

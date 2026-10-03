@@ -1,0 +1,34 @@
+[package]
+name = "tauri-plugin-mtp"
+version.workspace = true
+edition.workspace = true
+links = "tauri-plugin-mtp"
+build = "build.rs"
+readme = "../../docs/TAURI.md"
+
+[features]
+default = []
+tauri = ["dep:tauri", "dep:tauri-plugin"]
+mobile = ["dep:jni"]
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"], optional = true }
+
+[dependencies]
+mtp-client = { workspace = true, features = ["crypto", "pipes"] }
+mtp-codec.workspace = true
+mtp-common.workspace = true
+mtp-crypto.workspace = true
+mtp-native = { workspace = true, features = ["pipes"] }
+mtp-pipes = { workspace = true, features = ["encrypted"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+tauri = { version = "2", default-features = false, optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "io-util"] }
+jni = { version = "0.21", optional = true }
+
+[dev-dependencies]
+mtp-host = { workspace = true, features = ["crypto", "pipes"] }
+rcgen = "0.14"
+toml = "0.9"

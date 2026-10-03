@@ -493,6 +493,7 @@ impl HostConfig {
             get_existing_client: Box::new(|_, _| Box::pin(async { None })),
             #[cfg(feature = "crypto")]
             active_guest_ids: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(feature = "crypto")]
             registration_lock: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(feature = "crypto")]
             guest_id_generator: None,

@@ -2,6 +2,9 @@
 //!
 //! Native and H3 adapters instantiate this engine with their stream types.
 
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
+
 #[cfg(feature = "pipes")]
 use crate::PipeId;
 use crate::RuntimePolicy;
@@ -16,7 +19,6 @@ use mtp_common::{FirstFrameDisposition, classify_first_frame};
 #[cfg(feature = "pipes")]
 use std::collections::HashSet;
 use std::sync::Arc;
-#[cfg(feature = "pipes")]
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore, mpsc};
@@ -105,6 +107,13 @@ impl<C: TransportConnection> GenericSender<C> {
     /// Bind control frames created by this sender to the negotiated protocol map.
     pub async fn set_type_map(&self, type_map: &TypeMap) {
         *self.type_map.write().await = type_map.clone();
+    }
+
+    pub fn set_type_map_now(&self, type_map: &TypeMap) {
+        *self
+            .type_map
+            .try_write()
+            .expect("type map update must not overlap a read") = type_map.clone();
     }
 
     async fn open(&self) -> Result<C::SendStream, CommunicationError> {
@@ -265,18 +274,6 @@ impl<C: TransportConnection> GenericSender<C> {
         Ok(PipeWriter { stream })
     }
 
-    #[cfg(feature = "pipes")]
-    #[deprecated(note = "use open_pipe_id with PipeId")]
-    pub async fn open_pipe(
-        &self,
-        pipe_id: u32,
-        description: &str,
-    ) -> Result<PipeWriter<C::SendStream>, CommunicationError> {
-        let pipe_id = PipeId::try_from(pipe_id)
-            .map_err(|_| CommunicationError::Other("pipe id must be non-zero".into()))?;
-        self.open_pipe_id(pipe_id, description).await
-    }
-
     pub fn close(&self) {
         self.connection
             .close(self.policy.application_close_code, b"mtp-close");
@@ -321,6 +318,7 @@ pub struct GenericReceiver<C: TransportConnection> {
     pong_observer: Arc<RwLock<Option<mpsc::Sender<CommunicationValue>>>>,
     expected_pong_id: Arc<RwLock<Option<mtp_common::PingId>>>,
     max_message_size: Arc<AtomicU64>,
+    decode_limits: Arc<StdMutex<DecodeLimits>>,
     type_map: Arc<RwLock<TypeMap>>,
     queue_notify: Arc<Notify>,
     decode_rejections: Arc<DecodeRejectionCounters>,
@@ -340,6 +338,7 @@ impl<C: TransportConnection> Clone for GenericReceiver<C> {
             pong_observer: self.pong_observer.clone(),
             expected_pong_id: self.expected_pong_id.clone(),
             max_message_size: self.max_message_size.clone(),
+            decode_limits: self.decode_limits.clone(),
             type_map: self.type_map.clone(),
             queue_notify: self.queue_notify.clone(),
             decode_rejections: self.decode_rejections.clone(),
@@ -379,6 +378,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
         let task_connection = connection.clone();
         let task_policy = policy.clone();
         let task_max_message_size = max_message_size.clone();
+        let decode_limits = Arc::new(StdMutex::new(DecodeLimits::default()));
+        let task_decode_limits = decode_limits.clone();
         let type_map = Arc::new(RwLock::new(TypeMap::latest()));
         let task_type_map = type_map.clone();
         let queue_notify = Arc::new(Notify::new());
@@ -447,6 +448,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                 let pipe_tx = task_accept_task_pipe_tx.clone();
                 let policy = task_policy.clone();
                 let max_message_size = task_max_message_size.clone();
+                let decode_limits = task_decode_limits.clone();
                 let ping_sender = task_ping_sender.clone();
                 let pong_observer = task_pong_observer.clone();
                 let expected_pong_id = task_expected_pong_id.clone();
@@ -479,14 +481,9 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             Ok(Err(CommunicationError::ClosedByPeer)) => break,
                             Ok(Err(error)) => {
                                 tracing::warn!(%error, "MTP receive stream failed while reading frame header");
-                                let _ = tx.send(Err(CommunicationError::transport(
-                                    TransportPhase::ReadFrame,
-                                    error.to_string(),
-                                ))).await;
-                                connection.close(
-                                    policy.application_close_code,
-                                    b"frame header read error",
-                                );
+                                if let Some(error) = connection.close_reason() {
+                                    let _ = tx.send(Err(error)).await;
+                                }
                                 break 'stream;
                             }
                             Err(_) => {
@@ -565,16 +562,15 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                     Ok(Ok(())) => unreachable!(),
                                 };
                                 let _ = tx.send(Err(error)).await;
-                                connection
-                                    .close(policy.application_close_code, b"frame body read error");
                                 break 'stream;
                             }
                             body_offset += chunk_len;
                         }
                         frames += 1;
+                        let frame_decode_limits = decode_limits.lock().expect("decode limits poisoned").intersection(DecodeLimits::for_transport_message_size(frame_limit));
                         let mut message = match CommunicationValue::try_from_bytes_with_limits(
                             &frame,
-                            DecodeLimits::for_transport_message_size(frame_limit),
+                            frame_decode_limits,
                         ) {
                             Ok(message) => message,
                             Err(error) => {
@@ -711,6 +707,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
             pong_observer,
             expected_pong_id,
             max_message_size,
+            decode_limits,
             type_map,
             queue_notify,
             decode_rejections,
@@ -748,25 +745,9 @@ impl<C: TransportConnection> GenericReceiver<C> {
     }
 
     #[cfg(feature = "pipes")]
-    #[deprecated(note = "use expect_pipe_id with PipeId")]
-    pub fn expect_pipe(&self, pipe_id: u32) -> Result<(), CommunicationError> {
-        let pipe_id = PipeId::try_from(pipe_id)
-            .map_err(|_| CommunicationError::Other("pipe id must be non-zero".into()))?;
-        self.expect_pipe_id(pipe_id)
-    }
-
-    #[cfg(feature = "pipes")]
     pub fn cancel_expected_pipe_id(&self, pipe_id: PipeId) {
         if let Ok(mut expected) = self.expected_pipes.lock() {
             expected.remove(&pipe_id);
-        }
-    }
-
-    #[cfg(feature = "pipes")]
-    #[deprecated(note = "use cancel_expected_pipe_id with PipeId")]
-    pub fn cancel_expected_pipe(&self, pipe_id: u32) {
-        if let Some(pipe_id) = PipeId::new(pipe_id) {
-            self.cancel_expected_pipe_id(pipe_id);
         }
     }
 
@@ -779,6 +760,17 @@ impl<C: TransportConnection> GenericReceiver<C> {
     /// Bind subsequently decoded frames to the negotiated protocol version.
     pub async fn set_type_map(&self, type_map: &TypeMap) {
         *self.type_map.write().await = type_map.clone();
+    }
+
+    pub fn set_type_map_now(&self, type_map: &TypeMap) {
+        *self
+            .type_map
+            .try_write()
+            .expect("type map update must not overlap a read") = type_map.clone();
+    }
+
+    pub fn set_decode_limits(&self, limits: DecodeLimits) {
+        *self.decode_limits.lock().expect("decode limits poisoned") = limits;
     }
 
     /// Return local counts for frames rejected by the structured decoder.

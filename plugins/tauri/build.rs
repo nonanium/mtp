@@ -1,0 +1,39 @@
+fn main() {
+    #[cfg(feature = "tauri")]
+    tauri_plugin::Builder::new(&[
+        "mtp_status",
+        "mtp_set_background_enabled",
+        "mtp_create_encrypted_pipe",
+        "mtp_accept_encrypted_pipe",
+        "mtp_pipe_write_record",
+        "mtp_pipe_read_record",
+        "mtp_export_credentials",
+        "mtp_build_relay",
+        "mtp_relay_claimed_signer",
+        "mtp_open_relay_metadata",
+        "mtp_open_relay_content",
+        "mtp_release_relay",
+        "mtp_build_protected",
+        "mtp_open_protected",
+        "mtp_protected_claimed_signer",
+        "mtp_initialize",
+        "mtp_connect",
+        "mtp_clear_credentials",
+        "mtp_stop",
+        "mtp_attach",
+        "mtp_detach",
+        "mtp_request",
+        "mtp_send",
+        "mtp_create_pipe",
+        "mtp_pipe_wait",
+        "mtp_accept_pipe",
+        "mtp_deny_pipe",
+        "mtp_pipe_write",
+        "mtp_pipe_read",
+        "mtp_pipe_close",
+        "mtp_pipe_abort",
+        "mtp_pipe_cancel",
+    ])
+    .android_path("android")
+    .build();
+}

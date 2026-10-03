@@ -7,9 +7,15 @@ edition.workspace = true
 mtp-codec.workspace = true
 mtp-common.workspace = true
 async-trait = "0.1"
-tokio = { version = "1", features = ["io-util", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "rt", "sync", "time", "macros"] }
 tracing = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { version = "0.10.1", features = ["rt", "sync", "time", "macros", "io-util"] }
 
 [features]
 test-helpers = []
 pipes = ["mtp-common/pipes", "mtp-codec/pipes"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

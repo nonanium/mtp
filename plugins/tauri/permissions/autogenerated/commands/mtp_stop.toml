@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-stop"
+description = "Enables the mtp_stop command without any pre-configured scope."
+commands.allow = ["mtp_stop"]
+
+[[permission]]
+identifier = "deny-mtp-stop"
+description = "Denies the mtp_stop command without any pre-configured scope."
+commands.deny = ["mtp_stop"]

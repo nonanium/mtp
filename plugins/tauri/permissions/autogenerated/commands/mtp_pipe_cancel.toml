@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-pipe-cancel"
+description = "Enables the mtp_pipe_cancel command without any pre-configured scope."
+commands.allow = ["mtp_pipe_cancel"]
+
+[[permission]]
+identifier = "deny-mtp-pipe-cancel"
+description = "Denies the mtp_pipe_cancel command without any pre-configured scope."
+commands.deny = ["mtp_pipe_cancel"]

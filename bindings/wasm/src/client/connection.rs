@@ -21,7 +21,6 @@ impl WasmClient {
         self.subscriptions.borrow_mut().clear();
         self.reject_pending_requests("disconnected");
         client_pipe::reject_pending_pipe_creations(&self.pending_pipe_creations, "disconnected");
-        self.expired_pipe_creations.borrow_mut().clear();
         client_pipe::reject_pending_pipes(&self.pending_pipes, "disconnected");
         self.connection_client_id.set(0);
         self.set_state(ConnectionState::Disconnected);
@@ -72,7 +71,6 @@ impl WasmClient {
             &self.pending_pipe_creations,
             "connection failed",
         );
-        self.expired_pipe_creations.borrow_mut().clear();
         client_pipe::reject_pending_pipes(&self.pending_pipes, "connection failed");
         self.connection_client_id.set(0);
         self.set_state(ConnectionState::Disconnected);
@@ -93,7 +91,6 @@ impl WasmClient {
             &self.pending_pipe_creations,
             "connection replaced",
         );
-        self.expired_pipe_creations.borrow_mut().clear();
         client_pipe::reject_pending_pipes(&self.pending_pipes, "connection replaced");
         self.connection_client_id.set(0);
         self.set_state(ConnectionState::Connecting);

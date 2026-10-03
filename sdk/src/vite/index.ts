@@ -76,6 +76,8 @@ export async function hashPackageInputs(root = sourceRoot) {
     "bindings/wasm/src",
     "core/Cargo.toml",
     "core/src",
+    "pipes/Cargo.toml",
+    "pipes/src",
     "common/Cargo.toml",
     "common/src",
     "codec/Cargo.toml",
@@ -257,6 +259,7 @@ const wasmWorkspaceMembers = [
   "codec",
   "common",
   "core",
+  "pipes",
   "crypto",
   "type-map",
 ];
@@ -264,6 +267,7 @@ const wasmWorkspaceDependencies = new Set([
   "mtp-codec",
   "mtp-common",
   "mtp-core",
+  "mtp-pipes",
   "mtp-crypto",
   "mtp-type-map",
 ]);
@@ -307,6 +311,7 @@ export async function copyWasmBuildInputs(buildRoot) {
     "bindings/wasm",
     "common",
     "core",
+    "pipes",
     "codec",
     "crypto",
     "type-map",

@@ -5,9 +5,9 @@ pub mod connection_handle;
 pub mod pinning;
 
 #[cfg(feature = "pipes")]
-pub mod encrypted_pipe;
-#[cfg(feature = "pipes")]
 pub mod pipe;
+#[cfg(feature = "pipes")]
+mod pipe_protocol;
 
 pub use connection::{
     DecodeRejectionClass, DecodeRejectionCounters, DecodeRejectionCounts, Policy, Receiver,
@@ -19,15 +19,6 @@ pub use mtp_core::{GenericReceiver, GenericSender};
 
 #[cfg(feature = "pipes")]
 pub use connection::TransportEvent;
-#[cfg(feature = "pipes")]
-pub use encrypted_pipe::{
-    EncryptedPipeError, EncryptedPipeReader, EncryptedPipeWriter, MAX_ENCRYPTED_PIPE_RECORD,
-    MAX_PIPE_SESSION_OFFER, PIPE_SESSION_ENCRYPTION_PURPOSE, PIPE_SESSION_SIGNATURE_PURPOSE,
-    PipeProtectionContext, PipeSessionError, PipeSessionParameters,
-    accept_forward_secure_pipe_session, accept_forward_secure_pipe_session_with_key_history,
-    accept_pipe_session, accept_pipe_session_with_key_history, accept_pipe_session_with_policy,
-    initiate_forward_secure_pipe_session, initiate_group_pipe_session, initiate_pipe_session,
-};
 #[cfg(feature = "pipes")]
 pub use pipe::{PipeReader, PipeWriter};
 
