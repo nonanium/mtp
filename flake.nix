@@ -82,6 +82,16 @@
             export MTP_TYPE_MAPS="''${MTP_TYPE_MAPS:-$PWD/tests/fixtures/example/type-maps.yaml}"
             export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$PWD/${cargoTargetDir}}"
 
+            export PKG_CONFIG_PATH="${pkgs.lib.makeSearchPath "lib/pkgconfig" (
+              map pkgs.lib.getDev (pkgs.lib.closePropagation (map pkgs.lib.getDev [
+                pkgs.openssl
+                pkgs.glib
+                pkgs.gtk3
+                pkgs.webkitgtk_4_1
+                pkgs.libsoup_3
+              ]))
+            )}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
             timeout 60s pnpm install --frozen-lockfile
             cargo build
             cargo test --workspace --exclude mtp-wasm --all-features
