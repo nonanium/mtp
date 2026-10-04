@@ -3,6 +3,7 @@
 *.key
 node_modules/
 dist/
+build/
 *.tgz
 bindings/wasm/pkg/
 sdk/.rust/

@@ -25,8 +25,8 @@ class MtpPlugin(private val activity: Activity) : Plugin(activity) {
     fun configure(invoke: Invoke) {
         try {
             val config = invoke.getArgs().getString("config") ?: error("config missing")
-            val library = invoke.getArgs().getString("nativeLibrary")
-                ?: getConfig(MtpConfig::class.java).nativeLibrary
+            val library = invoke.getArgs().optString("nativeLibrary").takeIf { it.isNotBlank() && it != "null" }
+                ?: getConfig(MtpConfig::class.java)?.nativeLibrary
                 ?: activity.getSharedPreferences("mtp-library", 0).getString("name", null)
                 ?: error("Configure plugins.mtp.nativeLibrary with the host cdylib name")
             require(library.matches(Regex("[A-Za-z0-9_]+")))
