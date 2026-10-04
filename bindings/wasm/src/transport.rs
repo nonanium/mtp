@@ -67,7 +67,9 @@ mod tests {
         js_sys::eval(
             r#"
             globalThis.mtpIncoming.enqueue(new ReadableStream({ start(controller) {
-                controller.error(new Error("STOP_SENDING"));
+                controller.error(Object.assign(new Error("STOP_SENDING"), {
+                    source: "stream", streamErrorCode: 0
+                }));
             }}));
             globalThis.mtpIncoming.enqueue(new ReadableStream({ start(controller) {
                 const frame = globalThis.mtpTestFrame;
@@ -104,7 +106,17 @@ fn transport_error(error: JsValue, phase: TransportPhase) -> CommunicationError 
 }
 fn io_error(error: JsValue) -> std::io::Error {
     log_stream_error_code(&error, "stream I/O");
-    std::io::Error::other(format!("{error:?}"))
+    let kind = if js_sys::Reflect::get(&error, &"source".into())
+        .ok()
+        .and_then(|value| value.as_string())
+        .as_deref()
+        == Some("stream")
+    {
+        std::io::ErrorKind::ConnectionReset
+    } else {
+        std::io::ErrorKind::Other
+    };
+    std::io::Error::new(kind, format!("{error:?}"))
 }
 fn stream_handle(stream: &JsValue, property: &str, method: &str) -> Result<JsValue, JsValue> {
     let value = js_sys::Reflect::get(stream, &property.into())?;
@@ -288,7 +300,10 @@ impl TransportRecvStream for BrowserRecvStream {
             .await
             .map(|_| ())
             .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                ) {
                     CommunicationError::ClosedByPeer
                 } else {
                     CommunicationError::transport(TransportPhase::ReadFrame, e.to_string())
@@ -299,7 +314,13 @@ impl TransportRecvStream for BrowserRecvStream {
         let mut bytes = vec![0; max];
         let count = tokio::io::AsyncReadExt::read(self, &mut bytes)
             .await
-            .map_err(|e| CommunicationError::transport(TransportPhase::ReadFrame, e.to_string()))?;
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::ConnectionReset {
+                    CommunicationError::ClosedByPeer
+                } else {
+                    CommunicationError::transport(TransportPhase::ReadFrame, e.to_string())
+                }
+            })?;
         bytes.truncate(count);
         Ok((count != 0).then_some(bytes))
     }
