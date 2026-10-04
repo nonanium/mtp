@@ -326,6 +326,12 @@ export interface MTPClientOptions<
         module_or_path: RawBindings.InitInput | Promise<RawBindings.InitInput>;
       };
   logger?: (event: MTPLogEvent) => void;
+  /** Styled console logs by default. Hidden types are also excluded from custom loggers. */
+  logging?: false | {
+    hiddenTypes?: readonly MTPCommunicationType[];
+    /** Include connection-state events. Defaults to true. */
+    stateChanges?: boolean;
+  };
   sessionStorage?: MTPSessionStorage;
   /**
    * Independent caller-managed encrypted-secret storage. Session state is not
@@ -710,6 +716,33 @@ function emit(
   }
 }
 
+function createLogger(options: MTPClientOptions): MTPClientOptions["logger"] {
+  if (options.logging === false) return undefined;
+  const logging = options.logging;
+  const hiddenTypes = new Set(logging?.hiddenTypes ?? []);
+  return (event) => {
+    if (hiddenTypes.has(event.type) ||
+        (event.type === "state" && logging?.stateChanges === false)) return;
+    if (options.logger) {
+      options.logger(event);
+      return;
+    }
+    const color = event.hint === "error" ? "#ef4444"
+      : event.hint === "warning" ? "#f59e0b" : "#6366f1";
+    const direction = event.direction === "send" ? "Send "
+      : event.direction === "recv" ? "Receive " : "";
+    const log = event.hint === "error" ? console.error
+      : event.hint === "warning" ? console.warn : console.info;
+    const details: unknown[] = [];
+    if (event.hint === "error") details.push(event.error);
+    if (event.data !== undefined) details.push(event.data);
+    if ("relay" in event && event.relay) details.push(event.relay);
+    log.call(console, `%cMTP%c ${direction}${event.type}`,
+      `background:${color};color:white;padding:2px 5px;border-radius:3px;font-weight:bold`,
+      `color:${color};font-weight:bold`, ...details);
+  };
+}
+
 function isErrorType(type: string): boolean {
   return (
     type === "Error" ||
@@ -1066,6 +1099,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
 
     const normalizedOptions = {
       ...options,
+      logger: createLogger(options),
       hostPublicKey:
         options.hostPublicKey == null
           ? undefined
@@ -1093,7 +1127,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       const native = new NativeTransport(runtime, name,
         (bytes) => decodeWithLimits(bytes, normalizedOptions.receiveLimits),
         (frame) => { if (nativeSdk) nativeSdk.#handleFrame(frame); },
-        (error) => emit(options.logger, { hint: "error", type: "Native", error: String(error) }));
+        (error) => emit(normalizedOptions.logger, { hint: "error", type: "Native", error: String(error) }));
       await native.initialize(nativeOptions({
         url: options.url, descriptor: options.descriptor,
         hostPublicKey: normalizedOptions.hostPublicKey,
@@ -1621,8 +1655,8 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       }
       emit(this.#options.logger, {
         hint: "error",
-        type: errorType,
-        error: String(error),
+        type: frame.type,
+        error: `${errorType}: ${String(error)}`,
         direction: "recv",
       });
     };
@@ -1681,7 +1715,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       }
       emit(this.#options.logger, {
         hint: "error",
-        type: "Subscription",
+        type: frame.type,
         error: String(error),
         data: frame.data,
         direction: "recv",

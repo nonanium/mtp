@@ -656,9 +656,29 @@ console.log(reader.pipeId, reader.description);
 
 Pipes share the same WebTransport session as message frames; they do not need a separate connection.
 
-## Logger Events
+## Logger events
 
-The SDK logger receives parsed events:
+The SDK logs communication type names and parsed payload objects to the console
+with CSS-styled labels. Objects stay expandable in browser developer tools.
+Raw frames and frame sizes are not included.
+
+Configure logging when creating a client:
+
+```typescript
+const client = await MTPClient.create({
+  url: "https://host.example.com:4433",
+  logging: {
+    hiddenTypes: ["Ping", "Pong"],
+    stateChanges: false,
+  },
+});
+```
+
+`hiddenTypes` suppresses both sent and received events of those exact types,
+including error events. It also applies to a custom `logger` callback.
+Use `logging: false` to disable all SDK logs, including custom logger callbacks.
+Providing `logger` replaces the styled console output with your own handler.
+It receives parsed events:
 
 ```typescript
 type MTPLogEvent =
