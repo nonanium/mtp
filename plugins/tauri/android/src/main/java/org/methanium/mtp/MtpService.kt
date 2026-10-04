@@ -33,7 +33,7 @@ class MtpService : Service() {
             .setAction("org.methanium.mtp.STOP"), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "mtp") else Notification.Builder(this)
         builder.setContentTitle(applicationInfo.loadLabel(packageManager))
-            .setContentText("Background connection active")
+            .setContentText("Connected")
             .setSmallIcon(android.R.drawable.stat_notify_sync).setOngoing(true)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
         packageManager.getLaunchIntentForPackage(packageName)?.let {
@@ -61,7 +61,6 @@ class MtpService : Service() {
         if (SecureStore.enabled(this) && (now < last || now - last >= 15_000)) {
             check(preferences.edit().putLong("taskRestart", now).commit())
             startService(Intent(this, MtpService::class.java))
-            Process.killProcess(Process.myPid())
         }
         super.onTaskRemoved(rootIntent)
     }

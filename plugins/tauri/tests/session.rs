@@ -28,7 +28,10 @@ async fn shared_requests_fanout_detach_and_no_replay() {
         )
         .await
         .unwrap();
+        let mut policy = ClientConfig::new("https://localhost").policy;
+        policy.read_timeout = Duration::from_millis(200);
         let config = ClientConfig::new(format!("https://127.0.0.1:{}", host.local_addr().port()))
+            .with_policy(policy)
             .with_pinned_pem(pem.clone())
             .with_ping_interval(Duration::ZERO);
         let registry = ConnectionRegistry::default();
@@ -109,6 +112,12 @@ async fn shared_requests_fanout_detach_and_no_replay() {
                 .is_err()
         );
         let live = CommunicationValue::new(CommunicationType::ProtectedMessage);
+        peer.sender.send(&live).await.unwrap();
+        assert!(native.receive().await.is_some());
+        assert!(ui.receive().await.is_some());
+        // Established streams may stay idle beyond the frame deadline without
+        // terminating the native session or losing its subscribers.
+        tokio::time::sleep(Duration::from_millis(500)).await;
         peer.sender.send(&live).await.unwrap();
         assert!(native.receive().await.is_some());
         assert!(ui.receive().await.is_some());

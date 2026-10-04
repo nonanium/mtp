@@ -22,7 +22,6 @@ import com.fasterxml.jackson.annotation.PropertyAccessor
 import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.datatype.jsonorg.JsonOrgModule
 import com.fasterxml.jackson.databind.module.SimpleModule
 import java.lang.reflect.InvocationTargetException
 
@@ -35,18 +34,11 @@ object PluginManager {
     fun onResult(result: ActivityResult)
   }
 
-  /** The result launchers belonging to one activity. */
-  private class ResultLaunchers(
-    val startActivityForResult: ActivityResultLauncher<Intent>,
-    val startIntentSenderForResult: ActivityResultLauncher<IntentSenderRequest>,
-    val requestPermissions: ActivityResultLauncher<Array<String>>
-  )
-
-  // Insertion ordered, so the activity taken over when the current one goes away is the oldest
-  // surviving one rather than an arbitrary member of a hash set.
-  private val launchers: LinkedHashMap<AppCompatActivity, ResultLaunchers> = LinkedHashMap()
-  var activity: AppCompatActivity? = null
+  lateinit var activity: AppCompatActivity
   private val plugins: HashMap<String, PluginHandle> = HashMap()
+  private lateinit var startActivityForResultLauncher: ActivityResultLauncher<Intent>
+  private lateinit var startIntentSenderForResultLauncher: ActivityResultLauncher<IntentSenderRequest>
+  private lateinit var requestPermissionsLauncher: ActivityResultLauncher<Array<String>>
   private var requestPermissionsCallback: RequestPermissionsCallback? = null
   private var startActivityForResultCallback: ActivityResultCallback? = null
   private var startIntentSenderForResultCallback: ActivityResultCallback? = null
@@ -61,43 +53,38 @@ object PluginManager {
     }, jsonMapper)
     jsonMapper
       .registerModule(SimpleModule().addDeserializer(Channel::class.java, channelDeserializer))
-      // Without it, the mapper's field visibility serializes an org.json value through
-      // its private fields: a `JSArray` as `{"values":[...]}` and a `JSObject` as
-      // `{"nameValuePairs":{...}}`.
-      .registerModule(JsonOrgModule())
   }
 
-  fun onCreate(activity: AppCompatActivity) {
-    // Every activity gets its own launchers, and gets them here: registerForActivityResult must
-    // be called before its owner reaches STARTED, so an activity that is already running can
-    // never be given launchers later.
-    launchers[activity] = registerResultLaunchers(activity)
-    if (this.activity == null) {
-      this.activity = activity
+  fun onActivityCreate(activity: AppCompatActivity) {
+    // TODO: on destroy, we should change to a different activity
+    if (::activity.isInitialized) {
+      return
     }
-  }
-
-  private fun registerResultLaunchers(activity: AppCompatActivity): ResultLaunchers =
-    ResultLaunchers(
+    this.activity = activity
+    startActivityForResultLauncher =
       activity.registerForActivityResult(ActivityResultContracts.StartActivityForResult()
       ) { result ->
-        startActivityForResultCallback?.onResult(result)
-      },
+        if (startActivityForResultCallback != null) {
+          startActivityForResultCallback!!.onResult(result)
+        }
+      }
 
+    startIntentSenderForResultLauncher =
       activity.registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()
       ) { result ->
-        startIntentSenderForResultCallback?.onResult(result)
-      },
+        if (startIntentSenderForResultCallback != null) {
+          startIntentSenderForResultCallback!!.onResult(result)
+        }
+      }
 
+    requestPermissionsLauncher =
       activity.registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()
       ) { result ->
-        requestPermissionsCallback?.onResult(result)
+        if (requestPermissionsCallback != null) {
+          requestPermissionsCallback!!.onResult(result)
+        }
       }
-    )
-
-  private val currentLaunchers: ResultLaunchers
-    get() = launchers[activity]
-      ?: throw IllegalStateException("the plugin manager has no activity to launch from")
+  }
 
   fun onNewIntent(intent: Intent) {
     for (plugin in plugins.values) {
@@ -105,15 +92,15 @@ object PluginManager {
     }
   }
 
-  fun onPause(activity: AppCompatActivity) {
+  fun onPause() {
     for (plugin in plugins.values) {
-      plugin.instance.triggerOnPause(activity)
+      plugin.instance.onPause()
     }
   }
 
-  fun onResume(activity: AppCompatActivity) {
+  fun onResume() {
     for (plugin in plugins.values) {
-      plugin.instance.triggerOnResume(activity)
+      plugin.instance.onResume()
     }
   }
 
@@ -123,23 +110,15 @@ object PluginManager {
     }
   }
 
-  fun onStop(activity: AppCompatActivity) {
+  fun onStop() {
     for (plugin in plugins.values) {
-      plugin.instance.triggerOnStop(activity)
+      plugin.instance.onStop()
     }
   }
 
   fun onDestroy(activity: AppCompatActivity) {
     for (plugin in plugins.values) {
       plugin.instance.triggerOnDestroy(activity)
-    }
-
-    launchers.remove(activity)
-    if (this.activity == activity) {
-      // Whatever is left already holds its own launchers, registered when it was created. Moving
-      // this activity's launchers over instead would mean registering against an activity that is
-      // already running, which registerForActivityResult rejects with an IllegalStateException.
-      this.activity = launchers.keys.firstOrNull()
     }
   }
 
@@ -151,12 +130,12 @@ object PluginManager {
 
   fun startActivityForResult(intent: Intent, callback: ActivityResultCallback) {
     startActivityForResultCallback = callback
-    currentLaunchers.startActivityForResult.launch(intent)
+    startActivityForResultLauncher.launch(intent)
   }
 
   fun startIntentSenderForResult(intent: IntentSenderRequest, callback: ActivityResultCallback) {
     startIntentSenderForResultCallback = callback
-    currentLaunchers.startIntentSenderForResult.launch(intent)
+    startIntentSenderForResultLauncher.launch(intent)
   }
 
   fun requestPermissions(
@@ -164,7 +143,7 @@ object PluginManager {
     callback: RequestPermissionsCallback
   ) {
     requestPermissionsCallback = callback
-    currentLaunchers.requestPermissions.launch(permissionStrings)
+    requestPermissionsLauncher.launch(permissionStrings)
   }
 
   @JniMethod

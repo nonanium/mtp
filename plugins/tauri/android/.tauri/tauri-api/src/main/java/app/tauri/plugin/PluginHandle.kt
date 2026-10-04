@@ -6,6 +6,7 @@ package app.tauri.plugin
 
 import android.app.Activity
 import android.content.Intent
+import android.content.SharedPreferences
 import android.webkit.WebView
 import androidx.activity.result.IntentSenderRequest
 import androidx.core.app.ActivityCompat
@@ -17,15 +18,8 @@ import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.lang.reflect.Method
-import androidx.core.content.edit
 
-class PluginHandle(
-  private val manager: PluginManager,
-  val name: String,
-  val instance: Plugin,
-  val config: String,
-  val jsonMapper: ObjectMapper
-) {
+class PluginHandle(private val manager: PluginManager, val name: String, val instance: Plugin, val config: String, val jsonMapper: ObjectMapper) {
   private val commands: HashMap<String, CommandData> = HashMap()
   private val permissionCallbackMethods: HashMap<String, Method> = HashMap()
   private val startActivityCallbackMethods: HashMap<String, Method> = HashMap()
@@ -53,11 +47,7 @@ class PluginHandle(
     }
   }
 
-  fun startIntentSenderForResult(
-    invoke: Invoke,
-    intentSender: IntentSenderRequest,
-    callbackName: String
-  ) {
+  fun startIntentSenderForResult(invoke: Invoke, intentSender: IntentSenderRequest, callbackName: String) {
     manager.startIntentSenderForResult(intentSender) { result ->
       val method = startActivityCallbackMethods[callbackName]
       if (method != null) {
@@ -94,7 +84,7 @@ class PluginHandle(
     invoke: Invoke,
     permissions: Map<String, Boolean>
   ): Boolean {
-    val activity = manager.activity!!
+    val activity = manager.activity
     val prefs =
       activity.getSharedPreferences("PluginPermStates", Activity.MODE_PRIVATE)
     for ((permString, isGranted) in permissions) {
@@ -102,24 +92,24 @@ class PluginHandle(
         // Permission granted. If previously denied, remove cached state
         val state = prefs.getString(permString, null)
         if (state != null) {
-          prefs.edit {
-            remove(permString)
-          }
+          val editor: SharedPreferences.Editor = prefs.edit()
+          editor.remove(permString)
+          editor.apply()
         }
       } else {
-        prefs.edit {
-          if (ActivityCompat.shouldShowRequestPermissionRationale(
-              activity,
-              permString
-            )
-          ) {
-            // Permission denied, can prompt again with rationale
-            putString(permString, PermissionState.PROMPT_WITH_RATIONALE.toString())
-          } else {
-            // Permission denied permanently, store this state for future reference
-            putString(permString, PermissionState.DENIED.toString())
-          }
+        val editor: SharedPreferences.Editor = prefs.edit()
+        if (ActivityCompat.shouldShowRequestPermissionRationale(
+            activity,
+            permString
+          )
+        ) {
+          // Permission denied, can prompt again with rationale
+          editor.putString(permString, PermissionState.PROMPT_WITH_RATIONALE.toString())
+        } else {
+          // Permission denied permanently, store this state for future reference
+          editor.putString(permString, PermissionState.DENIED.toString())
         }
+        editor.apply()
       }
     }
     val permStrings = permissions.keys.toTypedArray()

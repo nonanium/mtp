@@ -97,7 +97,10 @@ export class NativeTransport {
   async connect(mode: "connect" | "unauthenticated" | "auth" | "register"): Promise<bigint> {
     const generation = this.#generation;
     await this.listen();
-    const result = await this.call<{ clientId: string; state: number }>("connect", { mode });
+    const connected = await this.call<boolean>("status");
+    const result = connected && mode === "connect" && this.clientId != null
+      ? { clientId: this.clientId.toString(), state: 2 }
+      : await this.call<{ clientId: string; state: number }>("connect", { mode });
     if (generation !== this.#generation) throw new Error("native view was disposed during connection");
     this.clientId = BigInt(result.clientId);
     this.state = result.state;

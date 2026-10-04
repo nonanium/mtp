@@ -74,7 +74,14 @@ impl Session {
         let weak = Arc::downgrade(&session);
         let connection = session.connection.clone();
         let task = tokio::spawn(async move {
-            while let Ok(frame) = connection.receive().await {
+            loop {
+                let frame = match connection.receive().await {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        tracing::warn!(%error, "Native MTP session receive ended");
+                        break;
+                    }
+                };
                 let Some(session) = weak.upgrade() else {
                     break;
                 };

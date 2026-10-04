@@ -474,7 +474,32 @@ impl<C: TransportConnection> GenericReceiver<C> {
                             break;
                         }
                         let mut len = [0; 4];
-                        match tokio::time::timeout(policy.read_timeout, stream.read_exact(&mut len))
+                        // Waiting between frames is not a broken connection. QUIC
+                        // keepalive/idle policy detects dead peers; only an in-progress
+                        // frame is subject to the read deadline.
+                        let first_byte = async {
+                            if frames == 0 {
+                                timeout(policy.read_timeout, stream.read_exact(&mut len[..1]))
+                                    .await
+                                    .unwrap_or_else(|_| Err(CommunicationError::timeout(TransportPhase::ReadFrame)))
+                            } else {
+                                stream.read_exact(&mut len[..1]).await
+                            }
+                        };
+                        match first_byte.await {
+                            Ok(()) => {}
+                            Err(CommunicationError::ClosedByPeer) => break,
+                            Err(error) => {
+                                tracing::warn!(%error, "MTP receive stream failed between frames");
+                                if let Some(error) = connection.close_reason() {
+                                    let _ = tx.send(Err(error)).await;
+                                } else if frames == 0 {
+                                    let _ = tx.send(Err(error)).await;
+                                }
+                                break 'stream;
+                            }
+                        }
+                        match tokio::time::timeout(policy.read_timeout, stream.read_exact(&mut len[1..]))
                             .await
                         {
                             Ok(Ok(())) => {}
@@ -487,18 +512,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                 break 'stream;
                             }
                             Err(_) => {
-                                if frames == 0 {
-                                    tracing::warn!(
-                                        timeout = ?policy.read_timeout,
-                                        "MTP receive stream timed out before its first complete frame"
-                                    );
-                                } else {
-                                    tracing::debug!(
-                                        frames,
-                                        timeout = ?policy.read_timeout,
-                                        "MTP receive stream idle timeout"
-                                    );
-                                }
+                                tracing::warn!(frames, timeout = ?policy.read_timeout,
+                                    "MTP receive stream timed out during a partial frame header");
                                 let _ = tx.send(Err(CommunicationError::timeout(
                                     TransportPhase::ReadFrame,
                                 ))).await;
