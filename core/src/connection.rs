@@ -22,7 +22,8 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, RwLock, Semaphore, mpsc};
-use tokio::time::{Instant, timeout, timeout_at};
+use tokio::time::timeout;
+use web_time::Instant;
 
 #[cfg(feature = "pipes")]
 use crate::pipe::{PipeReader, PipeWriter};
@@ -554,8 +555,8 @@ impl<C: TransportConnection> GenericReceiver<C> {
                         let mut body_offset = 4usize;
                         while body_offset < frame_len {
                             let chunk_len = (frame_len - body_offset).min(16 * 1024);
-                            let body_read = timeout_at(
-                                deadline,
+                            let body_read = timeout(
+                                deadline.saturating_duration_since(Instant::now()),
                                 stream.read_exact(&mut frame[body_offset..body_offset + chunk_len]),
                             )
                             .await;

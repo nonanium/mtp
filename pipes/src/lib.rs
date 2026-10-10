@@ -4,7 +4,10 @@
 //! streams without requiring `Send`, including browser-local futures.
 
 #[cfg(target_arch = "wasm32")]
-use tokio_with_wasm::alias as tokio;
+mod tokio {
+    pub use ::tokio::io;
+    pub use tokio_with_wasm::{sync, time};
+}
 
 use mtp_core::{PlatformSend, PlatformSync};
 
