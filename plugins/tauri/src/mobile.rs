@@ -33,7 +33,7 @@ pub fn lifecycle() -> Option<Arc<Lifecycle>> {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_methanium_mtp_NativeBridge_start(
+pub extern "system" fn Java_org_nonanium_mtp_NativeBridge_start(
     mut env: JNIEnv,
     _: JClass,
     config: JString,
@@ -60,7 +60,7 @@ pub extern "system" fn Java_org_methanium_mtp_NativeBridge_start(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_org_methanium_mtp_NativeBridge_stop(_: JNIEnv, _: JClass) {
+pub extern "system" fn Java_org_nonanium_mtp_NativeBridge_stop(_: JNIEnv, _: JClass) {
     if let (Some(runtime), Some(owner)) = (RUNTIME.get(), OWNER.get()) {
         runtime.block_on(owner.stop());
     }
@@ -70,5 +70,5 @@ pub extern "system" fn Java_org_methanium_mtp_NativeBridge_stop(_: JNIEnv, _: JC
 pub fn register<R: tauri::Runtime>(
     api: &tauri::plugin::PluginApi<R, ()>,
 ) -> Result<tauri::plugin::PluginHandle<R>, Box<dyn std::error::Error>> {
-    Ok(api.register_android_plugin("org.methanium.mtp", "MtpPlugin")?)
+    Ok(api.register_android_plugin("org.nonanium.mtp", "MtpPlugin")?)
 }

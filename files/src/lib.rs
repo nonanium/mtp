@@ -1,5 +1,5 @@
 /*
- * On-disk storage for methanium key material.
+ * On-disk storage for nonanium key material.
  *
  * `.mk` files hold a passphrase-protected Keyring and are written atomically
  * with owner-only permissions (0600) on Unix. `.mpkb` files hold a
@@ -26,8 +26,8 @@ pub const KEYRING_EXTENSION: &str = "mk";
 pub const BUNDLE_EXTENSION: &str = "mpkb";
 
 /* Container layout: magic (4 bytes) || version (1 byte) || payload. */
-const KEYRING_MAGIC: [u8; 4] = *b"MTMK"; /* Methanium Keyring */
-const BUNDLE_MAGIC: [u8; 4] = *b"MPKB"; /* Methanium Public Key Bundle */
+const KEYRING_MAGIC: [u8; 4] = *b"MTMK"; /* Nonanium Keyring */
+const BUNDLE_MAGIC: [u8; 4] = *b"MPKB"; /* Nonanium Public Key Bundle */
 const RAW_FORMAT_VERSION: u8 = 1;
 const PROTECTED_FORMAT_VERSION: u8 = 3;
 const BUNDLE_FORMAT_VERSION: u8 = 1;
@@ -45,7 +45,7 @@ pub enum FileError {
     Io(#[from] io::Error),
     #[error("crypto error: {0}")]
     Crypto(#[from] CryptoError),
-    #[error("not a valid methanium {expected} file (bad magic)")]
+    #[error("not a valid nonanium {expected} file (bad magic)")]
     BadMagic { expected: &'static str },
     #[error("unsupported {kind} format version {found}")]
     UnsupportedVersion { kind: &'static str, found: u8 },

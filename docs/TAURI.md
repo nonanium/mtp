@@ -8,7 +8,7 @@ Add `tauri-plugin-mtp` with features `tauri` and `mobile` to the host Rust depen
 
 The initializer must also run when `System.loadLibrary` loads the library in a boot-started service process. Installing only inside Tauri setup cannot support cold service startup. Keep the initializer linked into the host cdylib. The process-wide Tokio runtime, manager registry and identity store exist before JavaScript and are shared by background and frontend sessions.
 
-The plugin registers Java package `org.methanium.mtp`, class `MtpPlugin`. Set `plugins.mtp.nativeLibrary` in `tauri.conf.json` to the host cdylib name without `lib` or `.so`:
+The plugin registers Java package `org.nonanium.mtp`, class `MtpPlugin`. Set `plugins.mtp.nativeLibrary` in `tauri.conf.json` to the host cdylib name without `lib` or `.so`:
 
 ```json
 {

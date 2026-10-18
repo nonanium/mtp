@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Release type: 'dev' or 'stable'"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - stable
+      description:
+        description: "Release description"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify, build, and pack
+        run: nix run .#build-all
+
+      - name: Read release metadata
+        id: version
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          set -eu
+
+          VERSION="$(node -p "require('./sdk/package.json').version")"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+
+          case "$RELEASE_TYPE" in
+            dev)
+              TAG="${VERSION}-dev-${SHORT_SHA}"
+              PRERELEASE="true"
+              ;;
+            stable)
+              TAG="$VERSION"
+              PRERELEASE="false"
+              ;;
+            *)
+              echo "release_type must be either 'dev' or 'stable'"
+              exit 1
+              ;;
+          esac
+
+          PACKAGE="sdk/mtp-${VERSION}.tgz"
+          test -f "$PACKAGE"
+
+          {
+            echo "tag=$TAG"
+            echo "prerelease=$PRERELEASE"
+            echo "package=$PACKAGE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release and upload package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          PACKAGE: ${{ steps.version.outputs.package }}
+          DESCRIPTION: ${{ inputs.description }}
+        run: |
+          set -eu
+
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --target "$SHA" --title "$TAG" \
+              --notes "$DESCRIPTION" --prerelease="$PRERELEASE"
+          fi
+
+          gh release upload "$TAG" "$PACKAGE" --clobber

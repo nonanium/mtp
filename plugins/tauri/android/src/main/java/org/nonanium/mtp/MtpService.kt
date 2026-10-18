@@ -1,4 +1,4 @@
-package org.methanium.mtp
+package org.nonanium.mtp
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -17,7 +17,7 @@ class MtpService : Service() {
     private var started = false
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == "org.methanium.mtp.STOP") {
+        if (intent?.action == "org.nonanium.mtp.STOP") {
             SecureStore.setEnabled(this, false)
             runCatching { NativeBridge.load(this); NativeBridge.stop() }
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -30,7 +30,7 @@ class MtpService : Service() {
         if (Build.VERSION.SDK_INT >= 26) notifications.createNotificationChannel(
             NotificationChannel("mtp", "Background connection", NotificationManager.IMPORTANCE_LOW))
         val stop = PendingIntent.getService(this, 1, Intent(this, MtpService::class.java)
-            .setAction("org.methanium.mtp.STOP"), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            .setAction("org.nonanium.mtp.STOP"), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "mtp") else Notification.Builder(this)
         builder.setContentTitle(applicationInfo.loadLabel(packageManager))
             .setContentText("Connected")

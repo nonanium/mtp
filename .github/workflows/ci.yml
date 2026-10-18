@@ -1,4 +1,4 @@
-name: CI
+name: Verification
 
 on:
   push:
@@ -8,13 +8,19 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   checks:
     name: checks
-    runs-on: nixos
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: https://data.forgejo.org/actions/checkout@v7
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
 
       - name: Run checks
         run: |

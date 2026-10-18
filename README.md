@@ -1,4 +1,4 @@
-# Methanium Transport Protocol
+# Nonanium Transport Protocol
 
 MTP is a modular transport protocol built on QUIC. It provides versioned type maps, a binary codec, native and browser clients, host and WebTransport server implementations, and optional cryptographic authentication and end-to-end encryption.
 

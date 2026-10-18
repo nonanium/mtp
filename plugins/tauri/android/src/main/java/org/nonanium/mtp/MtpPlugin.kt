@@ -1,4 +1,4 @@
-package org.methanium.mtp
+package org.nonanium.mtp
 
 import android.app.Activity
 import app.tauri.annotation.Command

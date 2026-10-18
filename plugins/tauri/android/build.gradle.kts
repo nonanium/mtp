@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "org.methanium.mtp"
+    namespace = "org.nonanium.mtp"
     compileSdk = 35
     defaultConfig { minSdk = 24 }
     compileOptions {
