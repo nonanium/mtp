@@ -147,7 +147,7 @@
               libsoup_3
             ];
 
-            MTP_TYPE_MAPS = "${toString ./tests/fixtures/example/type-maps.yaml}";
+            MTP_TYPE_MAPS = "${./tests/fixtures/example/type-maps.yaml}";
 
             shellHook = ''
               repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
