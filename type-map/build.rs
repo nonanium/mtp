@@ -39,7 +39,7 @@ struct ManifestEntry {
 fn reserved_manifest() -> &'static ReservedManifest {
     static MANIFEST: OnceLock<ReservedManifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
-        serde_yaml::from_str(include_str!("reserved.json"))
+        serde_saphyr::from_str(include_str!("reserved.json"))
             .expect("type-map/reserved.json must be valid JSON/YAML")
     })
 }
@@ -145,7 +145,7 @@ fn load_config(path: &Path) -> LoadedConfig {
 
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read type-map file {}: {error}", path.display()));
-    let config = serde_yaml::from_str(&content).unwrap_or_else(|error| {
+    let config = serde_saphyr::from_str(&content).unwrap_or_else(|error| {
         if let Some(location) = error.location() {
             panic!(
                 "{}:{}:{}: failed to parse type-map YAML: {error}",
