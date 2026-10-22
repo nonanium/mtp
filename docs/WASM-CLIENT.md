@@ -103,7 +103,7 @@ if (!MTPClient.isSupported()) {
 | `authTimeoutMs` | No SDK timeout | Login and registration timeout. `undefined` leaves the promise pending until transport or peer failure. |
 | `requestTimeoutMs` | 30 seconds | Default `request()` timeout. |
 | `pings` | `false` | Protocol pings, or an object with `intervalMs`. |
-| `logger` | No-op | Receives SDK state and error events. |
+| `logger` | No-op | Application-owned logging for sent/received messages, state, and errors. |
 | `schemas` | None | Client-wide request and response schema registry. |
 | `throwProtocolErrors` | `false` | Reject requests whose correlated response is an `Error*` frame. |
 | `onValidationError` | No-op | Receives subscription validation failures. |
@@ -658,27 +658,30 @@ Pipes share the same WebTransport session as message frames; they do not need a 
 
 ## Logger events
 
-The SDK logs communication type names and parsed payload objects to the console
-with CSS-styled labels. Objects stay expandable in browser developer tools.
-Raw frames and frame sizes are not included.
+The SDK does not write logs to the console. Applications can provide a `logger`
+callback to log sent and received messages, connection state, and errors.
+The callback receives communication type names and parsed payloads, without raw
+frames or frame sizes. Applications control formatting and filtering.
 
 Configure logging when creating a client:
 
 ```typescript
 const client = await MTPClient.create({
   url: "https://host.example.com:4433",
-  logging: {
-    hiddenTypes: ["Ping", "Pong"],
-    stateChanges: false,
+  logger(event) {
+    if (["Ping", "Pong", "state"].includes(event.type)) return;
+    const direction = event.direction === "send" ? "Send"
+      : event.direction === "recv" ? "Receive" : "";
+    if (event.hint === "error") {
+      console.error(direction, event.type, event.error, event.data);
+    } else {
+      console.log(direction, event.type, event.data);
+    }
   },
 });
 ```
 
-`hiddenTypes` suppresses both sent and received events of those exact types,
-including error events. It also applies to a custom `logger` callback.
-Use `logging: false` to disable all SDK logs, including custom logger callbacks.
-Providing `logger` replaces the styled console output with your own handler.
-It receives parsed events:
+Omit `logger` to leave logging disabled. The callback receives parsed events:
 
 ```typescript
 type MTPLogEvent =
@@ -697,7 +700,7 @@ type MTPLogEvent =
     };
 ```
 
-Incoming non-error frames and sent frames are logged as `info`. Error frames and transport errors are logged as `error`.
+Incoming non-error frames and sent frames have the `info` hint. Error frames and transport errors have the `error` hint.
 
 ## Advanced Raw Bindings
 

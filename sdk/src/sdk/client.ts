@@ -325,15 +325,10 @@ export interface MTPClientOptions<
     | {
         module_or_path: RawBindings.InitInput | Promise<RawBindings.InitInput>;
       };
+  /** Optional application-owned logging for sent/received messages, state, and errors. */
   logger?: (event: MTPLogEvent) => void;
-  /** Observe connection state independently of logging configuration. */
+  /** Observe connection state independently of logging. */
   onStateChange?: (state: RawBindings.ConnectionState) => void;
-  /** Styled console logs by default. Hidden types are also excluded from custom loggers. */
-  logging?: false | {
-    hiddenTypes?: readonly MTPCommunicationType[];
-    /** Include connection-state events. Defaults to true. */
-    stateChanges?: boolean;
-  };
   sessionStorage?: MTPSessionStorage;
   /**
    * Independent caller-managed encrypted-secret storage. Session state is not
@@ -718,46 +713,6 @@ function emit(
   }
 }
 
-function createLogger(options: MTPClientOptions): MTPClientOptions["logger"] {
-  if (options.logging === false) return undefined;
-  const logging = options.logging;
-  const hiddenTypes = new Set(logging?.hiddenTypes ?? []);
-  return (event) => {
-    if (hiddenTypes.has(event.type) ||
-        (event.type === "state" && logging?.stateChanges === false)) return;
-    if (options.logger) {
-      options.logger(event);
-      return;
-    }
-    log(event);
-  };
-}
-
-/** Write an expandable event using the SDK's CSS-styled console labels. */
-export function log(event: MTPLogEvent, options: { label?: string; color?: string; origin?: string } = {}): void {
-  const color = options.color ?? (event.hint === "error" ? "red"
-    : event.hint === "warning" ? "orange" : "whitesmoke");
-  const level = event.hint === "error" ? "ERROR"
-    : event.hint === "warning" ? "WARN" : "INFO";
-  const caller = new Error().stack?.split("\n").slice(1).find((line) =>
-    /:\d+:\d+/.test(line) &&
-    !/\b(?:log|mtpLog|emit|createLogger)\b|\/shared\/src\/log\.tsx/.test(line)
-  );
-  const origin = options.origin ?? caller?.trim().replace(/^at\s+/, "") ?? "";
-  const direction = event.direction === "send" ? "Send "
-    : event.direction === "recv" ? "Receive " : "";
-  const write = event.hint === "error" ? console.error
-    : event.hint === "warning" ? console.warn : console.info;
-  const details: unknown[] = [];
-  if (event.hint === "error") details.push(event.error);
-  if (event.data !== undefined) details.push(event.data);
-  if ("relay" in event && event.relay) details.push(event.relay);
-  write.call(console, `%c${level}%c ${origin}%c ${options.label ?? "MTP"} ${direction}${event.type}`,
-    `color: ${color}; background: #444`,
-    "color: gray; font-style: italic",
-    "color: inherit", ...details);
-}
-
 function isErrorType(type: string): boolean {
   return (
     type === "Error" ||
@@ -1114,7 +1069,6 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
 
     const normalizedOptions = {
       ...options,
-      logger: createLogger(options),
       hostPublicKey:
         options.hostPublicKey == null
           ? undefined
