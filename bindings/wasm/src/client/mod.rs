@@ -163,6 +163,33 @@ impl WasmClient {
         self.connection_client_id.get()
     }
 
+    #[wasm_bindgen(getter)]
+    pub fn dictionary_fingerprint(&self) -> Option<String> {
+        if self.state.get() != ConnectionState::Connected {
+            return None;
+        }
+        self.transport
+            .borrow()
+            .as_ref()?
+            .type_map()
+            .fingerprint_hex()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn dictionary_version(&self) -> Option<String> {
+        if self.state.get() != ConnectionState::Connected {
+            return None;
+        }
+        Some(
+            self.transport
+                .borrow()
+                .as_ref()?
+                .type_map()
+                .version
+                .to_string(),
+        )
+    }
+
     /// Apply one decoder policy to frames received by this raw WASM client.
     /// The high-level SDK calls this before authentication so handshake,
     /// transport, and protected opening share the same policy input.

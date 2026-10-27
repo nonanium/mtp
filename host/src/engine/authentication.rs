@@ -317,6 +317,10 @@ impl HandshakeEngine {
         let tm = codec.type_map();
 
         // PQ preflight: host requiring PQ must have a PQ key
+        let bind_dictionary = |payload| {
+            mtp_codec::dictionary::bind_authentication(tm, payload)
+                .map_err(|error| AcceptError::AuthenticationFailed(error.to_string()))
+        };
         let pq_enabled = !self
             .config
             .host_keyring
@@ -391,14 +395,18 @@ impl HandshakeEngine {
         };
 
         let server_challenge: u128 = rand::random();
-        let (chal_sig, chal_pq_sig) =
-            match host_sign(auth::challenge_payload(challenge_id, server_challenge)).await {
-                Ok(signatures) => signatures,
-                Err(error) => {
-                    reject_error_generic(sender, &error, tm).await;
-                    return Err(error);
-                }
-            };
+        let (chal_sig, chal_pq_sig) = match host_sign(bind_dictionary(auth::challenge_payload(
+            challenge_id,
+            server_challenge,
+        ))?)
+        .await
+        {
+            Ok(signatures) => signatures,
+            Err(error) => {
+                reject_error_generic(sender, &error, tm).await;
+                return Err(error);
+            }
+        };
 
         let mut challenge_msg =
             CommunicationValue::new_with_type_map(CommunicationType::Challenge, tm)
@@ -407,6 +415,10 @@ impl HandshakeEngine {
                     DataValue::UnsignedNumber(server_challenge),
                 )
                 .add_typed_default(DataType::Signature, DataValue::Bytes(chal_sig));
+        challenge_msg = challenge_msg.add_typed_default(
+            DataType::DictionaryFingerprint,
+            mtp_codec::dictionary::value(tm).map_err(AcceptError::Send)?,
+        );
         challenge_msg = challenge_msg.add_typed_default(
             DataType::RequirePq,
             if self.config.require_pq {
@@ -431,6 +443,11 @@ impl HandshakeEngine {
         })?;
         if Some(proof.get_type()) != CommunicationType::ChallengeResponse.try_to_id(tm) {
             let error = AcceptError::AuthenticationFailed("missing challenge response".into());
+            reject_error_generic(sender, &error, tm).await;
+            return Err(error);
+        }
+        if let Err(error) = mtp_codec::dictionary::verify_selection(&proof, tm) {
+            let error = AcceptError::AuthenticationFailed(error.to_string());
             reject_error_generic(sender, &error, tm).await;
             return Err(error);
         }
@@ -481,6 +498,7 @@ impl HandshakeEngine {
         };
 
         let has_client_pq_key = !bundle.sig_pq_public_key.as_bytes().is_empty();
+        let proof_payload = bind_dictionary(proof_payload)?;
         let proof_ok = if pq_sig_bytes.is_empty() {
             !self.config.require_pq
                 && verify_ed25519(&bundle.sig_cl_public_key, &proof_payload, &sig_bytes).is_ok()
@@ -548,12 +566,12 @@ impl HandshakeEngine {
         }
 
         // Sign and send final response
-        let (host_sig, host_pq_sig) = match host_sign(auth::host_final_payload(
+        let (host_sig, host_pq_sig) = match host_sign(bind_dictionary(auth::host_final_payload(
             description.as_deref(),
             assigned_id,
             client_nonce,
             server_challenge,
-        ))
+        ))?)
         .await
         {
             Ok(signatures) => signatures,
@@ -564,6 +582,10 @@ impl HandshakeEngine {
         };
 
         let mut response = CommunicationValue::new_with_type_map(response_type, tm)
+            .add_typed_default(
+                DataType::DictionaryFingerprint,
+                mtp_codec::dictionary::value(tm).map_err(AcceptError::Send)?,
+            )
             .add_typed_default(DataType::Connected, DataValue::BoolTrue)
             .add_typed_default(DataType::Id, DataValue::UnsignedNumber(assigned_id as u128))
             .add_typed_default(

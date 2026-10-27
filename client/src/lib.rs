@@ -157,6 +157,9 @@ async fn select_codec(
     let selection = receiver.receive().await?;
     let bad_version = mtp_codec::CommunicationType::ErrorBadVersion.try_to_id(bootstrap);
     if Some(selection.get_type()) == bad_version {
+        if selection.get_data(DataType::Error) == Some(&DataValue::Str("dictionary_mismatch".into())) {
+            return Err(CommunicationError::ProtocolViolation("incompatible type-map dictionary".into()));
+        }
         let host_versions = match selection.get_data(DataType::Version) {
             Some(DataValue::Array(versions)) => versions
                 .iter()
@@ -201,6 +204,7 @@ async fn select_codec(
         ));
     }
     let codec = codec_for_version(&version)?;
+    mtp_codec::dictionary::verify_selection(&selection, codec.type_map())?;
     sender.set_type_map(codec.type_map()).await;
     receiver.set_type_map(codec.type_map()).await;
     Ok((version, codec))
@@ -222,6 +226,10 @@ impl MTPClient {
         )
         .add_typed_default(DataType::Version, version_offer(&offered))
         .add_typed_default(
+            DataType::DictionaryFingerprint,
+            mtp_codec::dictionary::offer(&offered)?,
+        )
+        .add_typed_default(
             DataType::Id,
             DataValue::UnsignedNumber(config.client_id.into()),
         );
@@ -234,6 +242,7 @@ impl MTPClient {
         let (negotiated, codec) = select_codec(&sender, &receiver, &bootstrap, &offered).await?;
 
         let response = receiver.receive().await?;
+        mtp_codec::dictionary::verify_selection(&response, codec.type_map())?;
         let outcome = parse_handshake_response(&response, codec.type_map())?;
         let (returned_version, assigned_id) = match outcome {
             mtp_common::HandshakeOutcome::Accepted {
@@ -321,6 +330,10 @@ impl MTPClient {
             CommunicationValue::new_with_type_map(CommunicationType::Identification, &bootstrap)
                 .add_typed_default(DataType::Version, version_offer(&offered))
                 .add_typed_default(
+                    DataType::DictionaryFingerprint,
+                    mtp_codec::dictionary::offer(&offered)?,
+                )
+                .add_typed_default(
                     DataType::Id,
                     DataValue::UnsignedNumber(config.client_id as u128),
                 )
@@ -367,6 +380,7 @@ impl MTPClient {
             server_challenge,
             client_nonce,
         );
+        let proof_payload = mtp_codec::dictionary::bind_authentication(&tm, proof_payload)?;
 
         let proof =
             match crypto::signed_challenge_response(keys, proof_payload, client_nonce, &tm).await {
@@ -519,6 +533,10 @@ impl MTPClient {
         let mut register =
             CommunicationValue::new_with_type_map(CommunicationType::Register, &bootstrap)
                 .add_typed_default(DataType::Version, version_offer(&offered))
+                .add_typed_default(
+                    DataType::DictionaryFingerprint,
+                    mtp_codec::dictionary::offer(&offered)?,
+                )
                 .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
         if let Some(desc) = &config.description {
             register =
@@ -560,6 +578,7 @@ impl MTPClient {
             server_challenge,
             client_nonce,
         );
+        let proof_payload = mtp_codec::dictionary::bind_authentication(&tm, proof_payload)?;
 
         let proof =
             match crypto::signed_challenge_response(keys, proof_payload, client_nonce, &tm).await {

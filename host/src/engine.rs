@@ -277,6 +277,19 @@ impl HandshakeEngine {
         let codec = VersionedCodec::for_version(self.registry.clone(), negotiated.clone())
             .ok_or_else(|| AcceptError::UnsupportedVersion(negotiated.clone()))?;
 
+        if let Err(error) =
+            mtp_codec::dictionary::verify_offer(&first_msg, &client_versions, codec.type_map())
+        {
+            let rejection = CommunicationValue::new_with_type_map(CommunicationType::ErrorBadVersion, &bootstrap)
+                .add_typed_default(DataType::Connected, DataValue::BoolFalse)
+                .add_typed_default(DataType::Error, DataValue::Str("dictionary_mismatch".into()))
+                .add_typed_default(DataType::Version, DataValue::Array(vec![DataValue::Str(negotiated.to_string())]))
+                .add_typed_default(DataType::DictionaryFingerprint, mtp_codec::dictionary::value(codec.type_map()).map_err(AcceptError::Send)?);
+            let _ = sender.send(&rejection).await;
+            sender.close();
+            return Err(AcceptError::Receive(error));
+        }
+
         send_selection_bootstrap(sender, &negotiated, &bootstrap)
             .await
             .map_err(AcceptError::Send)?;
@@ -479,7 +492,9 @@ fn parse_version_offer(message: &CommunicationValue) -> Option<Vec<Version>> {
     let versions: Option<Vec<_>> = values
         .iter()
         .map(|value| match value {
-            DataValue::Str(version) => Version::parse(version),
+            DataValue::Str(version) => {
+                Version::parse(version).filter(|parsed| parsed.to_string() == *version)
+            }
             _ => None,
         })
         .collect();
@@ -494,7 +509,11 @@ async fn send_selection_bootstrap<S: HandshakeSender>(
     let selection =
         CommunicationValue::new_with_type_map(CommunicationType::IdentificationResponse, bootstrap)
             .add_typed_default(DataType::Connected, DataValue::BoolTrue)
-            .add_typed_default(DataType::Version, DataValue::Str(version.to_string()));
+            .add_typed_default(DataType::Version, DataValue::Str(version.to_string()))
+            .add_typed_default(
+                DataType::DictionaryFingerprint,
+                mtp_codec::dictionary::value(&TypeMap::new(version.clone()))?,
+            );
     sender.send(&selection).await
 }
 
@@ -524,7 +543,11 @@ async fn send_accepted_generic<S: HandshakeSender>(
     let mut response =
         CommunicationValue::new_with_type_map(CommunicationType::IdentificationResponse, type_map)
             .add_typed_default(DataType::Connected, DataValue::BoolTrue)
-            .add_typed_default(DataType::Version, DataValue::Str(version.to_string()));
+            .add_typed_default(DataType::Version, DataValue::Str(version.to_string()))
+            .add_typed_default(
+                DataType::DictionaryFingerprint,
+                mtp_codec::dictionary::value(type_map)?,
+            );
     if let Some(id) = assigned_id {
         response = response.add_typed_default(DataType::Id, DataValue::UnsignedNumber(id as u128));
     }

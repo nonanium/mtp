@@ -1207,6 +1207,13 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     return this.raw.client.ping_ms ?? null;
   }
 
+  /** The dictionary accepted on this connection, not just its version label. */
+  get dictionaryIdentity(): { version: string; fingerprint: string } | null {
+    const version = this.raw.client.dictionary_version;
+    const fingerprint = this.raw.client.dictionary_fingerprint;
+    return version && fingerprint ? { version, fingerprint } : null;
+  }
+
   async #loadStoredCredentials() {
     if (this.#credentials || !this.#options.storage) {
       return;

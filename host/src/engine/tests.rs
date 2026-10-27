@@ -1,6 +1,83 @@
 use super::*;
 use std::sync::Mutex;
 
+#[derive(Default)]
+struct RecordedHandshake {
+    sent: Mutex<Vec<CommunicationValue>>,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl HandshakeSender for RecordedHandshake {
+    async fn send(&self, message: &CommunicationValue) -> Result<(), CommunicationError> {
+        self.sent.lock().unwrap().push(message.clone());
+        Ok(())
+    }
+    async fn finish_stream(&self) -> Result<(), CommunicationError> {
+        Ok(())
+    }
+    fn close(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct Opening(Mutex<Option<CommunicationValue>>);
+impl HandshakeReceiver for Opening {
+    async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
+        self.0
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or(CommunicationError::ClosedByPeer)
+    }
+}
+
+#[tokio::test]
+async fn dictionary_mismatch_and_missing_fingerprint_fail_before_identity_lookup() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let count = lookups.clone();
+    let mut config = HostConfig::new("127.0.0.1".parse().unwrap(), 4433, vec![], vec![]);
+    config.get_existing_client = Box::new(move |_, _| {
+        count.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { None })
+    });
+    let engine = HandshakeEngine::new(Registry::builtin(), Arc::new(config));
+    let map = TypeMap::latest();
+    for include_wrong_hash in [false, true] {
+        let mut frame =
+            CommunicationValue::new_with_type_map(CommunicationType::Identification, &map)
+                .add_typed_default(
+                    DataType::Version,
+                    DataValue::Array(vec![DataValue::Str(map.version.to_string())]),
+                )
+                .add_typed_default(DataType::Id, DataValue::UnsignedNumber(42));
+        if include_wrong_hash {
+            frame = frame.add_typed_default(
+                DataType::DictionaryFingerprint,
+                DataValue::Array(vec![DataValue::Bytes(vec![0; 32])]),
+            );
+        }
+        let sender = RecordedHandshake::default();
+        let receiver = Opening(Mutex::new(Some(frame)));
+        assert!(matches!(
+            engine.accept(&sender, &receiver).await,
+            Err(AcceptError::Receive(CommunicationError::ProtocolViolation(
+                _
+            )))
+        ));
+        assert!(sender.closed.load(Ordering::SeqCst));
+        let sent = sender.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].is_type(CommunicationType::ErrorBadVersion));
+        assert_eq!(sent[0].get_data(DataType::Error), Some(&DataValue::Str("dictionary_mismatch".into())));
+        assert_eq!(
+            sent[0].get_data(DataType::Connected),
+            Some(&DataValue::BoolFalse)
+        );
+        assert_eq!(lookups.load(Ordering::SeqCst), 0);
+    }
+}
+
 #[tokio::test]
 async fn guest_generator_accepts_full_width_id_after_collision_check()
 -> Result<(), Box<dyn std::error::Error>> {

@@ -52,6 +52,7 @@
     { "name": "Content", "id": 23 },
     { "name": "Metadata", "id": 24 },
     { "name": "RelayVersion", "id": 25 },
-    { "name": "ProtectedVersion", "id": 26 }
+    { "name": "ProtectedVersion", "id": 26 },
+    { "name": "DictionaryFingerprint", "id": 27 }
   ]
 }

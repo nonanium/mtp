@@ -48,7 +48,14 @@ pub(crate) async fn verify_host_challenge(
         ));
     }
 
-    let payload = auth::challenge_payload(id, server_challenge);
+    let tm = challenge
+        .type_map()
+        .ok_or(CommunicationError::ParseCommunicationValue)?;
+    mtp_codec::dictionary::verify_selection(challenge, tm)?;
+    let payload = mtp_codec::dictionary::bind_authentication(
+        tm,
+        auth::challenge_payload(id, server_challenge),
+    )?;
     if pq_sig.is_empty() {
         verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig).map_err(|_| {
             CommunicationError::AuthenticationFailed("Host challenge signature invalid".into())
@@ -107,7 +114,14 @@ pub(crate) async fn verify_host_final(
         ));
     }
 
-    let payload = auth::host_final_payload(description, id, client_nonce, server_challenge);
+    let tm = response
+        .type_map()
+        .ok_or(CommunicationError::ParseCommunicationValue)?;
+    mtp_codec::dictionary::verify_selection(response, tm)?;
+    let payload = mtp_codec::dictionary::bind_authentication(
+        tm,
+        auth::host_final_payload(description, id, client_nonce, server_challenge),
+    )?;
     if pq_sig.is_empty() {
         verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig).map_err(|_| {
             CommunicationError::AuthenticationFailed("Host signature invalid".into())
@@ -171,6 +185,10 @@ pub(crate) async fn signed_challenge_response(
         .map_err(|e| CommunicationError::Other(e.to_string()))?;
     let mut proof =
         CommunicationValue::new_with_type_map(CommunicationType::ChallengeResponse, type_map)
+            .add_typed_default(
+                DataType::DictionaryFingerprint,
+                mtp_codec::dictionary::value(type_map)?,
+            )
             .add_typed_default(
                 DataType::ClientNonce,
                 DataValue::UnsignedNumber(client_nonce),

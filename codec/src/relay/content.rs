@@ -172,6 +172,14 @@ pub fn open_relay_content_with_limits_without_replay(
     let message_type =
         CommunicationType::from_name(&string_field(content, DataType::MessageType, type_map)?)
             .ok_or(RelayError::InvalidLayout("relay message type is unknown"))?;
+    let expected = type_map
+        .fingerprint()
+        .ok_or(RelayError::InvalidLayout("unknown dictionary"))?;
+    if field(content, DataType::DictionaryFingerprint, type_map)?.as_bytes_slice()
+        != Some(expected.as_slice())
+    {
+        return Err(RelayError::InvalidLayout("dictionary fingerprint mismatch"));
+    }
     validate_application_message_type(message_type, type_map)?;
     Ok(VerifiedRelayContent {
         signer_id: signed.signer_id,

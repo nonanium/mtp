@@ -9,6 +9,8 @@ import {
   FIRST_USER_TYPE_ID,
   RESERVED_COMMUNICATION_TYPES,
   RESERVED_DATA_TYPES,
+  RESERVED_COMMUNICATION_TYPE_IDS,
+  RESERVED_DATA_TYPE_IDS,
 } from "../type-map/reserved.js";
 
 export interface MTPVitePluginOptions {
@@ -207,7 +209,7 @@ export function parseTypeMapYaml(source: string, filePath: string) {
             `${filePath}: ${version}.${section}.${name} uses a reserved type name`,
           );
         }
-        if (!Number.isInteger(value) || (value as number) < FIRST_USER_TYPE_ID)
+        if (!Number.isInteger(value) || (value as number) < FIRST_USER_TYPE_ID || (value as number) > 65535)
           throw new Error(
             `${filePath}: ${version}.${section}.${name} must use an integer id >= ${FIRST_USER_TYPE_ID}`,
           );
@@ -227,15 +229,46 @@ export function parseTypeMapYaml(source: string, filePath: string) {
   return {
     communicationTypes: [...communicationTypes].sort(),
     dataTypes: [...dataTypes].sort(),
+    dictionaryIdentities: Object.fromEntries(Object.entries(typeMaps).map(([version, map]) => [version, dictionaryFingerprint(version, map as { CommunicationTypes?: Record<string, number>; DataTypes?: Record<string, number> })])),
   };
+}
+
+/** Byte-for-byte equivalent to mtp-type-map's V1 dictionary serialization. */
+export function dictionaryFingerprint(version: string, map: { CommunicationTypes?: Record<string, number>; DataTypes?: Record<string, number> }): string {
+  const chunks: Buffer[] = [Buffer.from("mtp-type-dictionary\0v1\0", "utf8")];
+  const string = (value: string) => {
+    const bytes = Buffer.from(value, "utf8");
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    chunks.push(length, bytes);
+  };
+  string(version);
+  for (const [tag, reserved, application] of [
+    [1, RESERVED_COMMUNICATION_TYPE_IDS, map.CommunicationTypes],
+    [2, RESERVED_DATA_TYPE_IDS, map.DataTypes],
+  ] as const) {
+    const entries = Object.entries({ ...reserved, ...application }).sort(([a], [b]) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+    const header = Buffer.alloc(5);
+    header.writeUInt8(tag);
+    header.writeUInt32BE(entries.length, 1);
+    chunks.push(header);
+    for (const [name, id] of entries) {
+      string(name);
+      const bytes = Buffer.alloc(2);
+      bytes.writeUInt16BE(id);
+      chunks.push(bytes);
+    }
+  }
+  return crypto.createHash("sha256").update(Buffer.concat(chunks)).digest("hex");
 }
 
 export function generateTypeMapModule(metadata: {
   communicationTypes: string[];
   dataTypes: string[];
+  dictionaryIdentities?: Record<string, string>;
 }) {
-  const js = `export const communicationTypes = ${JSON.stringify(metadata.communicationTypes, null, 2)};\nexport const dataTypes = ${JSON.stringify(metadata.dataTypes, null, 2)};\n`;
-  const dts = `export type MTPCommunicationType = ${quoteList(metadata.communicationTypes)};\nexport type MTPDataType = ${quoteList(metadata.dataTypes)};\nexport declare const communicationTypes: readonly MTPCommunicationType[];\nexport declare const dataTypes: readonly MTPDataType[];\n`;
+  const js = `export const communicationTypes = ${JSON.stringify(metadata.communicationTypes, null, 2)};\nexport const dataTypes = ${JSON.stringify(metadata.dataTypes, null, 2)};\nexport const dictionaryIdentities = ${JSON.stringify(metadata.dictionaryIdentities ?? {}, null, 2)};\n`;
+  const dts = `export type MTPCommunicationType = ${quoteList(metadata.communicationTypes)};\nexport type MTPDataType = ${quoteList(metadata.dataTypes)};\nexport declare const communicationTypes: readonly MTPCommunicationType[];\nexport declare const dataTypes: readonly MTPDataType[];\nexport declare const dictionaryIdentities: Readonly<Record<string, string>>;\n`;
   return { js, dts };
 }
 

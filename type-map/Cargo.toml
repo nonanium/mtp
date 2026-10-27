@@ -14,6 +14,7 @@ pipes = []
 [dependencies]
 
 [build-dependencies]
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = { version = "2.0", default-features = false, features = ["deserialize"] }
 

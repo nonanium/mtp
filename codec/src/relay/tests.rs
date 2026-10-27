@@ -93,6 +93,10 @@ fn relay_frame_with_version(
     let signer = ed_signer(sender);
     let type_map = TypeMap::latest();
     let mut fields = Vec::new();
+    fields.push((
+        relay_field(DataType::DictionaryFingerprint, &type_map).unwrap(),
+        DataValue::Bytes(type_map.fingerprint().unwrap().to_vec()),
+    ));
     if let Some(version) = version {
         fields.push((
             relay_field(DataType::RelayVersion, &type_map).expect("RelayVersion mapping"),
@@ -101,6 +105,10 @@ fn relay_frame_with_version(
     }
     if include_v1_fields {
         let content = DataValue::Container(vec![
+            (
+                relay_field(DataType::DictionaryFingerprint, &type_map).unwrap(),
+                DataValue::Bytes(type_map.fingerprint().unwrap().to_vec()),
+            ),
             (
                 relay_field(DataType::MessageType, &type_map).expect("MessageType mapping"),
                 DataValue::Str("ProtectedMessage".into()),

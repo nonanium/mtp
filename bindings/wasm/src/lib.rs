@@ -1,3 +1,6 @@
+//! Browser bindings. Validate these separately with the wasm32 target.
+#![cfg(target_arch = "wasm32")]
+
 pub mod auth;
 pub mod client;
 pub mod client_pipe;

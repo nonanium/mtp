@@ -1,5 +1,6 @@
 pub mod communication_value;
 pub mod data_value;
+pub mod dictionary;
 #[cfg(feature = "crypto")]
 pub mod protected;
 #[cfg(feature = "crypto")]
