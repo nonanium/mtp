@@ -295,7 +295,7 @@ where
 {
     let (request, too_large) = read_request(request, stream, max_request_body, remote_addr)
         .await
-        .map_err(|e| WebServerError::Http(format!("request body read failed: {e}")))?;
+        .map_err(|e| WebServerError::BadRequest(format!("request body read failed: {e}")))?;
     if too_large {
         return Err(WebServerError::PayloadTooLarge);
     }

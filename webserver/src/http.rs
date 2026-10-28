@@ -32,22 +32,18 @@ where
     let response = match tokio::time::timeout(timeout, future).await {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
-            let status = if matches!(error, WebServerError::PayloadTooLarge) {
-                StatusCode::PAYLOAD_TOO_LARGE
-            } else {
-                StatusCode::BAD_REQUEST
-            };
+            let status = error.status_code();
             if let Some(metrics) = metrics {
                 metrics.error_occurred(&error);
             }
             HttpResponse::new(status)
         }
         Err(_) => {
-            let error = WebServerError::Http("request handler timed out".into());
+            let error = WebServerError::HandlerTimeout;
             if let Some(metrics) = metrics {
                 metrics.error_occurred(&error);
             }
-            HttpResponse::new(StatusCode::REQUEST_TIMEOUT)
+            HttpResponse::new(error.status_code())
         }
     };
     if let Some(metrics) = metrics {
