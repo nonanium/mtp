@@ -125,7 +125,7 @@ function quoteList(values: string[]): string {
 }
 
 export function parseTypeMapYaml(source: string, filePath: string) {
-  const document = YAML.parseDocument(source, { prettyErrors: false });
+  const document = YAML.parseDocument(source, { prettyErrors: false, merge: true });
   if (document.errors.length) {
     const error = document.errors[0];
     const line =
