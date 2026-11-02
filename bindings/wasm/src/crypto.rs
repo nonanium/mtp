@@ -385,6 +385,48 @@ impl WasmChaCha20Poly1305 {
 // Ed25519 signatures
 // ===========================================================================
 
+/// Sign application-domain bytes with both account signing keys. The caller
+/// owns domain separation; this does not construct an MTP protection wrapper.
+#[wasm_bindgen]
+pub fn wasm_sign_dual(keyring: &[u8], message: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let keyring = Keyring::from_bytes(keyring)
+        .map_err(|e| js_error(format!("keyring initialization failed: {e}")))?;
+    relay_signer_from_keyring(&keyring, PROTECTION_SIGNATURE_SUITE_DUAL)?
+        .sign(message)
+        .map_err(|e| js_error(format!("dual signing failed: {e}")))
+}
+
+/// Verify a detached signature against an independently authenticated bundle.
+/// Both signatures are mandatory; no classical-only fallback is permitted.
+#[wasm_bindgen]
+pub fn wasm_verify_dual(
+    public_key_bundle: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), JsValue> {
+    let bundle = decode_public_key_bundle(public_key_bundle, None)?;
+    let classical_length = mtp_crypto::SigAlgorithm::length(mtp_crypto::SigAlgorithm::ED25519)
+        .expect("known Ed25519 signature length");
+    let dual_length = mtp_crypto::SigAlgorithm::length(mtp_crypto::SigAlgorithm::DUAL)
+        .expect("known dual signature length");
+    if signature.len() != dual_length {
+        return Err(js_error("invalid dual signature length"));
+    }
+    mtp_crypto::verify_ed25519(
+        &bundle.sig_cl_public_key,
+        message,
+        &signature[..classical_length],
+    )
+    .and_then(|()| {
+        mtp_crypto::verify_ml_dsa(
+            &bundle.sig_pq_public_key,
+            message,
+            &signature[classical_length..],
+        )
+    })
+    .map_err(|e| js_error(format!("dual signature verification failed: {e}")))
+}
+
 #[wasm_bindgen]
 pub struct WasmEd25519Signer {
     inner: Ed25519Signer,

@@ -196,6 +196,14 @@ export interface MTPCrypto {
     message: Uint8Array,
     signature: Uint8Array,
   ): void;
+  /** Detached application signature. Callers must domain-separate the message. */
+  signDual(keyring: MTPKeyMaterialInput, message: Uint8Array): Uint8Array;
+  /** The public bundle must be authenticated independently of the signed input. */
+  verifyDual(
+    publicKeyBundle: MTPKeyMaterialInput,
+    message: Uint8Array,
+    signature: Uint8Array,
+  ): void;
   deriveEncryptionKey(
     ikm: Uint8Array,
     salt: Uint8Array,
@@ -213,8 +221,9 @@ export interface MTPCrypto {
   publicKeyBundleToKeys(
     publicKeyBundle: MTPKeyMaterialInput,
   ): MTPPublicKeyBundleKeys;
-  encrypt(key: Uint8Array, input: Uint8Array): Promise<Uint8Array>;
-  decrypt(key: Uint8Array, input: Uint8Array): Promise<Uint8Array>;
+  /** XChaCha20-Poly1305, encoded as nonce[24] || ciphertext || tag[16]. */
+  encrypt(key: Uint8Array, input: Uint8Array, aad?: Uint8Array): Promise<Uint8Array>;
+  decrypt(key: Uint8Array, input: Uint8Array, aad?: Uint8Array): Promise<Uint8Array>;
   encryptText(key: Uint8Array, plaintext: string): Promise<string>;
   decryptText(key: Uint8Array, ciphertext: string): Promise<string>;
   encapsulate(otherPublicKey: Uint8Array): WasmEncapsulated;
