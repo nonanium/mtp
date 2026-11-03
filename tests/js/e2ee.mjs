@@ -970,6 +970,75 @@ await describe("Relay recipient key history", async () => {
 });
 
 await describe("Protected send APIs", async () => {
+  await it("persists the exact protected command before sending and isolates the persistence copy", async () => {
+    const signerKeyring = sdk.crypto.generateKeyring();
+    const recipientKeyring = sdk.crypto.generateKeyring();
+    const client = await sdk.MTPClient.create({ url: "https://example.invalid", pings: false });
+    const ready = Promise.withResolvers();
+    const permit = Promise.withResolvers();
+    let saved;
+    let sent;
+    client.raw.client.request = async (frame) => {
+      sent = frame.slice();
+      return sdk.codec.decode(frame);
+    };
+    try {
+      const result = client.requestProtected("ProtectedMessage", { ExampleType: "durable-command" }, {
+        receiverId: 22n, identity: { signerId: 11n, keyring: signerKeyring },
+        recipients: [publicBundle(recipientKeyring)], signaturePurpose: 0x40,
+        encryptionPurpose: 0x41, signatureSuite: "dual",
+      }, {
+        beforeSend: async (frame) => {
+          saved = frame.slice();
+          ready.resolve();
+          await permit.promise;
+          frame.fill(0);
+        },
+      });
+      await ready.promise;
+      assert.equal(sent, undefined);
+      permit.resolve();
+      const response = await result;
+      assert.deepEqual(sent, saved);
+      assert.ok(response.id > 0);
+      const opened = await client.openProtected(response, {
+        recipient: { id: 22n, keyring: recipientKeyring },
+        expectedSignerId: 11n, expectedReceiverId: 22n,
+        resolveSignerPublicKeys: () => [publicBundle(signerKeyring)],
+        signaturePurpose: 0x40, encryptionPurpose: 0x41, signaturePolicy: "dual",
+      });
+      assert.equal(opened.data.ExampleType, "durable-command");
+      const retried = await client.requestPrepared(saved);
+      assert.notEqual(retried.id, response.id);
+      assert.deepEqual(retried.data.encoded, response.data.encoded);
+      assert.deepEqual(client.preparedRequestDigest(saved), client.preparedRequestDigest(sent));
+      const repeated = await client.openProtected(retried, {
+        recipient: { id: 22n, keyring: recipientKeyring },
+        expectedSignerId: 11n, expectedReceiverId: 22n,
+        resolveSignerPublicKeys: () => [publicBundle(signerKeyring)],
+        signaturePurpose: 0x40, encryptionPurpose: 0x41, signaturePolicy: "dual",
+        replayGuard: { accept: () => true },
+      });
+      assert.equal(repeated.messageId, opened.messageId);
+      assert.equal(repeated.createdAt, opened.createdAt);
+      const queried = await client.requestRaw("ProtectedMessage", { ExampleType: "receipt-query" }, { receiver: 22n });
+      assert.ok(queried.id > 0);
+      assert.equal(queried.receiver, 22n);
+      assert.equal(queried.data.ExampleType, "receipt-query");
+      await assert.rejects(client.requestPrepared(sdk.codec.encode("Ping", {})), /not encrypted/);
+      sent = undefined;
+      await assert.rejects(client.requestProtected("ProtectedMessage", { ExampleType: "not-durable" }, {
+        receiverId: 22n, identity: { signerId: 11n, keyring: signerKeyring },
+        recipients: [publicBundle(recipientKeyring)], signaturePurpose: 0x40,
+        encryptionPurpose: 0x41, signatureSuite: "dual",
+      }, { beforeSend: () => { throw new Error("persistence refused"); } }), /persistence refused/);
+      assert.equal(sent, undefined);
+    } finally {
+      signerKeyring.fill(0);
+      recipientKeyring.fill(0);
+    }
+  });
+
   function captureSend(client) {
     const frames = [];
     client.raw.client.send = async (frame) => {

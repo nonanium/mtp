@@ -326,6 +326,25 @@ fn build_frame_with_payload_applies_frame_options() {
 }
 
 #[wasm_bindgen_test]
+fn receipt_frame_removal_matches_the_codec_without_generating_an_id() {
+    let original = CommunicationValue::new(CommunicationType::Pong)
+        .with_id(17)
+        .with_sender(u64::MAX)
+        .with_receiver(23)
+        .with_payload(DataValue::Bytes(vec![0, 1, 255]));
+    let expected = original.clone().without_id().to_bytes().unwrap();
+    let actual = frame_without_id(&original.to_bytes().unwrap()).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(frame_without_id(&actual).unwrap(), actual);
+    let decoded = CommunicationValue::from_bytes(&actual).unwrap();
+    assert_eq!(decoded.id(), None);
+    assert_eq!(decoded.sender(), Some(u64::MAX));
+    assert_eq!(decoded.receiver(), Some(23));
+    assert_eq!(decoded.payload(), original.payload());
+    assert!(frame_without_id(&[]).is_err());
+}
+
+#[wasm_bindgen_test]
 fn fractional_float_roundtrips_without_corruption() {
     let tm = TypeMap::new(PROTOCOL_VERSION);
     for expected in [-12.5, 0.125, 1.5e200] {

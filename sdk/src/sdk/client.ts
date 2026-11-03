@@ -624,6 +624,8 @@ export interface MTPVerifiedRelayContent {
 export interface MTPRequestOptions extends MTPSendOptions {
   responseType?: MTPCommunicationType;
   timeoutMs?: number;
+  /** Persist this exact prepared frame before any bytes are sent. Rejection cancels sending. */
+  beforeSend?: (frame: Uint8Array) => void | Promise<void>;
 }
 
 export interface MTPPipeWriter {
@@ -1568,7 +1570,8 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       typeof typeOrFrame === "string"
         ? await this.#parseRequestData(typeOrFrame, data)
         : data;
-    const frame = this.#buildFrame(typeOrFrame, parsedData, options);
+    const { beforeSend, ...frameOptions } = options;
+    const frame = this.#buildFrame(typeOrFrame, parsedData, frameOptions);
     try {
       const parsed = this.raw.bindings.parse_frame(frame);
       emit(
@@ -1596,6 +1599,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
         direction: "send",
       });
     }
+    if (beforeSend) await beforeSend(new Uint8Array(frame));
     // The WASM client owns request expiry and its late-response tombstones.
     // Keeping a second Promise timer here can reject the SDK call while the
     // protocol request is still allowed to complete successfully.
@@ -2346,6 +2350,18 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     return this.#subscribeBounded(type, handler, options);
   }
 
+  /** Request a protocol envelope whose response must be opened before applying schemas. */
+  async requestRaw(type: MTPCommunicationType, data: MTPDataValueInput, options: MTPRequestOptions = {}): Promise<ParsedFrame> {
+    const id = options.id ?? this.#nextSealedRelayRequestId;
+    if (options.id === undefined) this.#nextSealedRelayRequestId = id === 0xffff_ffff ? 1 : id + 1;
+    const frame = this.#buildFrame(type, data, {
+      id,
+      ...(options.sender === undefined ? {} : { sender: options.sender }),
+      ...(options.receiver === undefined ? {} : { receiver: options.receiver }),
+    });
+    return this.request(frame, undefined, options);
+  }
+
   async #buildProtected(
     type: MTPCommunicationType,
     data: MTPDataValueInput,
@@ -2422,30 +2438,41 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
     options: MTPSendSealedRelayOptions,
     requestOptions?: MTPRequestOptions,
   ): Promise<ParsedFrame> {
-    return this.request(
-      this.#addSealedRelayRequestId(
-        this.#native ? await this.#buildNativeRelay(type, data, options) : this.#buildSealedRelayFrame(type, data, options),
-      ),
-      undefined,
-      requestOptions,
-    );
+    const frame = this.#native ? await this.#buildNativeRelay(type, data, options) : this.#buildSealedRelayFrame(type, data, options);
+    return this.requestPrepared(frame, requestOptions);
   }
 
-  #addSealedRelayRequestId(frame: Uint8Array): Uint8Array {
+  /** Re-correlate persisted ciphertext without rebuilding its signed operation identity. */
+  async requestPrepared(frame: Uint8Array, options?: MTPRequestOptions): Promise<ParsedFrame> {
+    const id = this.#nextSealedRelayRequestId;
+    this.#nextSealedRelayRequestId = id === 0xffff_ffff ? 1 : id + 1;
+    return this.request(this.#correlatePrepared(frame, id), undefined, options);
+  }
+
+  /** Match backend receipts that hash the command with its outer request id removed. */
+  preparedRequestDigest(frame: Uint8Array): Uint8Array {
+    if (frame.length > (this.#options.maxMessageSize ?? DEFAULT_MAX_MESSAGE_SIZE)) {
+      throw new RangeError("MTP frame exceeds maxMessageSize");
+    }
+    return bindings.wasm_sha256(this.raw.bindings.frame_without_id(frame));
+  }
+
+  #correlatePrepared(frame: Uint8Array, id: number): Uint8Array {
+    if (frame.length > (this.#options.maxMessageSize ?? DEFAULT_MAX_MESSAGE_SIZE)) {
+      throw new RangeError("MTP frame exceeds maxMessageSize");
+    }
     const parsed = this.raw.bindings.parse_frame(frame);
     const data = parsed.data as { encoded?: unknown };
     if (!(data.encoded instanceof Uint8Array)) {
-      throw new Error("sealed relay frame payload is not encrypted");
+      throw new Error("prepared request payload is not encrypted");
     }
-    const id = this.#nextSealedRelayRequestId;
-    this.#nextSealedRelayRequestId =
-      id === 0xffff_ffff ? 1 : id + 1;
     return this.raw.bindings.build_frame_with_payload_with_limits(
-      "Relay",
+      parsed.type,
       data.encoded,
       {
         id,
         ...(parsed.receiver == null ? {} : { receiver: parsed.receiver }),
+        ...(parsed.sender == null ? {} : { sender: parsed.sender }),
       },
       this.#encodeLimits(),
     );

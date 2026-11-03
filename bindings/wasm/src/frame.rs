@@ -290,6 +290,21 @@ pub fn parse_frame_with_limits(frame: &[u8], limits: JsValue) -> Result<JsValue,
     parse_frame_value_with_limits(frame, &TypeMap::latest(), limits)
 }
 
+/// Canonical receipt input for an already prepared frame, without generating a
+/// replacement request ID or changing its sender, receiver or opaque payload.
+#[wasm_bindgen]
+pub fn frame_without_id(frame: &[u8]) -> Result<Vec<u8>, JsValue> {
+    CommunicationValue::try_from_bytes_with_type_map_and_limits(
+        frame,
+        &TypeMap::latest(),
+        DecodeLimits::default(),
+    )
+    .map_err(|error| decode_error(error, "parse failed"))?
+    .without_id()
+    .to_bytes_with_limits(EncodeLimits::default())
+    .map_err(|error| js_error(format!("encode failed: {error}")))
+}
+
 /// Build a typed MTP frame using generated communication/data type names.
 #[wasm_bindgen]
 pub fn build_frame(
