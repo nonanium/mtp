@@ -2,6 +2,7 @@ import type * as Raw from "../raw/index.js";
 import { communicationError } from "./communication-error.js";
 import { protectedOpeningError } from "./protection.js";
 import { relayOpeningError } from "./relay.js";
+import { compiled_dictionary_identity } from "mtp/raw";
 
 type Internals = {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
@@ -9,11 +10,9 @@ type Internals = {
   unregisterCallback(id: number): void;
 };
 
-export function androidTauri(): Internals | undefined {
+export function tauriRuntime(): Internals | undefined {
   const runtime = globalThis as typeof globalThis & { __TAURI_INTERNALS__?: Internals };
-  return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent)
-    ? runtime.__TAURI_INTERNALS__
-    : undefined;
+  return runtime.__TAURI_INTERNALS__;
 }
 
 export class NativeTransport {
@@ -21,6 +20,8 @@ export class NativeTransport {
   publicKeys = new Uint8Array();
   state = 0;
   ping_ms: number | null = null;
+  dictionary_version: string | null = null;
+  dictionary_fingerprint: string | null = null;
   readonly subscriptions = new Map<number, { type: string; handler: (frame: Raw.ParsedFrame) => void }>();
   #nextSubscription = 0;
   #callback?: number;
@@ -29,7 +30,7 @@ export class NativeTransport {
   #listenPromise?: Promise<void>;
   #generation = 0;
   #pipeHandler: ((request: unknown) => void) | null = null;
-  readonly attachmentId = globalThis.crypto.randomUUID();
+  #attachmentId = globalThis.crypto.randomUUID();
 
   constructor(
     readonly runtime: Internals,
@@ -96,15 +97,30 @@ export class NativeTransport {
 
   async connect(mode: "connect" | "unauthenticated" | "auth" | "register"): Promise<bigint> {
     const generation = this.#generation;
+    const attachmentId = this.#attachmentId;
+    this.state = 0;
+    this.dictionary_version = null;
+    this.dictionary_fingerprint = null;
     await this.listen();
     const connected = await this.call<boolean>("status");
     const result = connected && mode === "connect" && this.clientId != null
       ? { clientId: this.clientId.toString(), state: 2 }
       : await this.call<{ clientId: string; state: number }>("connect", { mode });
+    const dictionary = await this.call<{ version: string; fingerprint: string }>("dictionary_identity");
+    const compiled = compiled_dictionary_identity();
+    if (!dictionary || dictionary.version !== compiled.version || dictionary.fingerprint !== compiled.fingerprint)
+      throw new Error("Native connection dictionary does not match the WASM codec");
     if (generation !== this.#generation) throw new Error("native view was disposed during connection");
-    this.clientId = BigInt(result.clientId);
+    const clientId = BigInt(result.clientId);
+    await this.call("attach", { attachmentId });
+    if (generation !== this.#generation) {
+      await this.call("detach", { attachmentId });
+      throw new Error("native view was disposed during attachment");
+    }
+    this.clientId = clientId;
     this.state = result.state;
-    await this.call("attach", { attachmentId: this.attachmentId });
+    this.dictionary_version = dictionary.version;
+    this.dictionary_fingerprint = dictionary.fingerprint;
     return this.clientId;
   }
 
@@ -123,8 +139,12 @@ export class NativeTransport {
   stop_protocol_pings(): void {}
   disconnect(): void {
     this.#generation += 1;
+    const attachmentId = this.#attachmentId;
+    this.#attachmentId = globalThis.crypto.randomUUID();
     this.state = 0;
-    void this.call("detach", { attachmentId: this.attachmentId }).catch(this.report);
+    this.dictionary_version = null;
+    this.dictionary_fingerprint = null;
+    void this.call("detach", { attachmentId }).catch(this.report);
     if (this.#eventId != null) {
       void this.runtime.invoke("plugin:event|unlisten", { event: "mtp://event", eventId: this.#eventId }).catch(this.report);
     }

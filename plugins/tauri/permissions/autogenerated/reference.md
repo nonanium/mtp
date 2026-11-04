@@ -5,6 +5,7 @@ Attach to native connections and exchange live frames.
 #### This default permission set includes the following:
 
 - `allow-mtp-status`
+- `allow-mtp-dictionary-identity`
 - `allow-mtp-initialize`
 - `allow-mtp-connect`
 - `allow-mtp-clear-credentials`
@@ -321,6 +322,32 @@ Enables the mtp_detach command without any pre-configured scope.
 <td>
 
 Denies the mtp_detach command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mtp:allow-mtp-dictionary-identity`
+
+</td>
+<td>
+
+Enables the mtp_dictionary_identity command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mtp:deny-mtp-dictionary-identity`
+
+</td>
+<td>
+
+Denies the mtp_dictionary_identity command without any pre-configured scope.
 
 </td>
 </tr>

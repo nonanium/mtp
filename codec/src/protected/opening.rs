@@ -32,7 +32,12 @@ pub(super) fn validate_application_message_type(
 pub(super) fn validate_protected_frame(
     frame: &CommunicationValue,
 ) -> Result<TypeMap, ProtectedError> {
-    let type_map = frame.type_map().cloned().unwrap_or_else(TypeMap::latest);
+    let type_map = frame
+        .type_map()
+        .cloned()
+        .ok_or(ProtectedError::InvalidLayout(
+            "missing negotiated dictionary",
+        ))?;
     let Some(communication_type) = frame.get_comm_type_enum() else {
         return Err(ProtectedError::NotApplicationFrame);
     };
@@ -461,6 +466,17 @@ pub(super) fn open_decrypted_protected(
     let version = protected_version(envelope, &type_map)?;
     if version != CURRENT_PROTECTED_VERSION {
         return Err(ProtectedError::UnsupportedProtectedVersion(version));
+    }
+    let expected = type_map
+        .fingerprint()
+        .ok_or(ProtectedError::InvalidLayout("unknown dictionary"))?;
+    if envelope.len() != 7
+        || field(envelope, DataType::DictionaryFingerprint, &type_map)?.as_bytes_slice()
+            != Some(expected.as_slice())
+    {
+        return Err(ProtectedError::InvalidLayout(
+            "dictionary fingerprint mismatch",
+        ));
     }
     let message_type = communication_type_field(envelope, DataType::MessageType, &type_map)?;
     let application_type = validate_application_message_type(message_type, &type_map)?;

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-mtp-dictionary-identity"
+description = "Enables the mtp_dictionary_identity command without any pre-configured scope."
+commands.allow = ["mtp_dictionary_identity"]
+
+[[permission]]
+identifier = "deny-mtp-dictionary-identity"
+description = "Denies the mtp_dictionary_identity command without any pre-configured scope."
+commands.deny = ["mtp_dictionary_identity"]

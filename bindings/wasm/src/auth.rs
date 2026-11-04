@@ -31,7 +31,7 @@ pub(crate) fn unexpected_response_type_error(
 
 pub(crate) fn verify_host_challenge(
     challenge: &CommunicationValue,
-    _tm: &mtp_codec::TypeMap,
+    tm: &mtp_codec::TypeMap,
     host_pk: &mtp_crypto::PublicKeyBundle,
     id: u64,
     server_challenge: u128,
@@ -58,7 +58,13 @@ pub(crate) fn verify_host_challenge(
         ));
     }
 
-    let payload = mtp_crypto::auth::challenge_payload(id, server_challenge);
+    mtp_codec::dictionary::verify_selection(challenge, tm)
+        .map_err(|error| js_error(error.to_string()))?;
+    let payload = mtp_codec::dictionary::bind_authentication(
+        tm,
+        mtp_crypto::auth::challenge_payload(id, server_challenge),
+    )
+    .map_err(|error| js_error(error.to_string()))?;
     mtp_crypto::verify_ed25519(&host_pk.sig_cl_public_key, &payload, &sig)
         .map_err(|_| js_error("host challenge signature invalid"))?;
     if !pq_sig.is_empty() {
@@ -96,6 +102,13 @@ pub(crate) fn verify_host_final(
 
     let payload =
         mtp_crypto::auth::host_final_payload(description, id, client_nonce, server_challenge);
+    let tm = resp
+        .type_map()
+        .ok_or_else(|| js_error("missing negotiated dictionary"))?;
+    mtp_codec::dictionary::verify_selection(resp, tm)
+        .map_err(|error| js_error(error.to_string()))?;
+    let payload = mtp_codec::dictionary::bind_authentication(tm, payload)
+        .map_err(|error| js_error(error.to_string()))?;
     mtp_crypto::verify_ed25519(&host_pk.sig_cl_public_key, &payload, &host_sig)
         .map_err(|_| js_error("host signature invalid"))?;
     if !host_pq_sig.is_empty() {
@@ -119,14 +132,23 @@ pub(crate) fn signed_challenge_response_bytes(
 ) -> Result<Vec<u8>, JsValue> {
     use mtp_crypto::SignatureScheme;
 
+    let proof_payload =
+        mtp_codec::dictionary::bind_authentication(type_map, proof_payload.to_vec())
+            .map_err(|error| js_error(error.to_string()))?;
+
     let signer = mtp_crypto::Ed25519Signer::new(&keyring.sig_cl_secret_key)
         .map_err(|e| js_error(format!("signer creation failed: {}", e)))?;
     let signature = signer
-        .sign(proof_payload)
+        .sign(&proof_payload)
         .map_err(|e| js_error(format!("signature failed: {}", e)))?;
 
     let mut proof =
         CommunicationValue::new_with_type_map(CommunicationType::ChallengeResponse, type_map)
+            .add_typed_default(
+                DataType::DictionaryFingerprint,
+                mtp_codec::dictionary::value(type_map)
+                    .map_err(|error| js_error(error.to_string()))?,
+            )
             .add_typed_default(
                 DataType::ClientNonce,
                 DataValue::UnsignedNumber(client_nonce),
@@ -138,7 +160,7 @@ pub(crate) fn signed_challenge_response_bytes(
             mtp_crypto::MlDsaSigner::new(&keyring.sig_pq_secret_key, &keyring.sig_pq_public_key)
                 .map_err(|e| js_error(format!("PQ signer creation failed: {}", e)))?;
         let pq_signature = pq_signer
-            .sign(proof_payload)
+            .sign(&proof_payload)
             .map_err(|e| js_error(format!("PQ signature failed: {}", e)))?;
         proof = proof.add_typed_default(DataType::PqSignature, DataValue::Bytes(pq_signature));
     }

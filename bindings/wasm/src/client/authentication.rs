@@ -48,6 +48,9 @@ async fn select_codec(
     .map_err(|error| js_error(format!("parse version selection: {error}")))?;
 
     if Some(selection.get_type()) == CommunicationType::ErrorBadVersion.try_to_id(bootstrap) {
+        if selection.get_data(DataType::Error) == Some(&DataValue::Str("dictionary_mismatch".into())) {
+            return Err(js_error("incompatible type-map dictionary"));
+        }
         return Err(js_error(
             "host does not support an offered protocol version",
         ));
@@ -75,6 +78,8 @@ async fn select_codec(
     }
     let codec = VersionedCodec::for_version(Registry::builtin(), version.clone())
         .ok_or_else(|| js_error("host returned an unsupported negotiated protocol version"))?;
+    mtp_codec::dictionary::verify_selection(&selection, codec.type_map())
+        .map_err(|error| js_error(error.to_string()))?;
     transport.set_type_map(codec.type_map());
     Ok((version, codec))
 }
@@ -116,6 +121,7 @@ impl WasmClient {
                 &bootstrap,
             )
             .add_typed_default(DataType::Version, version_offer(&offered))
+            .add_typed_default(DataType::DictionaryFingerprint, mtp_codec::dictionary::offer(&offered).map_err(|error| js_error(error.to_string()))?)
             .add_typed_default(
                 DataType::Id,
                 DataValue::UnsignedNumber(config.client_id as u128),
@@ -138,6 +144,7 @@ impl WasmClient {
                 transport.decode_limits(),
             )
             .map_err(|e| js_error(format!("parse handshake outcome: {e}")))?;
+            mtp_codec::dictionary::verify_selection(&outcome, codec.type_map()).map_err(|error| js_error(error.to_string()))?;
             if Some(outcome.get_type())
                 == CommunicationType::ErrorBadVersion.try_to_id(codec.type_map())
             {
@@ -295,6 +302,11 @@ impl WasmClient {
                 &bootstrap,
             )
             .add_typed_default(DataType::Version, version_offer(&offered))
+            .add_typed_default(
+                DataType::DictionaryFingerprint,
+                mtp_codec::dictionary::offer(&offered)
+                    .map_err(|error| js_error(error.to_string()))?,
+            )
             .add_typed_default(DataType::Id, DataValue::UnsignedNumber(client_id as u128))
             // Mark this as an authentication-capable opening so a
             // non-crypto host can reject it explicitly.
@@ -496,6 +508,11 @@ impl WasmClient {
             let mut hello =
                 CommunicationValue::new_with_type_map(CommunicationType::Register, &bootstrap)
                     .add_typed_default(DataType::Version, version_offer(&offered))
+                    .add_typed_default(
+                        DataType::DictionaryFingerprint,
+                        mtp_codec::dictionary::offer(&offered)
+                            .map_err(|error| js_error(error.to_string()))?,
+                    )
                     .add_typed_default(DataType::PublicKeys, DataValue::Bytes(pk_bytes.clone()));
             if let Some(desc) = &config.description {
                 hello =

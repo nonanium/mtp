@@ -139,6 +139,7 @@
               cargo-machete
               wasm-pack
               pnpm
+              nodejs
               pkg-config
               openssl
               glib
