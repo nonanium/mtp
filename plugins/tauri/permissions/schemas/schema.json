@@ -427,6 +427,18 @@
           "markdownDescription": "Denies the mtp_detach command without any pre-configured scope."
         },
         {
+          "description": "Enables the mtp_dictionary_identity command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mtp-dictionary-identity",
+          "markdownDescription": "Enables the mtp_dictionary_identity command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mtp_dictionary_identity command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mtp-dictionary-identity",
+          "markdownDescription": "Denies the mtp_dictionary_identity command without any pre-configured scope."
+        },
+        {
           "description": "Enables the mtp_export_credentials command without any pre-configured scope.",
           "type": "string",
           "const": "allow-mtp-export-credentials",
@@ -685,10 +697,10 @@
           "markdownDescription": "Enable or disable the Android background service without erasing credentials."
         },
         {
-          "description": "Attach to native connections and exchange live frames.\n#### This default permission set includes:\n\n- `allow-mtp-status`\n- `allow-mtp-initialize`\n- `allow-mtp-connect`\n- `allow-mtp-clear-credentials`\n- `allow-mtp-attach`\n- `allow-mtp-detach`\n- `allow-mtp-request`\n- `allow-mtp-send`\n- `allow-mtp-build-protected`\n- `allow-mtp-open-protected`\n- `allow-mtp-protected-claimed-signer`\n- `allow-mtp-build-relay`\n- `allow-mtp-relay-claimed-signer`\n- `allow-mtp-open-relay-metadata`\n- `allow-mtp-open-relay-content`\n- `allow-mtp-release-relay`\n- `allow-mtp-create-pipe`\n- `allow-mtp-pipe-wait`\n- `allow-mtp-accept-pipe`\n- `allow-mtp-deny-pipe`\n- `allow-mtp-pipe-write`\n- `allow-mtp-pipe-read`\n- `allow-mtp-pipe-close`\n- `allow-mtp-pipe-abort`\n- `allow-mtp-pipe-cancel`",
+          "description": "Attach to native connections and exchange live frames.\n#### This default permission set includes:\n\n- `allow-mtp-status`\n- `allow-mtp-dictionary-identity`\n- `allow-mtp-initialize`\n- `allow-mtp-connect`\n- `allow-mtp-clear-credentials`\n- `allow-mtp-attach`\n- `allow-mtp-detach`\n- `allow-mtp-request`\n- `allow-mtp-send`\n- `allow-mtp-build-protected`\n- `allow-mtp-open-protected`\n- `allow-mtp-protected-claimed-signer`\n- `allow-mtp-build-relay`\n- `allow-mtp-relay-claimed-signer`\n- `allow-mtp-open-relay-metadata`\n- `allow-mtp-open-relay-content`\n- `allow-mtp-release-relay`\n- `allow-mtp-create-pipe`\n- `allow-mtp-pipe-wait`\n- `allow-mtp-accept-pipe`\n- `allow-mtp-deny-pipe`\n- `allow-mtp-pipe-write`\n- `allow-mtp-pipe-read`\n- `allow-mtp-pipe-close`\n- `allow-mtp-pipe-abort`\n- `allow-mtp-pipe-cancel`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Attach to native connections and exchange live frames.\n#### This default permission set includes:\n\n- `allow-mtp-status`\n- `allow-mtp-initialize`\n- `allow-mtp-connect`\n- `allow-mtp-clear-credentials`\n- `allow-mtp-attach`\n- `allow-mtp-detach`\n- `allow-mtp-request`\n- `allow-mtp-send`\n- `allow-mtp-build-protected`\n- `allow-mtp-open-protected`\n- `allow-mtp-protected-claimed-signer`\n- `allow-mtp-build-relay`\n- `allow-mtp-relay-claimed-signer`\n- `allow-mtp-open-relay-metadata`\n- `allow-mtp-open-relay-content`\n- `allow-mtp-release-relay`\n- `allow-mtp-create-pipe`\n- `allow-mtp-pipe-wait`\n- `allow-mtp-accept-pipe`\n- `allow-mtp-deny-pipe`\n- `allow-mtp-pipe-write`\n- `allow-mtp-pipe-read`\n- `allow-mtp-pipe-close`\n- `allow-mtp-pipe-abort`\n- `allow-mtp-pipe-cancel`"
+          "markdownDescription": "Attach to native connections and exchange live frames.\n#### This default permission set includes:\n\n- `allow-mtp-status`\n- `allow-mtp-dictionary-identity`\n- `allow-mtp-initialize`\n- `allow-mtp-connect`\n- `allow-mtp-clear-credentials`\n- `allow-mtp-attach`\n- `allow-mtp-detach`\n- `allow-mtp-request`\n- `allow-mtp-send`\n- `allow-mtp-build-protected`\n- `allow-mtp-open-protected`\n- `allow-mtp-protected-claimed-signer`\n- `allow-mtp-build-relay`\n- `allow-mtp-relay-claimed-signer`\n- `allow-mtp-open-relay-metadata`\n- `allow-mtp-open-relay-content`\n- `allow-mtp-release-relay`\n- `allow-mtp-create-pipe`\n- `allow-mtp-pipe-wait`\n- `allow-mtp-accept-pipe`\n- `allow-mtp-deny-pipe`\n- `allow-mtp-pipe-write`\n- `allow-mtp-pipe-read`\n- `allow-mtp-pipe-close`\n- `allow-mtp-pipe-abort`\n- `allow-mtp-pipe-cancel`"
         },
         {
           "description": "Negotiate native encrypted pipe sessions and exchange authenticated records.",

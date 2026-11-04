@@ -60,7 +60,7 @@ import {
 } from "./credentials.js";
 import type { InternalCredentials } from "./credentials.js";
 import { withTimeout } from "./timeout.js";
-import { androidTauri, NativeTransport, nativeOptions } from "./native.js";
+import { tauriRuntime, NativeTransport, nativeOptions } from "./native.js";
 import { communicationError } from "./communication-error.js";
 
 async function normalizeCommunicationError<T>(operation: Promise<T>): Promise<T> {
@@ -1095,7 +1095,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
       securityProfile: resolveSecurityProfile(options),
     };
 
-    const runtime = androidTauri();
+    const runtime = tauriRuntime();
     if (runtime) {
       if (options.nativeFresh != null && typeof options.nativeFresh !== "boolean") throw new TypeError("nativeFresh must be a boolean");
       if (options.nativeName != null && (typeof options.nativeName !== "string" || !options.nativeName.trim())) throw new TypeError("nativeName must be a non-empty string");
@@ -1183,7 +1183,7 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
   }
 
   static isSupported(): boolean {
-    return !!androidTauri() || WasmClient.is_supported();
+    return !!tauriRuntime() || WasmClient.is_supported();
   }
 
   static async init(

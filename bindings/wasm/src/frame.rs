@@ -63,7 +63,29 @@ export interface ParsedFrame {
   data: ParsedDataValue;
   raw: Uint8Array;
 }
+
+export interface CompiledDictionaryIdentity {
+  version: string;
+  fingerprint: string;
+}
 "#;
+
+/// Identity of the dictionary used by the standalone frame encoder/decoder.
+#[wasm_bindgen(unchecked_return_type = "CompiledDictionaryIdentity")]
+pub fn compiled_dictionary_identity() -> Result<JsValue, JsValue> {
+    let map = TypeMap::latest();
+    let fingerprint = map
+        .fingerprint_hex()
+        .ok_or_else(|| js_error("compiled dictionary has no fingerprint"))?;
+    let result = js_sys::Object::new();
+    set_prop(
+        &result,
+        "version",
+        &JsValue::from_str(&map.version.to_string()),
+    )?;
+    set_prop(&result, "fingerprint", &JsValue::from_str(&fingerprint))?;
+    Ok(result.into())
+}
 
 const MAX_SAFE_INT: f64 = 9007199254740991.0; // 2^53 - 1
 

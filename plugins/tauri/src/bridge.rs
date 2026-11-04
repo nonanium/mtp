@@ -631,6 +631,24 @@ async fn mtp_status(name: String, state: State<'_, Bridge>) -> Result<bool, crat
 }
 
 #[tauri::command]
+async fn mtp_dictionary_identity(
+    name: String,
+    state: State<'_, Bridge>,
+) -> Result<serde_json::Value, crate::BridgeError> {
+    let session = state
+        .manager
+        .registry
+        .attach(&name)
+        .await
+        .ok_or("connection is not initialized")?;
+    let dictionary = session.connection().codec.type_map();
+    let fingerprint = dictionary
+        .fingerprint_hex()
+        .ok_or("connection dictionary has no fingerprint")?;
+    Ok(serde_json::json!({ "version": dictionary.version.to_string(), "fingerprint": fingerprint }))
+}
+
+#[tauri::command]
 async fn mtp_stop(name: String, state: State<'_, Bridge>) -> Result<(), crate::BridgeError> {
     #[cfg(feature = "mobile")]
     if let Some(owner) = crate::mobile::lifecycle() {
@@ -790,6 +808,7 @@ pub fn init<R: Runtime>(manager: Arc<Manager>) -> TauriPlugin<R> {
         })
         .invoke_handler(tauri::generate_handler![
             mtp_status,
+            mtp_dictionary_identity,
             mtp_set_background_enabled,
             mtp_create_encrypted_pipe,
             mtp_accept_encrypted_pipe,

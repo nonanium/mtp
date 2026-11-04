@@ -2,6 +2,7 @@ fn main() {
     #[cfg(feature = "tauri")]
     tauri_plugin::Builder::new(&[
         "mtp_status",
+        "mtp_dictionary_identity",
         "mtp_set_background_enabled",
         "mtp_create_encrypted_pipe",
         "mtp_accept_encrypted_pipe",
