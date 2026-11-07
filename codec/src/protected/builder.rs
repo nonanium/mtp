@@ -97,8 +97,13 @@ impl<'a> ProtectedMessageBuilder<'a> {
         let message_id_id = protected_field_id(DataType::MessageId, &type_map)?;
         let created_at_id = protected_field_id(DataType::CreatedAt, &type_map)?;
         let content_id = protected_field_id(DataType::Content, &type_map)?;
+        let dictionary_id = protected_field_id(DataType::DictionaryFingerprint, &type_map)?;
+        let dictionary = type_map
+            .fingerprint()
+            .ok_or(ProtectedError::InvalidLayout("unknown dictionary"))?;
 
         let envelope = DataValue::Container(vec![
+            (dictionary_id, DataValue::Bytes(dictionary.to_vec())),
             (
                 protected_version_id,
                 DataValue::UnsignedNumber(CURRENT_PROTECTED_VERSION as u128),

@@ -96,8 +96,13 @@ impl<'a> SealedRelayBuilder<'a> {
         let created_at_id = relay_field(DataType::CreatedAt, &type_map)?;
         let metadata_id = relay_field(DataType::Metadata, &type_map)?;
         let relay_version_id = relay_field(DataType::RelayVersion, &type_map)?;
+        let dictionary_id = relay_field(DataType::DictionaryFingerprint, &type_map)?;
+        let dictionary = type_map
+            .fingerprint()
+            .ok_or(RelayError::InvalidLayout("unknown dictionary"))?;
 
         let content = DataValue::Container(vec![
+            (dictionary_id, DataValue::Bytes(dictionary.to_vec())),
             (
                 message_type_id,
                 DataValue::Str(self.message_type.name().to_owned()),
@@ -116,6 +121,7 @@ impl<'a> SealedRelayBuilder<'a> {
             self.encode_limits,
         )?;
         let mut metadata_fields = vec![
+            (dictionary_id, DataValue::Bytes(dictionary.to_vec())),
             (
                 relay_version_id,
                 DataValue::UnsignedNumber(CURRENT_RELAY_VERSION as u128),

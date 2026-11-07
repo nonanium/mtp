@@ -88,6 +88,15 @@ impl TypeMap {
     pub fn new(version: Version) -> Self {
         Self { version }
     }
+
+    pub fn fingerprint_hex(&self) -> Option<String> {
+        Some(
+            self.fingerprint()?
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        )
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/types.rs"));

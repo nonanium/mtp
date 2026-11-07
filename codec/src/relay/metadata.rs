@@ -357,7 +357,10 @@ where
         return Err(RelayError::ResourceLimit("decryption key history"));
     }
 
-    let type_map = frame.type_map().cloned().unwrap_or_else(TypeMap::latest);
+    let type_map = frame
+        .type_map()
+        .cloned()
+        .ok_or(RelayError::InvalidLayout("missing negotiated dictionary"))?;
     let decrypted = frame.payload().decrypt_with_keyrings_and_limits(
         keyrings,
         MtpProtectionPurpose::RelayMetadataEncryption.into(),
@@ -394,10 +397,18 @@ where
         .container_entries()
         .ok_or(RelayError::InvalidLayout("metadata is not a container"))?;
     let relay_version = relay_version(metadata, &type_map)?;
-    let parsed = match relay_version {
-        1 => parse_relay_v1(metadata, &type_map, &options.protected_limits)?,
-        other => return Err(RelayError::UnsupportedRelayVersion(other)),
-    };
+    if relay_version != CURRENT_RELAY_VERSION {
+        return Err(RelayError::UnsupportedRelayVersion(relay_version));
+    }
+    let expected = type_map
+        .fingerprint()
+        .ok_or(RelayError::InvalidLayout("unknown dictionary"))?;
+    if field(metadata, DataType::DictionaryFingerprint, &type_map)?.as_bytes_slice()
+        != Some(expected.as_slice())
+    {
+        return Err(RelayError::InvalidLayout("dictionary fingerprint mismatch"));
+    }
+    let parsed = parse_relay_v1(metadata, &type_map, &options.protected_limits)?;
     let result = VerifiedRelayMetadata {
         relay_version,
         signer_id: signed.signer_id,

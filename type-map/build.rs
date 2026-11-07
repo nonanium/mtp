@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -368,6 +369,7 @@ fn generate(config: &Config, multi_version: bool) -> String {
     };
 
     generate_protocol_version(&mut out, config);
+    generate_dictionary_identity(&mut out, config);
     generate_comm_type_enum(&mut out, &all_comm_names);
     generate_data_type_enum(&mut out, &all_data_names);
     generate_latest_method(&mut out, config);
@@ -397,6 +399,88 @@ fn generate_protocol_version(out: &mut String, config: &Config) {
     )
     .unwrap();
     writeln!(out).unwrap();
+}
+
+// V1 dictionary bytes: domain, length-prefixed version, then communication and
+// data sections. Each section has a u32 count followed by name-sorted entries
+// containing a u32 UTF-8 byte length, name bytes and a u16 ID. Integers are BE.
+// Include every reserved entry even if an optional API is disabled in this build.
+fn dictionary_bytes(version: &str, config: &TypeMapConfig) -> Vec<u8> {
+    fn string(out: &mut Vec<u8>, value: &str) {
+        out.extend_from_slice(
+            &u32::try_from(value.len())
+                .expect("dictionary string length")
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(value.as_bytes());
+    }
+    let mut out = b"mtp-type-dictionary\0v1\0".to_vec();
+    string(&mut out, version);
+    for (tag, reserved, application) in [
+        (1, all_reserved_comm_types(), &config.communication_types),
+        (2, all_reserved_data_types(), &config.data_types),
+    ] {
+        let mut entries: BTreeMap<&str, u16> = reserved
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.id))
+            .collect();
+        entries.extend(application.iter().map(|(name, id)| (name.as_str(), *id)));
+        out.push(tag);
+        out.extend_from_slice(
+            &u32::try_from(entries.len())
+                .expect("dictionary entry count")
+                .to_be_bytes(),
+        );
+        for (name, id) in entries {
+            string(&mut out, name);
+            out.extend_from_slice(&id.to_be_bytes());
+        }
+    }
+    out
+}
+
+fn generate_dictionary_identity(out: &mut String, config: &Config) {
+    writeln!(out, "impl TypeMap {{").unwrap();
+    writeln!(
+        out,
+        "    /// Frozen V1 dictionary serialization, including reserved IDs."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    pub fn dictionary_bytes(&self) -> Option<&'static [u8]> {{ match self.version {{"
+    )
+    .unwrap();
+    for (version, map) in &config.type_maps {
+        let (major, minor) = parse_protocol_version(version);
+        let bytes = dictionary_bytes(version, map);
+        writeln!(
+            out,
+            "        Version({major}, {minor}) => Some(&{bytes:?}),"
+        )
+        .unwrap();
+    }
+    writeln!(out, "        _ => None,\n    }} }}").unwrap();
+    writeln!(
+        out,
+        "    /// SHA-256 of dictionary_bytes, never a version-only identity."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    pub fn fingerprint(&self) -> Option<[u8; 32]> {{ match self.version {{"
+    )
+    .unwrap();
+    for (version, map) in &config.type_maps {
+        let (major, minor) = parse_protocol_version(version);
+        let digest: [u8; 32] = Sha256::digest(dictionary_bytes(version, map)).into();
+        writeln!(
+            out,
+            "        Version({major}, {minor}) => Some({digest:?}),"
+        )
+        .unwrap();
+    }
+    writeln!(out, "        _ => None,\n    }} }}\n}}").unwrap();
 }
 
 fn generate_latest_method(out: &mut String, config: &Config) {

@@ -182,6 +182,10 @@ fn envelope(
     content: DataValue,
 ) -> DataValue {
     let mut fields = Vec::new();
+    fields.push((
+        protected_field(DataType::DictionaryFingerprint, type_map),
+        DataValue::Bytes(type_map.fingerprint().unwrap().to_vec()),
+    ));
     if let Some(version) = version {
         fields.push((
             protected_field(DataType::ProtectedVersion, type_map),
@@ -355,6 +359,45 @@ fn string_message_id_is_rejected_before_replay_guard() {
         ),
         Err(ProtectedError::InvalidLayout(
             "protected message ID is not unsigned"
+        ))
+    ));
+    assert_eq!(guard.calls, 0);
+}
+
+#[test]
+fn a_valid_signature_under_another_dictionary_is_rejected_before_replay() {
+    let sender = Keyring::generate();
+    let recipient = Keyring::generate();
+    let map = TypeMap::latest();
+    let mut body = envelope(
+        &map,
+        Some(CURRENT_PROTECTED_VERSION as u128),
+        "ProtectedMessage",
+        42,
+        1,
+        123,
+        DataValue::Null,
+    );
+    let id = protected_field(DataType::DictionaryFingerprint, &map);
+    body.container_entries_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|(key, _)| *key == id)
+        .unwrap()
+        .1 = DataValue::Bytes(vec![0; 32]);
+    let frame = encrypted_frame(body, &sender, 7, &recipient, Some(42), None);
+    let mut guard = RecordingReplayGuard::default();
+    assert!(matches!(
+        open_protected_checked(
+            &frame,
+            &recipient,
+            7,
+            &sender.public_key_bundle(),
+            open_options(Some(42)),
+            &mut guard
+        ),
+        Err(ProtectedError::InvalidLayout(
+            "dictionary fingerprint mismatch"
         ))
     ));
     assert_eq!(guard.calls, 0);

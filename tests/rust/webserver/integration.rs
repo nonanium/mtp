@@ -370,7 +370,7 @@ async fn http1_routes_bodies_chunks_and_timeout() {
         "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )
     .await;
-    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 408"));
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 504"));
     server.close().await;
 }
 
@@ -429,7 +429,7 @@ async fn tcp_metrics_report_completion_and_errors() {
         "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )
     .await;
-    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 408"));
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 504"));
     assert_eq!(metrics.requests_started.load(Ordering::SeqCst), 1);
     assert_eq!(metrics.requests_completed.load(Ordering::SeqCst), 1);
     assert_eq!(metrics.errors.load(Ordering::SeqCst), 1);

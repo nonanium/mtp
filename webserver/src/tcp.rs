@@ -167,8 +167,9 @@ async fn read_request(
     let mut chunks = Vec::new();
     let mut size = 0usize;
     while let Some(frame) = body.frame().await {
-        let frame = frame
-            .map_err(|error| WebServerError::Http(format!("request body read failed: {error}")))?;
+        let frame = frame.map_err(|error| {
+            WebServerError::BadRequest(format!("request body read failed: {error}"))
+        })?;
         if let Ok(data) = frame.into_data() {
             size = size.saturating_add(data.len());
             if size > max_body {

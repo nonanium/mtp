@@ -45,7 +45,7 @@
     "prepack": "pnpm run build && node scripts/stage-rust-source.mjs",
     "test:e2e": "tsc && node ../tests/js/e2ee.mjs",
     "test:secrets": "tsc && node --test ../tests/js/encrypted-secret.mjs",
-    "test:wasm-init": "tsc && node --test ../tests/js/wasm-init.mjs",
+    "test:wasm-init": "tsc && node --test ../tests/js/wasm-init.mjs ../tests/js/native-dictionary.mjs",
     "test:types": "tsc -p tsconfig.type-tests.json --noEmit",
     "test:vite": "tsc && node ../tests/js/vite-type-map.mjs",
     "test:boundary": "node --test ../tests/js/package-boundary.mjs",

@@ -169,6 +169,79 @@ function setupSessions(sharedSecret, aliceId = 1n, bobId = 2n) {
   };
 }
 
+await describe("Application file crypto primitives", async () => {
+  await it("requires both detached signatures over the exact application bytes", () => {
+    const keyring = sdk.crypto.generateKeyring();
+    const otherKeyring = sdk.crypto.generateKeyring();
+    try {
+      const bundle = publicBundle(keyring);
+      const message = new TextEncoder().encode(JSON.stringify([
+        "tensamin-file-owner-v1", "file-context", "notes.txt", "text/plain",
+      ]));
+      const signature = sdk.crypto.signDual(keyring, message);
+      assert.equal(signature.length, 64 + 3309);
+      sdk.crypto.verifyDual(bundle, message, signature);
+      sdk.crypto.verifyDual(
+        { value: sdk.bytesToBase64(bundle), encoding: "base64" },
+        message,
+        signature,
+      );
+      sdk.crypto.verifyEd25519(
+        sdk.crypto.publicKeyBundleToKeys(bundle).sigClPublicKey,
+        message,
+        signature.subarray(0, 64),
+      );
+      for (const offset of [0, 64, signature.length - 1]) {
+        const tampered = signature.slice();
+        tampered[offset] ^= 1;
+        assert.throws(() => sdk.crypto.verifyDual(bundle, message, tampered));
+      }
+      const changed = message.slice();
+      changed[0] ^= 1;
+      assert.throws(() => sdk.crypto.verifyDual(bundle, changed, signature));
+      assert.throws(() => sdk.crypto.verifyDual(publicBundle(otherKeyring), message, signature));
+      assert.throws(() => sdk.crypto.verifyDual(bundle, message, signature.subarray(0, 64)));
+      assert.throws(() => sdk.crypto.verifyDual(bundle, message, concat(signature, new Uint8Array(1))));
+      const classicalOnly = ed25519OnlyEncryptionKeyring(keyring);
+      try {
+        assert.throws(() => sdk.crypto.signDual(classicalOnly, message));
+      } finally {
+        classicalOnly.fill(0);
+      }
+    } finally {
+      keyring.fill(0);
+      otherKeyring.fill(0);
+    }
+  });
+
+  await it("binds XChaCha20-Poly1305 records to AAD without changing empty-AAD callers", async () => {
+    const key = globalThis.crypto.getRandomValues(new Uint8Array(32));
+    const plaintext = new Uint8Array(65536).fill(42);
+    const aad = new TextEncoder().encode('["tensamin-file-chunk-v1","authority","1","file","1","0","65536","1"]');
+    try {
+      const ciphertext = await sdk.crypto.encrypt(key, plaintext, aad);
+      assert.equal(ciphertext.length, 24 + 65536 + 16);
+      assert.deepEqual(await sdk.crypto.decrypt(key, ciphertext, aad), plaintext);
+      const second = await sdk.crypto.encrypt(key, plaintext, aad);
+      assert.notDeepEqual(second.subarray(0, 24), ciphertext.subarray(0, 24));
+      const changed = aad.slice();
+      changed[changed.length - 3] ^= 1;
+      await assert.rejects(() => sdk.crypto.decrypt(key, ciphertext, changed));
+      await assert.rejects(() => sdk.crypto.decrypt(key, ciphertext));
+      for (const offset of [0, 24, ciphertext.length - 1]) {
+        const tampered = ciphertext.slice();
+        tampered[offset] ^= 1;
+        await assert.rejects(() => sdk.crypto.decrypt(key, tampered, aad));
+      }
+      const previousFormat = await sdk.crypto.encrypt(key, plaintext);
+      assert.deepEqual(await sdk.crypto.decrypt(key, previousFormat), plaintext);
+      assert.deepEqual(await sdk.crypto.decrypt(key, previousFormat, new Uint8Array(0)), plaintext);
+    } finally {
+      key.fill(0);
+    }
+  });
+});
+
 await describe("E2EE Session Derivation", async () => {
   await it("Both sides derive same shared secret", async () => {
     const sharedSecret = sdk.crypto.sha256(new Uint8Array([1, 2, 3, 4, 5]));
@@ -897,6 +970,101 @@ await describe("Relay recipient key history", async () => {
 });
 
 await describe("Protected send APIs", async () => {
+  await it("snapshots raw request bytes before awaiting persistence", async () => {
+    const client = await sdk.MTPClient.create({ url: "https://example.invalid", pings: false });
+    const frame = sdk.codec.encode("ProtectedMessage", { ExampleType: "raw-command" });
+    const ready = Promise.withResolvers();
+    const permit = Promise.withResolvers();
+    let saved;
+    let sent;
+    client.raw.client.request = async (bytes) => {
+      sent = bytes.slice();
+      return sdk.codec.decode(saved);
+    };
+    const pending = client.request(frame, undefined, {
+      beforeSend: async (bytes) => {
+        saved = bytes.slice();
+        ready.resolve();
+        await permit.promise;
+      },
+    });
+    await ready.promise;
+    assert.equal(sent, undefined);
+    frame.fill(0);
+    permit.resolve();
+    await pending;
+    assert.deepEqual(sent, saved);
+  });
+
+  await it("persists the exact protected command before sending and isolates the persistence copy", async () => {
+    const signerKeyring = sdk.crypto.generateKeyring();
+    const recipientKeyring = sdk.crypto.generateKeyring();
+    const client = await sdk.MTPClient.create({ url: "https://example.invalid", pings: false });
+    const ready = Promise.withResolvers();
+    const permit = Promise.withResolvers();
+    let saved;
+    let sent;
+    client.raw.client.request = async (frame) => {
+      sent = frame.slice();
+      return sdk.codec.decode(frame);
+    };
+    try {
+      const result = client.requestProtected("ProtectedMessage", { ExampleType: "durable-command" }, {
+        receiverId: 22n, identity: { signerId: 11n, keyring: signerKeyring },
+        recipients: [publicBundle(recipientKeyring)], signaturePurpose: 0x40,
+        encryptionPurpose: 0x41, signatureSuite: "dual",
+      }, {
+        beforeSend: async (frame) => {
+          saved = frame.slice();
+          ready.resolve();
+          await permit.promise;
+          frame.fill(0);
+        },
+      });
+      await ready.promise;
+      assert.equal(sent, undefined);
+      permit.resolve();
+      const response = await result;
+      assert.deepEqual(sent, saved);
+      assert.ok(response.id > 0);
+      const opened = await client.openProtected(response, {
+        recipient: { id: 22n, keyring: recipientKeyring },
+        expectedSignerId: 11n, expectedReceiverId: 22n,
+        resolveSignerPublicKeys: () => [publicBundle(signerKeyring)],
+        signaturePurpose: 0x40, encryptionPurpose: 0x41, signaturePolicy: "dual",
+      });
+      assert.equal(opened.data.ExampleType, "durable-command");
+      const retried = await client.requestPrepared(saved);
+      assert.notEqual(retried.id, response.id);
+      assert.deepEqual(retried.data.encoded, response.data.encoded);
+      assert.deepEqual(client.preparedRequestDigest(saved), client.preparedRequestDigest(sent));
+      const repeated = await client.openProtected(retried, {
+        recipient: { id: 22n, keyring: recipientKeyring },
+        expectedSignerId: 11n, expectedReceiverId: 22n,
+        resolveSignerPublicKeys: () => [publicBundle(signerKeyring)],
+        signaturePurpose: 0x40, encryptionPurpose: 0x41, signaturePolicy: "dual",
+        replayGuard: { accept: () => true },
+      });
+      assert.equal(repeated.messageId, opened.messageId);
+      assert.equal(repeated.createdAt, opened.createdAt);
+      const queried = await client.requestRaw("ProtectedMessage", { ExampleType: "receipt-query" }, { receiver: 22n });
+      assert.ok(queried.id > 0);
+      assert.equal(queried.receiver, 22n);
+      assert.equal(queried.data.ExampleType, "receipt-query");
+      await assert.rejects(client.requestPrepared(sdk.codec.encode("Ping", {})), /not encrypted/);
+      sent = undefined;
+      await assert.rejects(client.requestProtected("ProtectedMessage", { ExampleType: "not-durable" }, {
+        receiverId: 22n, identity: { signerId: 11n, keyring: signerKeyring },
+        recipients: [publicBundle(recipientKeyring)], signaturePurpose: 0x40,
+        encryptionPurpose: 0x41, signatureSuite: "dual",
+      }, { beforeSend: () => { throw new Error("persistence refused"); } }), /persistence refused/);
+      assert.equal(sent, undefined);
+    } finally {
+      signerKeyring.fill(0);
+      recipientKeyring.fill(0);
+    }
+  });
+
   function captureSend(client) {
     const frames = [];
     client.raw.client.send = async (frame) => {

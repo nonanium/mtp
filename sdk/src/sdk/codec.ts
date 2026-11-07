@@ -28,6 +28,14 @@ export const crypto: MTPCrypto = {
     bindings.keyring_from_ed25519(secretKey, publicKey),
   verifyEd25519: (publicKey, message, signature) =>
     bindings.ed25519_verify(publicKey, message, signature),
+  signDual: (keyring, message) =>
+    bindings.wasm_sign_dual(normalizeBytes(keyring, "keyring"), message),
+  verifyDual: (publicKeyBundle, message, signature) =>
+    bindings.wasm_verify_dual(
+      normalizeBytes(publicKeyBundle, "publicKeyBundle"),
+      message,
+      signature,
+    ),
   deriveEncryptionKey: (ikm, salt, context) =>
     bindings.wasm_derive_encryption_key(ikm, salt, context),
   hkdfExpand: (ikm, salt, info, len) =>
@@ -38,19 +46,19 @@ export const crypto: MTPCrypto = {
   publicKeyBundleToKeys: (publicKeyBundle) =>
     publicKeyBundleToKeys(publicKeyBundle),
 
-  encrypt: async (key, input) => {
+  encrypt: async (key, input, aad = new Uint8Array(0)) => {
     const cipher = new bindings.WasmChaCha20Poly1305(key);
     try {
-      return cipher.encrypt(input, new Uint8Array(0));
+      return cipher.encrypt(input, aad);
     } finally {
       cipher.free();
     }
   },
 
-  decrypt: async (key, input) => {
+  decrypt: async (key, input, aad = new Uint8Array(0)) => {
     const cipher = new bindings.WasmChaCha20Poly1305(key);
     try {
-      return cipher.decrypt(input, new Uint8Array(0));
+      return cipher.decrypt(input, aad);
     } finally {
       cipher.free();
     }
