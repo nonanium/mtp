@@ -1571,7 +1571,8 @@ export class MTPClient<Registry extends MTPSchemaRegistry = MTPNoSchemas> {
         ? await this.#parseRequestData(typeOrFrame, data)
         : data;
     const { beforeSend, ...frameOptions } = options;
-    const frame = this.#buildFrame(typeOrFrame, parsedData, frameOptions);
+    const built = this.#buildFrame(typeOrFrame, parsedData, frameOptions);
+    const frame = typeOrFrame instanceof Uint8Array ? new Uint8Array(built) : built;
     try {
       const parsed = this.raw.bindings.parse_frame(frame);
       emit(

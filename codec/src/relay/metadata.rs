@@ -408,10 +408,7 @@ where
     {
         return Err(RelayError::InvalidLayout("dictionary fingerprint mismatch"));
     }
-    let parsed = match relay_version {
-        1 => parse_relay_v1(metadata, &type_map, &options.protected_limits)?,
-        other => return Err(RelayError::UnsupportedRelayVersion(other)),
-    };
+    let parsed = parse_relay_v1(metadata, &type_map, &options.protected_limits)?;
     let result = VerifiedRelayMetadata {
         relay_version,
         signer_id: signed.signer_id,

@@ -970,6 +970,32 @@ await describe("Relay recipient key history", async () => {
 });
 
 await describe("Protected send APIs", async () => {
+  await it("snapshots raw request bytes before awaiting persistence", async () => {
+    const client = await sdk.MTPClient.create({ url: "https://example.invalid", pings: false });
+    const frame = sdk.codec.encode("ProtectedMessage", { ExampleType: "raw-command" });
+    const ready = Promise.withResolvers();
+    const permit = Promise.withResolvers();
+    let saved;
+    let sent;
+    client.raw.client.request = async (bytes) => {
+      sent = bytes.slice();
+      return sdk.codec.decode(saved);
+    };
+    const pending = client.request(frame, undefined, {
+      beforeSend: async (bytes) => {
+        saved = bytes.slice();
+        ready.resolve();
+        await permit.promise;
+      },
+    });
+    await ready.promise;
+    assert.equal(sent, undefined);
+    frame.fill(0);
+    permit.resolve();
+    await pending;
+    assert.deepEqual(sent, saved);
+  });
+
   await it("persists the exact protected command before sending and isolates the persistence copy", async () => {
     const signerKeyring = sdk.crypto.generateKeyring();
     const recipientKeyring = sdk.crypto.generateKeyring();
