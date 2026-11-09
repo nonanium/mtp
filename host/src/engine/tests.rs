@@ -69,7 +69,10 @@ async fn dictionary_mismatch_and_missing_fingerprint_fail_before_identity_lookup
         let sent = sender.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert!(sent[0].is_type(CommunicationType::ErrorBadVersion));
-        assert_eq!(sent[0].get_data(DataType::Error), Some(&DataValue::Str("dictionary_mismatch".into())));
+        assert_eq!(
+            sent[0].get_data(DataType::Error),
+            Some(&DataValue::Str("dictionary_mismatch".into()))
+        );
         assert_eq!(
             sent[0].get_data(DataType::Connected),
             Some(&DataValue::BoolFalse)

@@ -48,7 +48,9 @@ async fn select_codec(
     .map_err(|error| js_error(format!("parse version selection: {error}")))?;
 
     if Some(selection.get_type()) == CommunicationType::ErrorBadVersion.try_to_id(bootstrap) {
-        if selection.get_data(DataType::Error) == Some(&DataValue::Str("dictionary_mismatch".into())) {
+        if selection.get_data(DataType::Error)
+            == Some(&DataValue::Str("dictionary_mismatch".into()))
+        {
             return Err(js_error("incompatible type-map dictionary"));
         }
         return Err(js_error(

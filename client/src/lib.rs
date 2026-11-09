@@ -157,8 +157,12 @@ async fn select_codec(
     let selection = receiver.receive().await?;
     let bad_version = mtp_codec::CommunicationType::ErrorBadVersion.try_to_id(bootstrap);
     if Some(selection.get_type()) == bad_version {
-        if selection.get_data(DataType::Error) == Some(&DataValue::Str("dictionary_mismatch".into())) {
-            return Err(CommunicationError::ProtocolViolation("incompatible type-map dictionary".into()));
+        if selection.get_data(DataType::Error)
+            == Some(&DataValue::Str("dictionary_mismatch".into()))
+        {
+            return Err(CommunicationError::ProtocolViolation(
+                "incompatible type-map dictionary".into(),
+            ));
         }
         let host_versions = match selection.get_data(DataType::Version) {
             Some(DataValue::Array(versions)) => versions

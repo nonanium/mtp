@@ -100,7 +100,8 @@ pub fn verify_selection(
     map: &TypeMap,
 ) -> Result<(), CommunicationError> {
     if frame.get_data(DataType::Version).is_some()
-        && unique_field(frame, DataType::Version)? != &DataValue::Str(map.version.to_string()) {
+        && unique_field(frame, DataType::Version)? != &DataValue::Str(map.version.to_string())
+    {
         return Err(incompatible());
     }
     if unique_field(frame, DataType::DictionaryFingerprint)? != &value(map)? {

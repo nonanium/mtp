@@ -280,11 +280,23 @@ impl HandshakeEngine {
         if let Err(error) =
             mtp_codec::dictionary::verify_offer(&first_msg, &client_versions, codec.type_map())
         {
-            let rejection = CommunicationValue::new_with_type_map(CommunicationType::ErrorBadVersion, &bootstrap)
-                .add_typed_default(DataType::Connected, DataValue::BoolFalse)
-                .add_typed_default(DataType::Error, DataValue::Str("dictionary_mismatch".into()))
-                .add_typed_default(DataType::Version, DataValue::Array(vec![DataValue::Str(negotiated.to_string())]))
-                .add_typed_default(DataType::DictionaryFingerprint, mtp_codec::dictionary::value(codec.type_map()).map_err(AcceptError::Send)?);
+            let rejection = CommunicationValue::new_with_type_map(
+                CommunicationType::ErrorBadVersion,
+                &bootstrap,
+            )
+            .add_typed_default(DataType::Connected, DataValue::BoolFalse)
+            .add_typed_default(
+                DataType::Error,
+                DataValue::Str("dictionary_mismatch".into()),
+            )
+            .add_typed_default(
+                DataType::Version,
+                DataValue::Array(vec![DataValue::Str(negotiated.to_string())]),
+            )
+            .add_typed_default(
+                DataType::DictionaryFingerprint,
+                mtp_codec::dictionary::value(codec.type_map()).map_err(AcceptError::Send)?,
+            );
             let _ = sender.send(&rejection).await;
             sender.close();
             return Err(AcceptError::Receive(error));
