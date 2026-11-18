@@ -96,11 +96,24 @@ impl Lifecycle {
                 let mut failures = 0u32;
                 loop {
                     let Some(owner) = owner.upgrade() else { break };
+                    mtp_common::diagnostics::record("connection.attempt", 1);
+                    let auth_duration =
+                        mtp_common::diagnostics::DurationGuard::new("connection.authenticate_us");
                     let result = owner
                         .identities
                         .connect(&name, "auth", &owner.manager.registry)
                         .await;
+                    drop(auth_duration);
+                    if let Err(error) = &result {
+                        mtp_common::diagnostics::connection_failure(
+                            &error.code,
+                            error.phase.as_deref(),
+                        );
+                    }
                     if result.is_ok() {
+                        mtp_common::diagnostics::record("connection.established", 1);
+                        let _session_duration =
+                            mtp_common::diagnostics::DurationGuard::new("connection.session_us");
                         failures = 0;
                         if let Some(session) = owner.manager.registry.attach(&name).await {
                             let mut subscription = session.subscribe(256).await;
@@ -110,6 +123,7 @@ impl Lifecycle {
                                     .background_message(&name, session.clone(), frame)
                                     .await;
                             }
+                            mtp_common::diagnostics::record("connection.subscription_ended", 1);
                             owner
                                 .manager
                                 .registry
@@ -120,6 +134,7 @@ impl Lifecycle {
                     failures = failures.saturating_add(1);
                     let ceiling = (1000u64 << failures.min(6)).min(60_000);
                     let random = uuid::Uuid::new_v4().as_u128() as u64;
+                    mtp_common::diagnostics::record("connection.backoff_ceiling_ms", ceiling);
                     drop(owner);
                     tokio::time::sleep(Duration::from_millis(ceiling / 2 + random % (ceiling / 2)))
                         .await;

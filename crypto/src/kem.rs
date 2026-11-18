@@ -26,6 +26,8 @@ impl HybridKem {
     }
 
     pub fn encapsulate(recipient_pk: &KemPublicKey) -> Result<Encapsulated, CryptoError> {
+        let _diagnostic_duration =
+            mtp_common::diagnostics::DurationGuard::new("crypto.kem_encapsulate_us");
         let ek = mlkem_tls::EncapsKey768::try_from(recipient_pk.as_bytes())
             .map_err(|_| CryptoError::KemEncapsulationFailed)?;
         let (ct, ss) = mlkem_tls::X25519MlKem768::encapsulate(&ek, &mut rand_core::OsRng);
@@ -39,6 +41,8 @@ impl HybridKem {
         recipient_sk: &KemPrivateKey,
         ciphertext: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        let _diagnostic_duration =
+            mtp_common::diagnostics::DurationGuard::new("crypto.kem_decapsulate_us");
         let dk = mlkem_tls::DecapsKey768::try_from(recipient_sk.as_bytes())
             .map_err(|_| CryptoError::KemDecapsulationFailed)?;
         let ct = mlkem_tls::Ciphertext768Hybrid::try_from(ciphertext)

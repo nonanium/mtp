@@ -20,3 +20,5 @@ export type {
   MTPMergeReport,
   MTPMergeResult,
 } from "./codec.js";
+
+export { onUsageDiagnosticsCheckpoint, usageDiagnostics } from "./diagnostics.js";

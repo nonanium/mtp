@@ -1,5 +1,6 @@
 //! Dependency-light types shared by every MTP package.
 
+pub mod diagnostics;
 mod error;
 mod expiring_set;
 mod handshake;

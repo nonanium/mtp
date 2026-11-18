@@ -61,6 +61,11 @@ pub fn encode_frame(
     if bytes.len() as u64 > max_message_size || bytes.len() as u64 >= close_frame_len as u64 {
         return Err(CommunicationError::MessageTooLarge);
     }
+    mtp_common::diagnostics::frame(
+        "encoded",
+        value.get_type_name().unwrap_or("Unknown"),
+        bytes.len(),
+    );
     Ok(bytes)
 }
 

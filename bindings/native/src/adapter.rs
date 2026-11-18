@@ -7,6 +7,12 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 #[derive(Clone)]
 pub struct NativeConnection {
     connection: wtransport::Connection,
+    diagnostics: std::sync::Arc<
+        std::sync::Mutex<(
+            Option<std::time::Instant>,
+            wtransport::quinn::ConnectionStats,
+        )>,
+    >,
 }
 
 pub struct NativeSendStream {
@@ -19,7 +25,71 @@ pub struct NativeRecvStream {
 
 impl NativeConnection {
     pub fn new(connection: wtransport::Connection) -> Self {
-        Self { connection }
+        Self {
+            connection,
+            diagnostics: std::sync::Arc::new(std::sync::Mutex::new((None, Default::default()))),
+        }
+    }
+
+    fn sample_usage(&self, force: bool) {
+        let Ok(mut previous) = self.diagnostics.lock() else {
+            return;
+        };
+        if !force
+            && previous
+                .0
+                .is_some_and(|last| last.elapsed() < std::time::Duration::from_secs(60))
+        {
+            return;
+        }
+        let current = self.connection.quic_connection().stats();
+        let old = &previous.1;
+        for (name, value) in [
+            (
+                "transport.rx_bytes",
+                current.udp_rx.bytes.saturating_sub(old.udp_rx.bytes),
+            ),
+            (
+                "transport.tx_bytes",
+                current.udp_tx.bytes.saturating_sub(old.udp_tx.bytes),
+            ),
+            (
+                "transport.rx_datagrams",
+                current
+                    .udp_rx
+                    .datagrams
+                    .saturating_sub(old.udp_rx.datagrams),
+            ),
+            (
+                "transport.tx_datagrams",
+                current
+                    .udp_tx
+                    .datagrams
+                    .saturating_sub(old.udp_tx.datagrams),
+            ),
+            (
+                "transport.lost_packets",
+                current
+                    .path
+                    .lost_packets
+                    .saturating_sub(old.path.lost_packets),
+            ),
+            (
+                "transport.lost_bytes",
+                current.path.lost_bytes.saturating_sub(old.path.lost_bytes),
+            ),
+            (
+                "transport.congestion_events",
+                current
+                    .path
+                    .congestion_events
+                    .saturating_sub(old.path.congestion_events),
+            ),
+        ] {
+            mtp_common::diagnostics::record(name, value);
+        }
+        mtp_common::diagnostics::record("transport.rtt_us", current.path.rtt.as_micros() as u64);
+        *previous = (Some(std::time::Instant::now()), current);
     }
 
     pub fn inner(&self) -> &wtransport::Connection {
@@ -167,6 +237,7 @@ impl TransportConnection for NativeConnection {
     }
 
     async fn accept_uni(&self) -> Result<Self::RecvStream, CommunicationError> {
+        self.sample_usage(false);
         self.connection
             .accept_uni()
             .await
@@ -182,6 +253,7 @@ impl TransportConnection for NativeConnection {
     }
 
     fn close(&self, code: u32, reason: &[u8]) {
+        self.sample_usage(true);
         self.connection
             .close(wtransport::VarInt::from_u32(code), reason);
     }

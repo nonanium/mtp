@@ -179,6 +179,8 @@ pub(crate) async fn signed_challenge_response(
     client_nonce: u128,
     type_map: &TypeMap,
 ) -> Result<CommunicationValue, CommunicationError> {
+    let _diagnostic_duration =
+        mtp_common::diagnostics::DurationGuard::new("crypto.authentication_proof_us");
     use mtp_crypto::{Ed25519Signer, MlDsaSigner, SignatureScheme};
 
     let signer = Ed25519Signer::new(&keys.sig_cl_secret_key)

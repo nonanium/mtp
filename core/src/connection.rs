@@ -427,6 +427,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                         break;
                     }
                     Err(_) => {
+                        mtp_common::diagnostics::record("transport.accept_timeout", 1);
                         if task_connection.close_reason().is_some() {
                             let _ = task_accept_task_tx
                                 .send(Err(task_connection
@@ -595,6 +596,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                                     class = ?classify_decode_error(&error),
                                     "MTP receive stream rejected by bounded decode"
                                 );
+                                mtp_common::diagnostics::record("decode.rejected", 1);
                                 decode_rejections.record(&error);
                                 let _ = tx
                                     .send(Err(CommunicationError::ParseCommunicationValue))
@@ -611,6 +613,7 @@ impl<C: TransportConnection> GenericReceiver<C> {
                         );
                         let negotiated_type_map = type_map.read().await.clone();
                         message.set_type_map(&negotiated_type_map);
+                        mtp_common::diagnostics::frame("received", message.get_type_name().unwrap_or("Unknown"), frame.len());
 
                         #[cfg(feature = "pipes")]
                         {

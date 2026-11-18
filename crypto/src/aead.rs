@@ -52,6 +52,8 @@ impl XChaCha20Poly1305 {
 #[cfg(feature = "chacha20poly1305")]
 impl AeadEncrypt for XChaCha20Poly1305 {
     fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let _diagnostic_duration =
+            mtp_common::diagnostics::DurationGuard::new("crypto.aead_encrypt_us");
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
         use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -79,6 +81,8 @@ impl AeadEncrypt for XChaCha20Poly1305 {
 #[cfg(feature = "chacha20poly1305")]
 impl AeadDecrypt for XChaCha20Poly1305 {
     fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let _diagnostic_duration =
+            mtp_common::diagnostics::DurationGuard::new("crypto.aead_decrypt_us");
         use chacha20poly1305::XChaCha20Poly1305;
         use chacha20poly1305::XNonce;
         use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -129,6 +133,8 @@ impl Aes256Gcm {
 #[cfg(feature = "aes-gcm")]
 impl AeadEncrypt for Aes256Gcm {
     fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let _diagnostic_duration =
+            mtp_common::diagnostics::DurationGuard::new("crypto.aead_encrypt_us");
         use aes_gcm::Aes256Gcm as AesGcmInner;
         use aes_gcm::Nonce;
         use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -156,6 +162,8 @@ impl AeadEncrypt for Aes256Gcm {
 #[cfg(feature = "aes-gcm")]
 impl AeadDecrypt for Aes256Gcm {
     fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let _diagnostic_duration =
+            mtp_common::diagnostics::DurationGuard::new("crypto.aead_decrypt_us");
         use aes_gcm::Aes256Gcm as AesGcmInner;
         use aes_gcm::Nonce;
         use aes_gcm::aead::{Aead, KeyInit, Payload};

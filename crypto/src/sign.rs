@@ -83,6 +83,8 @@ impl SignatureScheme for Ed25519Signer {
     }
 
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let _diagnostic_duration =
+            mtp_common::diagnostics::DurationGuard::new("crypto.sign_ed25519_us");
         use ed25519_dalek::Signer;
         let signature = self.secret.sign(msg).to_bytes().to_vec();
         Ok(signature)
@@ -106,6 +108,8 @@ pub fn verify_ed25519(
     msg: &[u8],
     signature: &[u8],
 ) -> Result<(), CryptoError> {
+    let _diagnostic_duration =
+        mtp_common::diagnostics::DurationGuard::new("crypto.verify_ed25519_us");
     use ed25519_dalek::Verifier;
 
     let pub_bytes: [u8; 32] = public_key
@@ -136,6 +140,8 @@ impl MlDsaSigner {
         secret_key: &SignaturePqPrivateKey,
         public_key: &SignaturePqPublicKey,
     ) -> Result<Self, CryptoError> {
+        let _diagnostic_duration =
+            mtp_common::diagnostics::DurationGuard::new("crypto.signing_key_us");
         let seed_bytes: [u8; 32] = secret_key
             .as_bytes()
             .try_into()
@@ -181,6 +187,8 @@ impl SignatureScheme for MlDsaSigner {
     }
 
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let _diagnostic_duration =
+            mtp_common::diagnostics::DurationGuard::new("crypto.sign_mldsa_us");
         use ml_dsa::Signer;
         let signature = self
             .secret
@@ -205,6 +213,8 @@ pub fn verify_ml_dsa(
     msg: &[u8],
     signature: &[u8],
 ) -> Result<(), CryptoError> {
+    let _diagnostic_duration =
+        mtp_common::diagnostics::DurationGuard::new("crypto.verify_ml_dsa_us");
     use ml_dsa::Verifier;
 
     let encoded_pk =
@@ -232,6 +242,7 @@ pub fn sign_dual(
     mldsa_sk: &ml_dsa::SigningKey<ml_dsa::MlDsa65>,
     message: &[u8],
 ) -> Result<DualSignature, CryptoError> {
+    let _diagnostic_duration = mtp_common::diagnostics::DurationGuard::new("crypto.sign_dual_us");
     let ed25519 = {
         use ed25519_dalek::Signer;
         ed25519_sk.sign(message).to_bytes().to_vec()
@@ -294,6 +305,8 @@ impl SignatureScheme for DualSigner {
     }
 
     fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let _diagnostic_duration =
+            mtp_common::diagnostics::DurationGuard::new("crypto.sign_combined_us");
         let dual = sign_dual(self.ed25519.signing_key(), self.mldsa.signing_key(), msg)?;
         let mut signature = Vec::with_capacity(
             SigAlgorithm::length(SigAlgorithm::DUAL).expect("known signature algorithm length"),

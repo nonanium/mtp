@@ -78,6 +78,7 @@ impl Session {
                 let frame = match connection.receive().await {
                     Ok(frame) => frame,
                     Err(error) => {
+                        mtp_common::diagnostics::error("connection.receive_ended", &error);
                         tracing::warn!(%error, "Native MTP session receive ended");
                         break;
                     }
@@ -87,11 +88,19 @@ impl Session {
                 };
                 // Slow subscribers are detached rather than accumulating an
                 // unbounded event history or blocking background consumers.
-                session
-                    .subscribers
-                    .lock()
-                    .await
-                    .retain(|_, sender| sender.try_send(frame.clone()).is_ok());
+                session.subscribers.lock().await.retain(|_, sender| {
+                    match sender.try_send(frame.clone()) {
+                        Ok(()) => true,
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            mtp_common::diagnostics::record("queue.subscriber_full", 1);
+                            false
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            mtp_common::diagnostics::record("queue.subscriber_closed", 1);
+                            false
+                        }
+                    }
+                });
             }
             if let Some(session) = weak.upgrade() {
                 session.closed.store(true, Ordering::Release);
