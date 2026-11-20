@@ -431,3 +431,99 @@ async fn opening_pipe_does_not_block_parallel_single_stream_send()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn slow_frame_progress_does_not_exhaust_the_write_timeout()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (conn_a, conn_b) = mock_connected_pair().await;
+    let policy = Arc::new(Policy {
+        send_mode: SendMode::SingleStreamPerMessage,
+        write_timeout: std::time::Duration::from_millis(100),
+        ..Policy::default()
+    });
+    let sender = GenericSender::new(conn_a, policy);
+    let message = CommunicationValue::new(mtp_codec::CommunicationType::Ping).add_typed_default(
+        mtp_codec::DataType::Description,
+        mtp_codec::DataValue::Str("x".repeat(1024 * 1024)),
+    );
+    let receive = tokio::spawn(async move {
+        let mut stream = conn_b.accept_uni().await.unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 65536];
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let length = AsyncReadExt::read(&mut stream, &mut buffer).await.unwrap();
+            if length == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..length]);
+        }
+        bytes
+    });
+    let started = std::time::Instant::now();
+    sender.send(&message).await?;
+    assert!(started.elapsed() > std::time::Duration::from_millis(100));
+    assert!(receive.await?.len() > 1024 * 1024);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stalled_frame_still_reports_unknown_delivery() -> Result<(), Box<dyn std::error::Error>> {
+    let (conn_a, conn_b) = mock_connected_pair().await;
+    let policy = Arc::new(Policy {
+        send_mode: SendMode::SingleStreamPerMessage,
+        write_timeout: std::time::Duration::from_millis(50),
+        ..Policy::default()
+    });
+    let sender = GenericSender::new(conn_a, policy);
+    let message = CommunicationValue::new(mtp_codec::CommunicationType::Ping).add_typed_default(
+        mtp_codec::DataType::Description,
+        mtp_codec::DataValue::Str("x".repeat(1024 * 1024)),
+    );
+    let send = tokio::spawn(async move { sender.send(&message).await });
+    let _unread = conn_b.accept_uni().await?;
+    assert!(matches!(
+        send.await?,
+        Err(CommunicationError::DeliveryUnknownAt {
+            phase: TransportPhase::WriteFrame
+        })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn trickling_reads_cannot_extend_a_chunk_deadline() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (conn_a, conn_b) = mock_connected_pair().await;
+    let policy = Arc::new(Policy {
+        send_mode: SendMode::SingleStreamPerMessage,
+        write_timeout: std::time::Duration::from_millis(100),
+        ..Policy::default()
+    });
+    let sender = GenericSender::new(conn_a, policy);
+    let message = CommunicationValue::new(mtp_codec::CommunicationType::Ping).add_typed_default(
+        mtp_codec::DataType::Description,
+        mtp_codec::DataValue::Str("x".repeat(1024 * 1024)),
+    );
+    tokio::spawn(async move {
+        let mut stream = conn_b.accept_uni().await.unwrap();
+        let mut byte = [0; 1];
+        while AsyncReadExt::read(&mut stream, &mut byte)
+            .await
+            .unwrap_or(0)
+            > 0
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), sender.send(&message))
+        .await
+        .expect("trickling reads kept the send alive");
+    assert!(matches!(
+        result,
+        Err(CommunicationError::DeliveryUnknownAt {
+            phase: TransportPhase::WriteFrame
+        })
+    ));
+    Ok(())
+}

@@ -164,14 +164,7 @@ impl<C: TransportConnection> GenericSender<C> {
         match self.policy.send_mode {
             crate::SendMode::SingleStreamPerMessage => {
                 let mut stream = self.open().await?;
-                timeout(self.policy.write_timeout, stream.write_all(&frame))
-                    .await
-                    .map_err(|_| CommunicationError::DeliveryUnknownAt {
-                        phase: TransportPhase::WriteFrame,
-                    })?
-                    .map_err(|_| CommunicationError::DeliveryUnknownAt {
-                        phase: TransportPhase::WriteFrame,
-                    })?;
+                self.write_frame(&mut stream, &frame).await?;
                 match timeout(self.policy.write_timeout, stream.finish()).await {
                     Ok(Ok(())) => Ok(()),
                     Ok(Err(_)) | Err(_) => Err(CommunicationError::DeliveryUnknownAt {
@@ -205,14 +198,7 @@ impl<C: TransportConnection> GenericSender<C> {
                 let mut stream = stream.ok_or(CommunicationError::ConnectionLost)?;
                 // A failed or timed-out write may have emitted a prefix or part of a
                 // frame. Drop this stream and report delivery as ambiguous; do not retry.
-                timeout(self.policy.write_timeout, stream.write_all(&frame))
-                    .await
-                    .map_err(|_| CommunicationError::DeliveryUnknownAt {
-                        phase: TransportPhase::WriteFrame,
-                    })?
-                    .map_err(|_| CommunicationError::DeliveryUnknownAt {
-                        phase: TransportPhase::WriteFrame,
-                    })?;
+                self.write_frame(&mut stream, &frame).await?;
 
                 let mut slot = self.persistent.lock().await;
                 *slot = Some(stream);
@@ -263,16 +249,36 @@ impl<C: TransportConnection> GenericSender<C> {
         )?;
         let mut stream = self.open().await?;
 
-        timeout(self.policy.write_timeout, stream.write_all(&frame))
-            .await
-            .map_err(|_| CommunicationError::DeliveryUnknownAt {
-                phase: TransportPhase::WriteFrame,
-            })?
-            .map_err(|_| CommunicationError::DeliveryUnknownAt {
-                phase: TransportPhase::WriteFrame,
-            })?;
+        self.write_frame(&mut stream, &frame).await?;
 
         Ok(PipeWriter { stream })
+    }
+
+    async fn write_frame(
+        &self,
+        stream: &mut C::SendStream,
+        mut frame: &[u8],
+    ) -> Result<(), CommunicationError> {
+        // Each 64 KiB chunk must finish within the timeout, so slow frames succeed while a
+        // trickling peer cannot extend the deadline one byte at a time.
+        while !frame.is_empty() {
+            let length = frame.len().min(64 * 1024);
+            let written = timeout(
+                self.policy.write_timeout,
+                ::tokio::io::AsyncWriteExt::write_all(stream, &frame[..length]),
+            )
+            .await;
+            match written {
+                Ok(Ok(())) => frame = &frame[length..],
+                _ => {
+                    let _ = stream.reset(self.policy.application_close_code);
+                    return Err(CommunicationError::DeliveryUnknownAt {
+                        phase: TransportPhase::WriteFrame,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn close(&self) {
